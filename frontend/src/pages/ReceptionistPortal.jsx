@@ -2173,6 +2173,13 @@ function printIpdAdmitSlip({
 }) {
   const w = window.open('', '_blank')
   if (!w) return
+  const slipProfile = getPaymentSlipProfile()
+  const hospitalName = slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name
+  const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
+  const pinCode = slipProfile.pin_code || DEFAULT_PAYMENT_SLIP_PROFILE.pin_code
+  const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
+  const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
+  const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
   const now = format(new Date(), 'd/M/yyyy HH:mm:ss')
   const admitDate = admissionDate ? format(new Date(admissionDate), 'd/M/yyyy') : format(new Date(), 'd/M/yyyy')
   const bedPriceNum = Number(String(bedPrice || '').replace(/,/g, ''))
@@ -2228,14 +2235,14 @@ function printIpdAdmitSlip({
     <div class="slip">
       <div class="top">
         <div>
-          <div class="hosp-name">Vardraan Hospital</div>
+          <div class="hosp-name">${safe(hospitalName)}</div>
           <div class="hosp-tag">Healthcare &amp; Diagnostics</div>
         </div>
         <div class="address">
-          <strong>Jind, Haryana</strong><br/>
-          Pincode: 126102<br/>
-          Phone: +91-XXXXXXXXXX<br/>
-          Email: info@vardraanhospital.com
+          <strong>${safe(address)}</strong><br/>
+          Pincode: ${safe(pinCode)}<br/>
+          Phone: ${safe(phone)}<br/>
+          Email: ${safe(email)}${website ? `<br/>Website: ${safe(website)}` : ''}
         </div>
       </div>
 
@@ -4325,6 +4332,13 @@ function RegisterPatientSection() {
 
 function PrintDischargeSummary({ rec, ledger, onClose }) {
   const printRef = useRef(null)
+  const slipProfile = getPaymentSlipProfile()
+  const hospitalName = slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name
+  const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
+  const pinCode = slipProfile.pin_code || DEFAULT_PAYMENT_SLIP_PROFILE.pin_code
+  const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
+  const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
+  const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
   
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -4378,10 +4392,15 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
       <div ref={printRef} className="w-[210mm] min-h-[297mm] bg-white text-black p-[12mm] font-sans mx-auto shadow-2xl print:shadow-none text-sm p-summary-body relative">
         <div className="hosp-header">
           <div className="hosp-brand">
-            <h2>VARDRAAN HOSPITAL</h2>
+            <h2>{hospitalName}</h2>
             <p>Advanced Clinical Care & Diagnostics</p>
           </div>
           <div className="doc-meta">
+            <p>{address}</p>
+            <p>PIN: {pinCode}</p>
+            <p>Phone: {phone}</p>
+            <p>Email: {email}</p>
+            {website ? <p>Website: {website}</p> : null}
             <p><strong>REPORT ID:</strong> DIS-{rec.id.slice(0, 8).toUpperCase()}</p>
             <p><strong>DATE:</strong> {format(new Date(rec.created_at || Date.now()), 'd/M/yyyy (HH:mm)')}</p>
           </div>
@@ -4445,7 +4464,7 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
         
         <div className="footer-note">
           This is an electronically generated clinical document and does not require a physical signature.<br/>
-          Vardraan Hospital · 123 Healthcare Ave, New Delhi
+          {hospitalName} · {address}
         </div>
       </div>
       
@@ -8155,6 +8174,13 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
 function PrintIpdLedger({ admission, ledger, onClose }) {
   const printRef = useRef(null)
+  const slipProfile = getPaymentSlipProfile()
+  const hospitalName = slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name
+  const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
+  const pinCode = slipProfile.pin_code || DEFAULT_PAYMENT_SLIP_PROFILE.pin_code
+  const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
+  const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
+  const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
   
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -8185,13 +8211,18 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
       
       <div ref={printRef} className="w-[210mm] min-h-[297mm] bg-white text-black p-[20mm] font-sans mx-auto shadow-2xl print:shadow-none text-sm">
         {/* Header */}
-        <div className="flex justify-between items-end border-b-2 border-gray-800 pb-4 mb-6">
-          <div>
-            <h1 className="text-3xl font-black mb-1">CUREVICE IPD</h1>
+        <div className="flex justify-between items-start border-b-2 border-gray-800 pb-4 mb-6">
+          <div className="pt-1">
+            <h1 className="text-3xl font-black mb-1 leading-none">{hospitalName}</h1>
             <p className="text-gray-600 font-medium">Inpatient Bill & Ledger Statement</p>
           </div>
-          <div className="text-right">
-            <p className="font-bold">Date: {format(new Date(), 'd/M/yyyy (HH:mm)')}</p>
+          <div className="text-right leading-tight">
+            <p className="text-xs text-gray-600">{address}</p>
+            <p className="text-xs text-gray-600 mt-0.5">PIN: {pinCode}</p>
+            <p className="text-xs text-gray-600 mt-0.5">Phone: {phone}</p>
+            <p className="text-xs text-gray-600 mt-0.5">Email: {email}</p>
+            {website ? <p className="text-xs text-gray-600 mt-0.5">Website: {website}</p> : null}
+            <p className="font-bold mt-2">Date: {format(new Date(), 'd/M/yyyy (HH:mm)')}</p>
             <p className="font-mono text-xs text-gray-500 mt-1">Ref: ADM-{admission.id.split('-')[0].toUpperCase()}</p>
           </div>
         </div>
@@ -8252,7 +8283,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
         {/* Footer */}
         <div className="mt-20 pt-8 border-t border-gray-300 text-center text-xs text-gray-500">
           <p>This is a computer generated document. For queries regarding this bill, please contact the reception.</p>
-          <p className="mt-1">Generated by Curevice IPD Billing System</p>
+          <p className="mt-1">Generated by {hospitalName} IPD Billing System</p>
         </div>
       </div>
       <style>{`
