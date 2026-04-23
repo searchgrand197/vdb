@@ -66,8 +66,8 @@ export default function PrintSlipPage() {
       }
 
       if (!cancelled) {
-        // Token Queue always prints without background (fields only)
-        const html = buildPrintHtml(layout, values, false)
+        // Token Queue prints using the template background image as well.
+        const html = buildPrintHtml(layout, values, true)
         renderAndPrint(html)
       }
     }
