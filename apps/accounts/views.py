@@ -4,7 +4,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from rest_framework import permissions, status
+from rest_framework import permissions, serializers, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -200,5 +200,35 @@ class PharmacyBranchListView(APIView):
             for b in branches
         ]
         return success_response(data=data)
+
+
+class SuperuserOnly(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+class UserAdminSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "phone",
+            "first_name",
+            "last_name",
+            "hospital",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "date_joined",
+            "last_login",
+        ]
+        read_only_fields = ["id", "date_joined", "last_login"]
+
+
+class UserAdminViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.select_related("hospital").all().order_by("-date_joined")
+    serializer_class = UserAdminSerializer
+    permission_classes = [permissions.IsAuthenticated, SuperuserOnly]
 
 

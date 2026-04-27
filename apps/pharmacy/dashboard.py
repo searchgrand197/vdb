@@ -37,9 +37,9 @@ def _prev_range(date_from, date_to):
     return date_from - timedelta(days=span), date_from - timedelta(days=1)
 
 
-def _sales_block(hospital_id, date_from, date_to, gst):
+def _sales_block(pharmacy_id, date_from, date_to, gst):
     qs = PharmacyInvoice.objects.filter(
-        hospital_id=hospital_id,
+        pharmacy_id=pharmacy_id,
         status=PharmacyInvoice.Status.FINALIZED,
     )
     current_qs = qs.filter(date__gte=date_from, date__lte=date_to)
@@ -71,8 +71,8 @@ def _sales_block(hospital_id, date_from, date_to, gst):
     return {"total": float(total), "growth": growth, "trend": trend}
 
 
-def _purchase_block(hospital_id, date_from, date_to):
-    qs = PharmacyPurchaseChallan.objects.filter(hospital_id=hospital_id)
+def _purchase_block(pharmacy_id, date_from, date_to):
+    qs = PharmacyPurchaseChallan.objects.filter(pharmacy_id=pharmacy_id)
     current_qs = qs.filter(purchase_date__gte=date_from, purchase_date__lte=date_to)
     total = current_qs.aggregate(s=Sum("total_amount"))["s"] or ZERO
 
@@ -95,10 +95,10 @@ def _purchase_block(hospital_id, date_from, date_to):
     return {"total": float(total), "growth": growth, "trend": trend}
 
 
-def _stock_block(hospital_id):
-    batches = MedicineBatch.objects.filter(hospital_id=hospital_id)
+def _stock_block(pharmacy_id):
+    batches = MedicineBatch.objects.filter(pharmacy_id=pharmacy_id)
     ledger = (
-        StockLedger.objects.filter(hospital_id=hospital_id)
+        StockLedger.objects.filter(pharmacy_id=pharmacy_id)
         .values("batch_id")
         .annotate(qty=Sum("qty_change"))
     )
@@ -123,9 +123,9 @@ def _stock_block(hospital_id):
     }
 
 
-def _customers_block(hospital_id, date_from, date_to, gst):
+def _customers_block(pharmacy_id, date_from, date_to, gst):
     qs = PharmacyInvoice.objects.filter(
-        hospital_id=hospital_id,
+        pharmacy_id=pharmacy_id,
         status=PharmacyInvoice.Status.FINALIZED,
         date__gte=date_from,
         date__lte=date_to,
@@ -136,7 +136,7 @@ def _customers_block(hospital_id, date_from, date_to, gst):
         return {"total": 0, "new": 0, "repeat": 0, "avg_order_value": 0}
 
     returning = PharmacyInvoice.objects.filter(
-        hospital_id=hospital_id,
+        pharmacy_id=pharmacy_id,
         status=PharmacyInvoice.Status.FINALIZED,
         date__lt=date_from,
         patient_id__in=patient_ids,
@@ -158,10 +158,10 @@ def _customers_block(hospital_id, date_from, date_to, gst):
     }
 
 
-def _cash_block(hospital_id, date_from, date_to):
+def _cash_block(pharmacy_id, date_from, date_to):
     """Approximate cash breakdown from invoices (placeholder for real payment method tracking)."""
     qs = PharmacyInvoice.objects.filter(
-        hospital_id=hospital_id,
+        pharmacy_id=pharmacy_id,
         status=PharmacyInvoice.Status.FINALIZED,
         date__gte=date_from,
         date__lte=date_to,
@@ -175,11 +175,11 @@ def _cash_block(hospital_id, date_from, date_to):
     }
 
 
-def _today_sales_block(hospital_id, target_date=None):
+def _today_sales_block(pharmacy_id, target_date=None):
     """Selected-day finalized sale split by payment method (defaults to today)."""
     today = target_date or timezone.now().date()
     qs = PharmacyInvoice.objects.filter(
-        hospital_id=hospital_id,
+        pharmacy_id=pharmacy_id,
         status=PharmacyInvoice.Status.FINALIZED,
         date=today,
     ).select_related("patient").prefetch_related("items__batch")
@@ -244,15 +244,13 @@ class PharmacyDashboardView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        # Use the branch resolved by PharmacyBranchMiddleware (X-Pharmacy-Branch header)
-        # so the dashboard shows data for whichever branch was selected at login.
-        hospital = getattr(request, "pharmacy_hospital", None) or getattr(request.user, "hospital", None)
-        if hospital is None:
+        pharmacy = getattr(request, "pharmacy", None)
+        if pharmacy is None:
             return Response(
-                {"success": False, "detail": "Hospital context required."},
+                {"success": False, "detail": "Pharmacy branch context required."},
                 status=400,
             )
-        hospital_id = hospital.id
+        pharmacy_id = pharmacy.id
         date_from, date_to = _parse_dates(request.query_params)
         today_date = parse_date((request.query_params.get("today_date") or "").strip() or "")
         if today_date is None:
@@ -260,13 +258,13 @@ class PharmacyDashboardView(APIView):
         gst = request.query_params.get("gst", "1") == "1"
 
         data = {
-            "sales": _sales_block(hospital_id, date_from, date_to, gst),
-            "purchase": _purchase_block(hospital_id, date_from, date_to),
-            "stock": _stock_block(hospital_id),
-            "customers": _customers_block(hospital_id, date_from, date_to, gst),
-            "cash": _cash_block(hospital_id, date_from, date_to),
-            "today_sales": _today_sales_block(hospital_id, target_date=today_date),
-            "today_total_for_tab": _today_sales_block(hospital_id, target_date=timezone.now().date()).get("total", 0.0),
+            "sales": _sales_block(pharmacy_id, date_from, date_to, gst),
+            "purchase": _purchase_block(pharmacy_id, date_from, date_to),
+            "stock": _stock_block(pharmacy_id),
+            "customers": _customers_block(pharmacy_id, date_from, date_to, gst),
+            "cash": _cash_block(pharmacy_id, date_from, date_to),
+            "today_sales": _today_sales_block(pharmacy_id, target_date=today_date),
+            "today_total_for_tab": _today_sales_block(pharmacy_id, target_date=timezone.now().date()).get("total", 0.0),
         }
         return success_response(data)
 

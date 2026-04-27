@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
 import toast from 'react-hot-toast'
-import { LogIn, Building2, FlaskConical, Stethoscope, UserCog, ClipboardList, Store, CheckCircle2, Loader2, ChevronRight } from 'lucide-react'
+import { LogIn, Building2, FlaskConical, Stethoscope, UserCog, ClipboardList, Store, CheckCircle2, Loader2, Shield } from 'lucide-react'
 
 const ROLES = [
   { label: 'Staff',        value: 'staff',        path: '/staff',        icon: UserCog,       color: '#6366f1' },
@@ -10,6 +10,7 @@ const ROLES = [
   { label: 'Receptionist', value: 'receptionist', path: '/receptionist', icon: ClipboardList, color: '#8b5cf6' },
   { label: 'Lab',          value: 'lab',          path: '/lab',          icon: FlaskConical,  color: '#06b6d4' },
   { label: 'Pharmacy',     value: 'pharmacy',     path: '/pharmacy',     icon: Store,         color: '#10b981' },
+  { label: 'Admin',        value: 'admin',        path: '/admin-dashboard', icon: Shield,      color: '#f59e0b' },
 ]
 
 const STYLE = `
@@ -65,7 +66,7 @@ const STYLE = `
         text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px; }
 
   /* ── Role pills — all 5 in one row ── */
-  .rg { display:grid; grid-template-columns:repeat(5,1fr); gap:5px; margin-bottom:12px; }
+  .rg { display:grid; grid-template-columns:repeat(6,1fr); gap:5px; margin-bottom:12px; }
   .rp {
     display:flex; flex-direction:column; align-items:center; gap:3px;
     padding:7px 2px 6px; border-radius:10px; border:2px solid transparent;
@@ -161,6 +162,18 @@ export default function Login() {
   const [branchesLoading, setBranchesLoading] = useState(false)
 
   useEffect(() => {
+    const savedRole = localStorage.getItem('role')
+    if (savedRole && ROLES.some((r) => r.value === savedRole)) {
+      setRole(savedRole)
+    }
+  }, [])
+
+  const handleRoleSelect = (nextRole) => {
+    setRole(nextRole)
+    localStorage.setItem('role', nextRole)
+  }
+
+  useEffect(() => {
     if (role !== 'pharmacy') { setBranches([]); setBranchId(''); return }
     setBranchesLoading(true)
     api.get('/auth/pharmacies/')
@@ -177,13 +190,23 @@ export default function Login() {
     e.preventDefault()
     if (role === 'pharmacy' && !branchId) { toast.error('Please select a pharmacy branch'); return }
     setLoading(true)
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    if (!normalizedEmail) {
+      toast.error('Please enter email')
+      setLoading(false)
+      return
+    }
     try {
       if (document.documentElement.requestFullscreen)
         await document.documentElement.requestFullscreen().catch(() => {})
     } catch (_) {}
     try {
-      const { data } = await api.post('/auth/login/', { email, password })
+      const { data } = await api.post('/auth/login/', { email: normalizedEmail, password })
       const payload = data?.data || {}
+      if (role === 'admin' && !payload?.is_superuser) {
+        toast.error('Admin dashboard access is allowed for superusers only')
+        return
+      }
       localStorage.setItem('access',  payload.access)
       localStorage.setItem('refresh', payload.refresh)
       localStorage.setItem('role',    role)
@@ -198,8 +221,13 @@ export default function Login() {
       }
       nav(ROLES.find(r => r.value === role)?.path || '/staff')
       toast.success('Welcome back!')
-    } catch {
-      toast.error('Invalid email or password')
+    } catch (err) {
+      const backendErrors = err?.response?.data?.errors
+      const backendDetail = backendErrors?.detail ?? err?.response?.data?.detail
+      const msg = Array.isArray(backendDetail)
+        ? backendDetail[0]
+        : (typeof backendDetail === 'string' && backendDetail.trim()) || 'Invalid email or password'
+      toast.error(msg)
     } finally {
       setLoading(false)
     }
@@ -237,7 +265,7 @@ export default function Login() {
                   return (
                     <button
                       key={r.value} type="button"
-                      onClick={() => setRole(r.value)}
+                      onClick={() => handleRoleSelect(r.value)}
                       className={`rp${on ? ' on' : ''}`}
                       style={on ? { background:`linear-gradient(135deg,${r.color}dd,${r.color})` } : {}}
                     >

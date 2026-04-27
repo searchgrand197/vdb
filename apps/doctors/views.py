@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from rest_framework import permissions, viewsets
 from rest_framework.filters import SearchFilter
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.auditlogs.services import create_audit_log
 from apps.doctors.models import (
     DoctorDailyAvailability,
+    DoctorPortalPreference,
     DoctorProfile,
     DoctorWeeklySchedule,
     Specialty,
@@ -13,6 +16,7 @@ from apps.doctors.models import (
 from apps.doctors.serializers import (
     DoctorDailyAvailabilityCreateUpdateSerializer,
     DoctorDailyAvailabilitySerializer,
+    DoctorPortalPreferenceSerializer,
     DoctorProfileCreateUpdateSerializer,
     DoctorProfileSerializer,
     DoctorWeeklyScheduleCreateUpdateSerializer,
@@ -21,6 +25,7 @@ from apps.doctors.serializers import (
     SpecialtySerializer,
 )
 from apps.roles_permissions.permissions import HasRequiredPermission
+from apps.shared.response import success_response
 
 
 class HospitalScopedMixin:
@@ -266,6 +271,26 @@ class DoctorDailyAvailabilityViewSet(HospitalScopedMixin, viewsets.ModelViewSet)
             after={"doctor_id": str(availability.doctor_id), "is_available": availability.is_available},
         )
 
-from django.shortcuts import render
 
-# Create your views here.
+class DoctorPortalPreferenceView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        pref, _ = DoctorPortalPreference.objects.get_or_create(
+            user=request.user,
+            defaults={"hospital_id": request.user.hospital_id},
+        )
+        data = DoctorPortalPreferenceSerializer(pref).data
+        return success_response(data=data)
+
+    def put(self, request, *args, **kwargs):
+        pref, _ = DoctorPortalPreference.objects.get_or_create(
+            user=request.user,
+            defaults={"hospital_id": request.user.hospital_id},
+        )
+        serializer = DoctorPortalPreferenceSerializer(pref, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(hospital_id=request.user.hospital_id)
+        return success_response(data=serializer.data)
+
+    patch = put

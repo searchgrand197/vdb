@@ -10,7 +10,8 @@ import { format, addDays } from 'date-fns'
 import {
   Users, ChevronRight, ClipboardList, Plus, Trash2,
   Clock, CheckCircle, ArrowRight, GripVertical, Stethoscope, X, Mic, MicOff, UserPlus,
-  CalendarClock, Receipt, Activity, Pill, Scissors, FileText, Search, Loader2
+  CalendarClock, Receipt, Activity, Pill, Scissors, FileText, Search, Loader2, Settings
+  , Eye
 } from 'lucide-react'
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors
@@ -47,6 +48,67 @@ const TREATMENT_EVENT_STATUS = {
   plan_saved: { icon: '⏳', color: 'text-amber-700' },
   treatment_done: { icon: '✔✔', color: 'text-emerald-700' },
   treatment_skipped: { icon: '❌', color: 'text-rose-700' },
+}
+
+const DEFAULT_FOLLOWUP_DAYS = [3, 5, 7, 10, 14, 30]
+const DEFAULT_RX_DAYS = [1, 3, 5, 7, 10, 14, 30]
+const DEFAULT_TIMING_OPTIONS = [
+  { v: 'AF', l: 'After Food' }, { v: 'BF', l: 'Before Food' },
+  { v: 'EM', l: 'Empty Stomach' }, { v: 'BD', l: 'Twice Daily' },
+  { v: 'TDS', l: 'Three Times' }, { v: 'QID', l: 'Four Times' },
+  { v: 'HS', l: 'Bedtime' }, { v: 'SOS', l: 'As Needed' },
+]
+const DEFAULT_DOSAGE_PATTERNS = [
+  { v: '1', l: '1 (OD)', q: 1 },
+  { v: '1-0-1', l: '1-0-1 (BD)', q: 2 },
+  { v: '1-1', l: '1-1 (BD)', q: 2 },
+  { v: '1-1-1', l: '1-1-1 (TDS)', q: 3 },
+  { v: '1-1-1-1', l: '1-1-1-1 (QID)', q: 4 },
+  { v: '0-1', l: '0-1 (Night)', q: 1 },
+  { v: '1-0', l: '1-0 (Morning)', q: 1 },
+  { v: '2-2', l: '2-2 (BD)', q: 4 },
+  { v: '2-2-2', l: '2-2-2 (TDS)', q: 6 },
+  { v: '0.5-0.5', l: '0.5-0.5 (Half BD)', q: 1 },
+]
+
+function normalizeDayOptions(raw, fallback) {
+  const arr = Array.isArray(raw) ? raw : []
+  const cleaned = [...new Set(arr.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0 && n <= 365))]
+    .sort((a, b) => a - b)
+  return cleaned.length ? cleaned : fallback
+}
+
+function parseDayOptionText(text, fallback) {
+  const parsed = String(text || '')
+    .split(',')
+    .map((v) => Number(String(v).trim()))
+    .filter((n) => Number.isFinite(n))
+  return normalizeDayOptions(parsed, fallback)
+}
+
+function normalizeOptionPairs(raw, fallback) {
+  const arr = Array.isArray(raw) ? raw : []
+  const seen = new Set()
+  const out = arr
+    .map((x) => ({
+      v: String(x?.v || '').trim(),
+      l: String(x?.l || '').trim(),
+    }))
+    .filter((x) => x.v && x.l && !seen.has(x.v) && seen.add(x.v))
+  return out.length ? out : fallback
+}
+
+function normalizeDosagePatterns(raw, fallback) {
+  const arr = Array.isArray(raw) ? raw : []
+  const seen = new Set()
+  const out = arr
+    .map((x) => ({
+      v: String(x?.v || '').trim(),
+      l: String(x?.l || '').trim(),
+      q: Number(x?.q),
+    }))
+    .filter((x) => x.v && x.l && Number.isFinite(x.q) && x.q > 0 && !seen.has(x.v) && seen.add(x.v))
+  return out.length ? out : fallback
 }
 
 const FREQ_MAP = {
@@ -630,11 +692,10 @@ function TreatmentAuditTimeline({ events = [], onSelectEvent, maxHeightClass = '
 }
 
 // ─── Enhanced Follow-Up Component with quick-day buttons ─────────────────────
-function ManualFollowUp({ visitId, existingDate }) {
+function ManualFollowUp({ visitId, existingDate, quickDays = DEFAULT_FOLLOWUP_DAYS }) {
   const [date, setDate] = useState(existingDate || '');
   const [saved, setSaved] = useState(!!existingDate);
   const [editing, setEditing] = useState(!existingDate);
-  const QUICK_DAYS = [3, 5, 7, 10, 14, 30];
 
   useEffect(() => {
     if (existingDate) { setDate(existingDate); setSaved(true); setEditing(false); }
@@ -675,7 +736,7 @@ function ManualFollowUp({ visitId, existingDate }) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">
-        {QUICK_DAYS.map(d => (
+        {quickDays.map(d => (
           <button key={d} onClick={() => save(format(addDays(new Date(), d), 'yyyy-MM-dd'))}
             className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 transition-colors">
             +{d}d
@@ -796,7 +857,13 @@ function AITransitionOverlay({ onDone }) {
 
 
 // ─── Inline Rx Panel (embedded prescription, no modal) ───────────────────────
-function InlineRxPanel({ visit }) {
+function InlineRxPanel({
+  visit,
+  defaultDayOptions = DEFAULT_RX_DAYS,
+  dosagePatternOptions = DEFAULT_DOSAGE_PATTERNS,
+  timingOptions = DEFAULT_TIMING_OPTIONS,
+  onDraftChange,
+}) {
   const [open, setOpen] = useState(true)
   const [branches, setBranches] = useState([])
   const [branchId, setBranchId] = useState('')
@@ -804,7 +871,6 @@ function InlineRxPanel({ visit }) {
   const [results, setResults] = useState([])
   const [searching, setSearching] = useState(false)
   const [items, setItems] = useState([])
-  const [saving, setSaving] = useState(false)
   const [globalDays, setGlobalDays] = useState(3)
   const searchRef = useRef(null)
   const debouncedQ = useDebouncedValue(search, 320)
@@ -819,47 +885,49 @@ function InlineRxPanel({ visit }) {
   }, [open])
 
   useEffect(() => {
-    if (!branchId || debouncedQ.length < 2) { setResults([]); return }
+    if (!branchId || debouncedQ.length < 1) { setResults([]); return }
     setSearching(true)
-    api.get('/pharmacy/doctor-stock-search/', { params: { hospital_id: branchId, q: debouncedQ } })
-      .then(r => setResults(Array.isArray(r.data?.data || r.data) ? (r.data?.data || r.data) : []))
+    api.get('/pharmacy/doctor-stock-search/', { params: { pharmacy_id: branchId, q: debouncedQ } })
+      .then(r => {
+        const list = Array.isArray(r.data?.data || r.data) ? (r.data?.data || r.data) : []
+        const q = String(debouncedQ || '').trim().toLowerCase()
+        const ranked = [...list].sort((a, b) => {
+          const rank = (row) => {
+            const n = String(row?.medicine?.name || '').trim().toLowerCase()
+            const s = String(row?.medicine?.sku || '').trim().toLowerCase()
+            if (n === q || s === q) return 0
+            if (n.startsWith(q)) return 1
+            if (s.startsWith(q)) return 2
+            if (n.includes(q)) return 3
+            return 4
+          }
+          return rank(a) - rank(b)
+        })
+        setResults(ranked)
+      })
       .catch(() => setResults([]))
       .finally(() => setSearching(false))
   }, [debouncedQ, branchId])
 
-  const TIMING = [
-    { v: 'AF', l: 'After Food' }, { v: 'BF', l: 'Before Food' },
-    { v: 'EM', l: 'Empty Stomach' }, { v: 'BD', l: 'Twice Daily' },
-    { v: 'TDS', l: 'Three Times' }, { v: 'QID', l: 'Four Times' },
-    { v: 'HS', l: 'Bedtime' }, { v: 'SOS', l: 'As Needed' },
-  ]
-
-  const DOSAGE_PATTERNS = [
-    { v: '1', l: '1 (OD)' },
-    { v: '1-0-1', l: '1-0-1 (BD)' },
-    { v: '1-1', l: '1-1 (BD)' },
-    { v: '1-1-1', l: '1-1-1 (TDS)' },
-    { v: '1-1-1-1', l: '1-1-1-1 (QID)' },
-    { v: '0-1', l: '0-1 (Night)' },
-    { v: '1-0', l: '1-0 (Morning)' },
-    { v: '2-2', l: '2-2 (BD)' },
-    { v: '2-2-2', l: '2-2-2 (TDS)' },
-    { v: '0.5-0.5', l: '0.5-0.5 (Half BD)' },
-  ]
-
   const calculateQty = (pattern, days) => {
-    const sum = String(pattern).split('-').reduce((acc, curr) => acc + (Number(curr) || 0), 0)
-    return Math.ceil(sum * (Number(days) || 1)) || 1
+    const matched = dosagePatternOptions.find((p) => String(p.v) === String(pattern))
+    const eq = Number(matched?.q)
+    const perDay = Number.isFinite(eq) && eq > 0
+      ? eq
+      : String(pattern).split('-').reduce((acc, curr) => acc + (Number(curr) || 0), 0)
+    return Math.ceil(perDay * (Number(days) || 1)) || 1
   }
 
   const handleGlobalDaysChange = (d) => {
     setGlobalDays(d)
-    setItems(p => p.map(it => ({ ...it, days: d, qty: calculateQty(it.pattern || '1-0-1', d) })))
+    setItems(p => p.map(it => ({ ...it, days: d, qty: calculateQty(it.pattern || dosagePatternOptions[0]?.v || '1-0-1', d) })))
   }
 
   const addItem = pick => {
     if (items.some(i => String(i.batch.id) === String(pick.batch.id))) return toast.error('Already added')
-    setItems(p => [...p, { ...pick, pattern: '1-0-1', qty: calculateQty('1-0-1', globalDays), days: globalDays, timing: 'AF' }])
+    const defaultPattern = dosagePatternOptions[0]?.v || '1-0-1'
+    const defaultTiming = timingOptions[0]?.v || 'AF'
+    setItems(p => [...p, { ...pick, pattern: defaultPattern, qty: calculateQty(defaultPattern, globalDays), days: globalDays, timing: defaultTiming }])
     setSearch(''); setResults([]); searchRef.current?.focus()
   }
 
@@ -873,30 +941,16 @@ function InlineRxPanel({ visit }) {
   }))
   const rem = idx => setItems(p => p.filter((_, i) => i !== idx))
 
-  const handleSend = async () => {
-    const final = items.map(i => ({ ...i, qty: Number(i.qty) || 0 })).filter(i => i.qty > 0)
-    if (!final.length) return toast.error('Add at least one medicine with qty > 0')
-    setSaving(true)
-    try {
-      const bn = branches.find(b => String(b.id) === String(branchId))?.name || branchId
-      const remarks = `Doctor Prescription (Branch: ${bn}):\n` +
-        final.map(i => `${i.medicine.name} x${i.qty} (${i.pattern}) | ${TIMING.find(t => t.v === i.timing)?.l || i.timing} | ${i.days} day${i.days > 1 ? 's' : ''}`).join('\n')
-      await api.post('/pharmacy/invoices/create-draft/', {
-        patient: visit.patient,
-        ipd_admission: visit.ipd_admission || null,
-        remarks,
-        items: final.map(it => ({
-          medicine: it.medicine.id, batch: it.batch.id, qty: it.qty,
-          mrp: it.batch.mrp, rate: it.batch.sale_rate,
-          amount: (Number(it.qty) * Number(it.batch.sale_rate)).toFixed(2),
-        })),
-      }, { headers: { 'X-Pharmacy-Branch': branchId } })
-      toast.success(`✅ Draft sent to ${bn} — ${final.length} medicine(s)`)
-      setItems([]); setOpen(false)
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Failed to send draft', { duration: 6000 })
-    } finally { setSaving(false) }
-  }
+  useEffect(() => {
+    if (!onDraftChange) return
+    const selectedBranch = branches.find((b) => String(b.id) === String(branchId))
+    onDraftChange({
+      visitId: visit.id,
+      branchId,
+      branchLabel: selectedBranch?.label || selectedBranch?.name || '',
+      items,
+    })
+  }, [visit.id, branchId, items, branches, onDraftChange])
 
   return (
     <div className="border border-emerald-200 rounded-xl overflow-hidden">
@@ -930,7 +984,7 @@ function InlineRxPanel({ visit }) {
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Default Days:</span>
               <div className="flex flex-wrap gap-1">
-                {[1, 3, 5, 7, 10, 14, 30].map(d => (
+                {defaultDayOptions.map(d => (
                   <button key={d} onClick={() => handleGlobalDaysChange(d)}
                     className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all border ${globalDays === d ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm' : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'}`}>
                     {d}
@@ -963,8 +1017,13 @@ function InlineRxPanel({ visit }) {
                     }`}>
                     <Pill size={11} className="text-emerald-600 shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="text-[11px] font-bold text-slate-900 truncate">{pick.medicine.name}</div>
-                      <div className="text-[9px] text-slate-400">{pick.batch.batch_no} · Stock: {pick.batch.stock}</div>
+                      <div className="text-[11px] font-bold text-slate-900 truncate">
+                        {pick.medicine.name}
+                        {pick.medicine.sku ? <span className="ml-1 text-[9px] font-semibold text-slate-500">({pick.medicine.sku})</span> : null}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        {pick.batch.batch_no} · Stock: <span className="font-bold text-emerald-700">{pick.batch.stock}</span>
+                      </div>
                     </div>
                     <span className="text-[11px] font-bold text-emerald-700 shrink-0">₹{Number(pick.batch.sale_rate).toFixed(0)}</span>
                     {added ? <CheckCircle size={11} className="text-emerald-400" /> : <Plus size={11} className="text-emerald-500" />}
@@ -981,48 +1040,42 @@ function InlineRxPanel({ visit }) {
                 <span className="text-[10px] font-bold text-slate-500 uppercase">Prescription ({items.length})</span>
                 <button onClick={() => setItems([])} className="text-[9px] text-rose-500 font-bold hover:underline">Clear all</button>
               </div>
-              {items.map((item, idx) => (
-                <div key={idx} className="bg-white border border-slate-200 rounded-lg flex flex-col gap-1 px-2 py-1.5 shadow-sm">
-                  <div className="flex items-center gap-2">
+              <div className="max-h-56 overflow-y-auto pr-1 space-y-1">
+                {items.map((item, idx) => (
+                  <div key={idx} className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 shadow-sm flex items-center gap-1.5 min-w-0">
                     <Pill size={12} className="text-emerald-500 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[11px] font-bold text-slate-900 truncate" title={item.medicine.name}>{item.medicine.name}</p>
-                    </div>
+                    <p className="w-40 text-[10px] font-bold text-slate-900 truncate" title={item.medicine.name}>{item.medicine.name}</p>
+
+                    <select value={item.pattern} onChange={e => upd(idx, 'pattern', e.target.value)} title="Dosage Pattern"
+                      className="w-[58px] h-6 text-[9px] font-bold text-center border border-slate-200 rounded bg-white outline-none cursor-pointer focus:border-emerald-400 transition-colors shrink-0">
+                      {dosagePatternOptions.map(p => <option key={p.v} value={p.v}>{p.v}</option>)}
+                    </select>
+                    <span className="text-[9px] text-slate-400 shrink-0">×</span>
+                    <input type="number" min="1" value={item.days} onChange={e => upd(idx, 'days', e.target.value)} title="Days"
+                      className="w-8 h-6 text-[10px] font-bold text-center border border-slate-200 rounded bg-white outline-none focus:border-blue-400 transition-colors shrink-0" />
+                    <span className="text-[9px] text-slate-400 shrink-0">=</span>
+                    <input type="number" min="1" value={item.qty} onChange={e => upd(idx, 'qty', e.target.value)} title="Total Quantity"
+                      className="w-8 h-6 text-[10px] font-bold text-center border border-emerald-200 rounded bg-emerald-50 text-emerald-700 outline-none focus:border-emerald-500 transition-colors shrink-0" />
+                    <span className="text-[9px] text-emerald-600 font-semibold whitespace-nowrap shrink-0">Eq:{calculateQty(item.pattern, item.days)}</span>
+
+                    <select value={item.timing} onChange={e => upd(idx, 'timing', e.target.value)} title="Timing"
+                      className="w-24 h-6 text-[9px] font-bold border border-slate-200 rounded bg-white outline-none cursor-pointer focus:border-purple-400 transition-colors shrink-0">
+                      {timingOptions.map(t => <option key={t.v} value={t.v}>{t.l}</option>)}
+                    </select>
                     <button onClick={() => rem(idx)} className="text-slate-300 hover:text-rose-500 shrink-0 transition-colors">
                       <Trash2 size={13} />
                     </button>
                   </div>
-                  
-                  <div className="flex items-center gap-1 shrink-0 bg-slate-50 p-1 rounded-md border border-slate-100">
-                    <select value={item.pattern} onChange={e => upd(idx, 'pattern', e.target.value)} title="Dosage Pattern"
-                      className="w-[60px] h-6 text-[9px] font-bold text-center border border-slate-200 rounded bg-white outline-none cursor-pointer focus:border-emerald-400 transition-colors">
-                      {DOSAGE_PATTERNS.map(p => <option key={p.v} value={p.v}>{p.v}</option>)}
-                    </select>
-                    <span className="text-[9px] text-slate-400">×</span>
-                    <input type="number" min="1" value={item.days} onChange={e => upd(idx, 'days', e.target.value)} title="Days"
-                      className="w-8 h-6 text-[10px] font-bold text-center border border-slate-200 rounded bg-white outline-none focus:border-blue-400 transition-colors" />
-                    <span className="text-[9px] text-slate-400 font-medium mr-0.5">d</span>
-                    <span className="text-[9px] text-slate-400">=</span>
-                    <input type="number" min="1" value={item.qty} onChange={e => upd(idx, 'qty', e.target.value)} title="Total Quantity"
-                      className="w-8 h-6 text-[10px] font-bold text-center border border-emerald-200 rounded bg-emerald-50 text-emerald-700 outline-none focus:border-emerald-500 transition-colors" />
-                    
-                    <select value={item.timing} onChange={e => upd(idx, 'timing', e.target.value)} title="Timing"
-                      className="flex-1 h-6 text-[9px] font-bold border border-slate-200 rounded bg-white outline-none cursor-pointer focus:border-purple-400 transition-colors ml-0.5">
-                      {TIMING.map(t => <option key={t.v} value={t.v}>{t.l}</option>)}
-                    </select>
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
 
-              <button onClick={handleSend} disabled={saving}
-                className="w-full py-2 rounded-lg text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 flex items-center justify-center gap-1.5 mt-1 shadow-sm">
-                {saving ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
-                {saving ? 'Sending...' : `Send to Pharmacy (${items.length} medicine${items.length > 1 ? 's' : ''})`}
-              </button>
+              <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+                Medicine draft will be sent automatically when you click Mark Done.
+              </p>
             </div>
           )}
 
-          {!items.length && search.length < 2 && (
+          {!items.length && search.length < 1 && (
             <div className="py-4 text-center text-slate-400 text-[11px]">
               <Pill size={22} className="mx-auto mb-1 opacity-30" />
               Search and add medicines above
@@ -1030,6 +1083,180 @@ function InlineRxPanel({ visit }) {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function DayOptionsSettings({
+  open,
+  onClose,
+  followupDays,
+  rxDays,
+  dosagePatterns,
+  timingOptions,
+  onSave,
+  saving = false,
+}) {
+  const [followupText, setFollowupText] = useState((followupDays || DEFAULT_FOLLOWUP_DAYS).join(', '))
+  const [rxText, setRxText] = useState((rxDays || DEFAULT_RX_DAYS).join(', '))
+  const [patternRows, setPatternRows] = useState(dosagePatterns || DEFAULT_DOSAGE_PATTERNS)
+  const [timingRows, setTimingRows] = useState(timingOptions || DEFAULT_TIMING_OPTIONS)
+  const [dragging, setDragging] = useState(null)
+
+  useEffect(() => {
+    if (!open) return
+    setFollowupText((followupDays || DEFAULT_FOLLOWUP_DAYS).join(', '))
+    setRxText((rxDays || DEFAULT_RX_DAYS).join(', '))
+    setPatternRows(dosagePatterns || DEFAULT_DOSAGE_PATTERNS)
+    setTimingRows(timingOptions || DEFAULT_TIMING_OPTIONS)
+  }, [open, followupDays, rxDays, dosagePatterns, timingOptions])
+
+  const moveRow = (setter, rows, idx, dir) => {
+    const next = [...rows]
+    const target = idx + dir
+    if (target < 0 || target >= next.length) return
+    ;[next[idx], next[target]] = [next[target], next[idx]]
+    setter(next)
+  }
+
+  const addRow = (setter, rows, codePrefix) => {
+    const nextCode = `${codePrefix}${rows.length + 1}`
+    setter([...rows, { v: nextCode, l: nextCode }])
+  }
+
+  const updateRow = (setter, rows, idx, key, value) => {
+    setter(rows.map((r, i) => (i === idx ? { ...r, [key]: value } : r)))
+  }
+
+  const removeRow = (setter, rows, idx) => {
+    if (rows.length <= 1) return
+    setter(rows.filter((_, i) => i !== idx))
+  }
+
+  const onDragStart = (listKey, idx) => {
+    setDragging({ listKey, idx })
+  }
+
+  const onDropRow = (listKey, targetIdx) => {
+    if (!dragging || dragging.listKey !== listKey || dragging.idx === targetIdx) return
+    const rows = listKey === 'pattern' ? [...patternRows] : [...timingRows]
+    const [picked] = rows.splice(dragging.idx, 1)
+    rows.splice(targetIdx, 0, picked)
+    if (listKey === 'pattern') setPatternRows(rows)
+    else setTimingRows(rows)
+    setDragging(null)
+  }
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-[9999] bg-black/30 backdrop-blur-[1px] flex items-center justify-center p-4">
+      <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-2xl">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-bold text-slate-800">Doctor Day Options</p>
+            <p className="text-[11px] text-slate-500">Customize quick day buttons (comma separated)</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3 max-h-[72vh] overflow-auto">
+          <div>
+            <label className="text-[11px] font-bold uppercase text-slate-500">Follow-up Quick Days</label>
+            <input
+              value={followupText}
+              onChange={(e) => setFollowupText(e.target.value)}
+              placeholder="3, 5, 7, 10, 14, 30"
+              className="mt-1 w-full h-9 px-3 text-[12px] border border-slate-200 rounded-lg outline-none focus:border-blue-400"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] font-bold uppercase text-slate-500">Pharmacy Default Days</label>
+            <input
+              value={rxText}
+              onChange={(e) => setRxText(e.target.value)}
+              placeholder="1, 3, 5, 7, 10, 14, 30"
+              className="mt-1 w-full h-9 px-3 text-[12px] border border-slate-200 rounded-lg outline-none focus:border-emerald-400"
+            />
+          </div>
+          <p className="text-[10px] text-slate-400">Allowed range: 1 to 365 days.</p>
+
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="text-[11px] font-bold uppercase text-slate-500">Dosage Patterns (orderable)</label>
+              <button onClick={() => addRow(setPatternRows, patternRows, 'P')} className="text-[11px] font-semibold text-blue-600">+ Add</button>
+            </div>
+            <div className="mt-1 space-y-1">
+              {patternRows.map((row, idx) => (
+                <div
+                  key={`pat-${idx}`}
+                  draggable
+                  onDragStart={() => onDragStart('pattern', idx)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => onDropRow('pattern', idx)}
+                  onDragEnd={() => setDragging(null)}
+                  className={`grid grid-cols-12 gap-1 items-center rounded ${dragging?.listKey === 'pattern' && dragging?.idx === idx ? 'opacity-50' : ''}`}
+                >
+                  <input value={row.v} onChange={(e) => updateRow(setPatternRows, patternRows, idx, 'v', e.target.value)}
+                    className="col-span-2 h-8 px-2 text-[11px] border border-slate-200 rounded" placeholder="Code" />
+                  <input value={row.l} onChange={(e) => updateRow(setPatternRows, patternRows, idx, 'l', e.target.value)}
+                    className="col-span-4 h-8 px-2 text-[11px] border border-slate-200 rounded" placeholder="Label" />
+                  <input value={row.q ?? ''} onChange={(e) => updateRow(setPatternRows, patternRows, idx, 'q', e.target.value)}
+                    className="col-span-2 h-8 px-2 text-[11px] border border-emerald-200 rounded bg-emerald-50 text-emerald-700" placeholder="Eq qty" />
+                  <button type="button" className="col-span-1 text-[11px] border rounded h-8 cursor-move" title="Drag to reorder">⋮⋮</button>
+                  <button onClick={() => moveRow(setPatternRows, patternRows, idx, -1)} className="col-span-1 text-[11px] border rounded h-8">↑</button>
+                  <button onClick={() => moveRow(setPatternRows, patternRows, idx, 1)} className="col-span-1 text-[11px] border rounded h-8">↓</button>
+                  <button onClick={() => removeRow(setPatternRows, patternRows, idx)} className="col-span-2 text-[11px] border border-rose-200 text-rose-600 rounded h-8">X</button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="text-[11px] font-bold uppercase text-slate-500">Food/Timing Options (orderable)</label>
+              <button onClick={() => addRow(setTimingRows, timingRows, 'T')} className="text-[11px] font-semibold text-blue-600">+ Add</button>
+            </div>
+            <div className="mt-1 space-y-1">
+              {timingRows.map((row, idx) => (
+                <div
+                  key={`time-${idx}`}
+                  draggable
+                  onDragStart={() => onDragStart('timing', idx)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => onDropRow('timing', idx)}
+                  onDragEnd={() => setDragging(null)}
+                  className={`grid grid-cols-12 gap-1 items-center rounded ${dragging?.listKey === 'timing' && dragging?.idx === idx ? 'opacity-50' : ''}`}
+                >
+                  <input value={row.v} onChange={(e) => updateRow(setTimingRows, timingRows, idx, 'v', e.target.value)}
+                    className="col-span-3 h-8 px-2 text-[11px] border border-slate-200 rounded" placeholder="Code" />
+                  <input value={row.l} onChange={(e) => updateRow(setTimingRows, timingRows, idx, 'l', e.target.value)}
+                    className="col-span-5 h-8 px-2 text-[11px] border border-slate-200 rounded" placeholder="Label" />
+                  <button type="button" className="col-span-1 text-[11px] border rounded h-8 cursor-move" title="Drag to reorder">⋮⋮</button>
+                  <button onClick={() => moveRow(setTimingRows, timingRows, idx, -1)} className="col-span-1 text-[11px] border rounded h-8">↑</button>
+                  <button onClick={() => moveRow(setTimingRows, timingRows, idx, 1)} className="col-span-1 text-[11px] border rounded h-8">↓</button>
+                  <button onClick={() => removeRow(setTimingRows, timingRows, idx)} className="col-span-1 text-[11px] border border-rose-200 text-rose-600 rounded h-8">X</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="px-4 py-3 border-t border-slate-100 flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-[12px] font-semibold rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
+            Cancel
+          </button>
+          <button
+            disabled={saving}
+            onClick={() => onSave(followupText, rxText, patternRows, timingRows)}
+            className="px-3 py-1.5 text-[12px] font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+          >
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1046,6 +1273,14 @@ function OPDTab({ aiMode = false }) {
   const noteStartRef = useRef({})
   const [historyByVisit, setHistoryByVisit] = useState({})
   const [historyFilters, setHistoryFilters] = useState({})
+  const [historyPreviewVisit, setHistoryPreviewVisit] = useState(null)
+  const [rxDraftByVisit, setRxDraftByVisit] = useState({})
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSaving, setSettingsSaving] = useState(false)
+  const [followupDayOptions, setFollowupDayOptions] = useState(DEFAULT_FOLLOWUP_DAYS)
+  const [rxDayOptions, setRxDayOptions] = useState(DEFAULT_RX_DAYS)
+  const [dosagePatternOptions, setDosagePatternOptions] = useState(DEFAULT_DOSAGE_PATTERNS)
+  const [timingOptions, setTimingOptions] = useState(DEFAULT_TIMING_OPTIONS)
 
   const pushHistoryEvent = ({ visitId, category, text, ts = new Date().toISOString() }) => {
     if (!visitId || !category || !text) return
@@ -1057,6 +1292,33 @@ function OPDTab({ aiMode = false }) {
       ].sort((a, b) => new Date(b.ts) - new Date(a.ts))
       return { ...prev, [visitId]: next }
     })
+  }
+
+  const saveDaySettings = async (followupText, rxText, nextPatterns, nextTimings) => {
+    const nextFollowup = parseDayOptionText(followupText, DEFAULT_FOLLOWUP_DAYS)
+    const nextRx = parseDayOptionText(rxText, DEFAULT_RX_DAYS)
+    const normalizedPatterns = normalizeDosagePatterns(nextPatterns, DEFAULT_DOSAGE_PATTERNS)
+    const normalizedTimings = normalizeOptionPairs(nextTimings, DEFAULT_TIMING_OPTIONS)
+    setSettingsSaving(true)
+    try {
+      const { data } = await api.put('/doctors/portal-preferences/', {
+        followup_day_options: nextFollowup,
+        rx_default_day_options: nextRx,
+        dosage_pattern_options: normalizedPatterns,
+        food_timing_options: normalizedTimings,
+      })
+      const payload = data?.data || {}
+      setFollowupDayOptions(normalizeDayOptions(payload.followup_day_options, nextFollowup))
+      setRxDayOptions(normalizeDayOptions(payload.rx_default_day_options, nextRx))
+      setDosagePatternOptions(normalizeDosagePatterns(payload.dosage_pattern_options, normalizedPatterns))
+      setTimingOptions(normalizeOptionPairs(payload.food_timing_options, normalizedTimings))
+      setSettingsOpen(false)
+      toast.success('Doctor day options updated')
+    } catch {
+      toast.error('Failed to save doctor day options')
+    } finally {
+      setSettingsSaving(false)
+    }
   }
 
   const inferCategoryFromNote = (text = '') => {
@@ -1123,6 +1385,27 @@ function OPDTab({ aiMode = false }) {
     return () => clearInterval(pollingRef.current)
   }, [])
 
+  useEffect(() => {
+    let alive = true
+    api.get('/doctors/portal-preferences/')
+      .then(({ data }) => {
+        if (!alive) return
+        const payload = data?.data || {}
+        setFollowupDayOptions(normalizeDayOptions(payload.followup_day_options, DEFAULT_FOLLOWUP_DAYS))
+        setRxDayOptions(normalizeDayOptions(payload.rx_default_day_options, DEFAULT_RX_DAYS))
+        setDosagePatternOptions(normalizeDosagePatterns(payload.dosage_pattern_options, DEFAULT_DOSAGE_PATTERNS))
+        setTimingOptions(normalizeOptionPairs(payload.food_timing_options, DEFAULT_TIMING_OPTIONS))
+      })
+      .catch(() => {
+        if (!alive) return
+        setFollowupDayOptions(DEFAULT_FOLLOWUP_DAYS)
+        setRxDayOptions(DEFAULT_RX_DAYS)
+        setDosagePatternOptions(DEFAULT_DOSAGE_PATTERNS)
+        setTimingOptions(DEFAULT_TIMING_OPTIONS)
+      })
+    return () => { alive = false }
+  }, [])
+
   async function fetchVisits() {
     setLoading(true)
     try {
@@ -1144,6 +1427,8 @@ function OPDTab({ aiMode = false }) {
   )
   const inProgress = visits.filter((v) => v.status === 'in_progress' || v.status === 'in_consultation')
   const done = visits.filter((v) => v.status === 'completed')
+  const activeVisit = inProgress[0] || null
+  const latestDoneVisit = done[0] || null
 
   async function callNext() {
     if (!waiting.length) return toast('No patients waiting', { icon: 'ℹ️' })
@@ -1155,10 +1440,39 @@ function OPDTab({ aiMode = false }) {
     } catch (e) { toast.error(e.response?.data?.detail || 'Error') }
   }
 
+  async function autoSendDraftForVisit(visit) {
+    const draft = rxDraftByVisit[visit.id]
+    const draftItems = Array.isArray(draft?.items) ? draft.items : []
+    const final = draftItems.map(i => ({ ...i, qty: Number(i.qty) || 0 })).filter(i => i.qty > 0)
+    if (!final.length) return false
+    const branchId = draft?.branchId
+    if (!branchId) throw new Error('Select pharmacy branch before marking done.')
+    const bn = draft?.branchLabel || branchId
+    const remarks = `Doctor Prescription (Branch: ${bn}):\n` +
+      final.map(i => `${i.medicine.name} x${i.qty} (${i.pattern}) | ${timingOptions.find(t => t.v === i.timing)?.l || i.timing} | ${i.days} day${i.days > 1 ? 's' : ''}`).join('\n')
+    await api.post('/pharmacy/invoices/create-draft/', {
+      patient: visit.patient,
+      ipd_admission: visit.ipd_admission || null,
+      remarks,
+      items: final.map(it => ({
+        medicine: it.medicine.id, batch: it.batch.id, qty: it.qty,
+        mrp: it.batch.mrp, rate: it.batch.sale_rate,
+        amount: (Number(it.qty) * Number(it.batch.sale_rate)).toFixed(2),
+      })),
+    }, { headers: { 'X-Pharmacy-Branch': branchId } })
+    setRxDraftByVisit((prev) => {
+      const next = { ...prev }
+      delete next[visit.id]
+      return next
+    })
+    return true
+  }
+
   async function completeVisit(visit) {
     try {
+      const sent = await autoSendDraftForVisit(visit)
       await api.patch(`/opd-visits/${visit.id}/`, { status: 'completed' })
-      toast.success('Consultation done')
+      toast.success(sent ? 'Consultation done and draft sent to pharmacy' : 'Consultation done')
       fetchVisits()
     } catch (e) { toast.error(e.response?.data?.detail || 'Error') }
   }
@@ -1197,6 +1511,17 @@ function OPDTab({ aiMode = false }) {
       })
     }
     updateVisitNotes(id, updated);
+  }
+
+  function handleVisitDraftChange({ visitId, branchId, branchLabel, items }) {
+    setRxDraftByVisit((prev) => ({
+      ...prev,
+      [visitId]: {
+        branchId,
+        branchLabel: branchLabel || '',
+        items: Array.isArray(items) ? items : [],
+      },
+    }))
   }
 
   const statusBadge = {
@@ -1276,6 +1601,26 @@ function OPDTab({ aiMode = false }) {
 
         {/* CENTER: Active patient(s) */}
         <div className="flex-1 min-w-0 overflow-y-auto relative">
+          <div className="absolute top-2 right-2 z-30 flex items-center gap-2">
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="h-8 w-8 rounded-lg border border-slate-200 bg-white/95 text-slate-600 hover:text-blue-600 hover:border-blue-300 shadow-sm flex items-center justify-center"
+              title="Customize follow-up and default day options"
+            >
+              <Settings size={14} />
+            </button>
+            <button
+              onClick={() => {
+                const target = activeVisit || latestDoneVisit
+                if (target) setHistoryPreviewVisit(target)
+              }}
+              disabled={!activeVisit && !latestDoneVisit}
+              className="h-8 w-8 rounded-lg border border-slate-200 bg-white/95 text-slate-600 hover:text-blue-600 hover:border-blue-300 shadow-sm flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
+              title="View patient history"
+            >
+              <Eye size={14} />
+            </button>
+          </div>
           {inProgress.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-400 bg-white rounded-2xl border border-dashed border-gray-200 relative overflow-hidden">
               <div className="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mb-3">
@@ -1291,7 +1636,8 @@ function OPDTab({ aiMode = false }) {
                 </button>
               </div>
             </div>
-          ) : inProgress.map(v => {
+          ) : activeVisit ? (() => {
+            const v = activeVisit
             const { meds, followupDays } = extractMedAndFollowup(v.chief_complaint)
             return (
               <div key={v.id} data-no-copy="true" className="bg-white rounded-2xl border border-blue-100 shadow-sm overflow-hidden flex flex-col h-full">
@@ -1406,7 +1752,7 @@ function OPDTab({ aiMode = false }) {
                         <Clock size={12} className="text-gray-500" />
                         <span className="text-[10px] font-extrabold uppercase tracking-widest text-gray-600">Follow-up Date</span>
                       </div>
-                      <ManualFollowUp visitId={v.id} existingDate={v.follow_up_date} />
+                      <ManualFollowUp visitId={v.id} existingDate={v.follow_up_date} quickDays={followupDayOptions} />
                     </div>
                   )}
 
@@ -1419,30 +1765,82 @@ function OPDTab({ aiMode = false }) {
                 </div>
               </div>
             )
-          })}
+          })() : null}
         </div>
 
         {/* RIGHT: Prescription & History panel */}
-        {inProgress.length > 0 && (
+        {(activeVisit || latestDoneVisit) && (
           <div className="w-[40%] shrink-0 flex flex-col gap-3 overflow-y-auto pb-4 pr-1">
-            {inProgress.map(v => (
-              <React.Fragment key={v.id}>
-                <InlineRxPanel visit={v} />
-                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex-1">
-                  <PatientHistoryTimeline
-                    events={historyByVisit[v.id] || []}
-                    filter={historyFilters[v.id] || 'all'}
-                    onFilterChange={nextFilter => setHistoryFilters(prev => ({ ...prev, [v.id]: nextFilter }))}
-                    maxHeightClass="max-h-[500px]"
-                  />
-                </div>
+            {activeVisit && (
+              <React.Fragment key={activeVisit.id}>
+                <InlineRxPanel
+                  visit={activeVisit}
+                  defaultDayOptions={rxDayOptions}
+                  dosagePatternOptions={dosagePatternOptions}
+                  timingOptions={timingOptions}
+                  onDraftChange={handleVisitDraftChange}
+                />
               </React.Fragment>
-            ))}
+            )}
+            {!activeVisit && latestDoneVisit && (
+              <React.Fragment key={`done-${latestDoneVisit.id}`}>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1">
+                  Completed Visit #{latestDoneVisit.token_number}
+                </div>
+                <InlineRxPanel
+                  visit={latestDoneVisit}
+                  defaultDayOptions={rxDayOptions}
+                  dosagePatternOptions={dosagePatternOptions}
+                  timingOptions={timingOptions}
+                  onDraftChange={handleVisitDraftChange}
+                />
+              </React.Fragment>
+            )}
           </div>
         )}
 
       {aiMode && autoSavePrompt && (
         <AutoSavePopup key={autoSavePrompt.token} prompt={autoSavePrompt} onAccept={acceptFollowUp} onReject={() => setAutoSavePrompt(null)} />
+      )}
+      <DayOptionsSettings
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        followupDays={followupDayOptions}
+        rxDays={rxDayOptions}
+        dosagePatterns={dosagePatternOptions}
+        timingOptions={timingOptions}
+        onSave={saveDaySettings}
+        saving={settingsSaving}
+      />
+      {historyPreviewVisit && (
+        <div className="fixed inset-0 z-[10000] bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-bold text-slate-800">Patient History</p>
+                <p className="text-[11px] text-slate-500">
+                  {historyPreviewVisit.patient_name || `Token #${historyPreviewVisit.token_number}`}
+                </p>
+              </div>
+              <button
+                onClick={() => setHistoryPreviewVisit(null)}
+                className="h-8 w-8 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 flex items-center justify-center"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="p-3">
+              <PatientHistoryTimeline
+                events={historyByVisit[historyPreviewVisit.id] || []}
+                filter={historyFilters[historyPreviewVisit.id] || 'all'}
+                onFilterChange={nextFilter =>
+                  setHistoryFilters(prev => ({ ...prev, [historyPreviewVisit.id]: nextFilter }))
+                }
+                maxHeightClass="max-h-[70vh]"
+              />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

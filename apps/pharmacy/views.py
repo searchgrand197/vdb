@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from apps.inventory.services.stock_service import deduct_stock_fifo, get_batch_available_qty
 
 from apps.pharmacy.invoice_number import next_pharmacy_invoice_number
-from apps.pharmacy.models import PharmacyInvoice, PharmacyInvoiceItem, PharmacyOutletSettings, PharmacySupplier
+from apps.pharmacy.models import Pharmacy, PharmacyInvoice, PharmacyInvoiceItem, PharmacyOutletSettings, PharmacySupplier
 from apps.pharmacy.purchase_challan import process_purchase_challan
 from apps.pharmacy.purchase_history import detail_purchase_history, list_purchase_history
 from apps.pharmacy.serializers import (
@@ -28,15 +28,25 @@ from apps.shared.response import success_response
 
 def _get_pharmacy_branch(request):
     """
-    Return the active pharmacy branch Hospital for this request.
+    Return the active pharmacy branch (Pharmacy model) for this request.
 
     Priority:
-      1. ``request.pharmacy_branch``  — set by PharmacyBranchMiddleware when
+      1. ``request.pharmacy``  — set by PharmacyBranchMiddleware when
          the frontend sends ``X-Pharmacy-Branch: <uuid>`` (i.e. pharmacy role).
-      2. ``request.user.pharmacy``      — fallback for non-pharmacy roles or
-         when the header is absent.
+      2. single active branch under ``request.user.hospital`` (safe fallback)
     """
-    return getattr(request, "pharmacy_branch", None) or getattr(request.user, "hospital", None)
+    pharmacy = getattr(request, "pharmacy", None)
+    if pharmacy is not None:
+        return pharmacy
+
+    hospital = getattr(getattr(request, "user", None), "hospital", None)
+    if hospital is None:
+        return None
+
+    active = list(hospital.pharmacies.filter(is_active=True).order_by("created_at")[:2])
+    if len(active) == 1:
+        return active[0]
+    return None
 
 
 class PharmacyOutletSettingsView(generics.RetrieveUpdateAPIView):
@@ -472,10 +482,15 @@ class DoctorStockSearchView(APIView):
         from django.utils import timezone
         import uuid as uuid_module
 
-        pharmacy_id = (request.query_params.get("pharmacy_id") or "").strip()
+        pharmacy_id = (
+            request.query_params.get("pharmacy_id")
+            or request.query_params.get("hospital_id")
+            or ""
+        ).strip()
         q = (request.query_params.get("q") or "").strip()
+        q_lower = q.lower()
 
-        if len(q) < 2:
+        if len(q) < 1:
             return success_response([])
 
         if not pharmacy_id:
@@ -564,7 +579,21 @@ class DoctorStockSearchView(APIView):
                     "days_to_expiry": days,
                 })
 
+        def _match_rank(row):
+            name = (row["medicine"].get("name") or "").strip().lower()
+            sku = (row["medicine"].get("sku") or "").strip().lower()
+            if name == q_lower or sku == q_lower:
+                return 0
+            if name.startswith(q_lower):
+                return 1
+            if sku.startswith(q_lower):
+                return 2
+            if q_lower in name:
+                return 3
+            return 4
+
         out.sort(key=lambda r: (
+            _match_rank(r),
             0 if r["expiry_status"] == "ok" else 1 if r["expiry_status"] == "expiring" else 2,
             r["batch"]["expiry_date"] or "9999-12-31",
             r["medicine"]["name"],

@@ -34,6 +34,30 @@ from apps.shared.response import success_response
 from apps.shared.models import Hospital
 
 
+def _resolve_request_pharmacy(request):
+    """
+    Resolve active pharmacy context for the request.
+
+    Priority:
+    1) Explicit branch selected via middleware/header (`request.pharmacy`)
+    2) If user's hospital has exactly one active pharmacy, use it
+    3) Otherwise return None and force explicit branch selection
+    """
+    pharmacy = getattr(request, "pharmacy", None)
+    if pharmacy is not None:
+        return pharmacy
+
+    hospital = getattr(getattr(request, "user", None), "hospital", None)
+    if not hospital:
+        return None
+
+    active_qs = hospital.pharmacies.filter(is_active=True).order_by("created_at")
+    pharmacies = list(active_qs[:2])
+    if len(pharmacies) == 1:
+        return pharmacies[0]
+    return None
+
+
 def _tablets_per_strip_from_pack_info(pack_info: str) -> int | None:
     """e.g. '1x10' or '1 x 10' → 10 tablets per strip (uses the number after x)."""
     if not pack_info or not str(pack_info).strip():
@@ -76,14 +100,7 @@ def _expiry_status(expiry_date):
 class PharmacyScopedMixin:
     def get_queryset(self):
         qs = super().get_queryset()
-        # Check if a pharmacy branch is explicitly requested via headers (e.g. Doctor prescribing from a branch)
-        pharmacy = getattr(self.request, "pharmacy", None)
-        if not pharmacy:
-            # Fallback to the first pharmacy of the user's hospital
-            hospital = getattr(self.request.user, "hospital", None)
-            if hospital:
-                pharmacy = hospital.pharmacies.first()
-        
+        pharmacy = _resolve_request_pharmacy(self.request)
         pid = getattr(pharmacy, "id", None)
         if pid:
             return qs.filter(pharmacy_id=pid)
@@ -121,11 +138,9 @@ class UnitViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        pharmacy = getattr(self.request, "pharmacy", None)
-        if not pharmacy:
-            hospital = getattr(self.request.user, "hospital", None)
-            pharmacy = hospital.pharmacies.first() if hospital else None
-        
+        pharmacy = _resolve_request_pharmacy(self.request)
+        if pharmacy is None:
+            raise ValidationError({"detail": ["Pharmacy branch context required."]})
         unit = serializer.save(pharmacy_id=pharmacy.id)
         create_audit_log(
             request=self.request,
@@ -164,10 +179,9 @@ class MedicineCategoryViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        pharmacy = getattr(self.request, "pharmacy", None)
-        if not pharmacy:
-            hospital = getattr(self.request.user, "hospital", None)
-            pharmacy = hospital.pharmacies.first() if hospital else None
+        pharmacy = _resolve_request_pharmacy(self.request)
+        if pharmacy is None:
+            raise ValidationError({"detail": ["Pharmacy branch context required."]})
         serializer.save(pharmacy_id=pharmacy.id)
 
 
@@ -201,11 +215,9 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        pharmacy = getattr(self.request, "pharmacy", None)
-        if not pharmacy:
-            hospital = getattr(self.request.user, "hospital", None)
-            pharmacy = hospital.pharmacies.first() if hospital else None
-            
+        pharmacy = _resolve_request_pharmacy(self.request)
+        if pharmacy is None:
+            raise ValidationError({"detail": ["Pharmacy branch context required."]})
         pharmacy_id = pharmacy.id
         unit = serializer.validated_data.get("unit")
         if unit is None:
@@ -244,11 +256,7 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         if len(q) < 2:
             return success_response([])
         # Allow cross-branch search if pharmacy branch header is set
-        pharmacy = getattr(request, "pharmacy", None)
-        if not pharmacy:
-            hospital = getattr(request.user, "hospital", None)
-            pharmacy = hospital.pharmacies.first() if hospital else None
-            
+        pharmacy = _resolve_request_pharmacy(request)
         pid = getattr(pharmacy, "id", None)
         if not pid:
             return Response({"success": False, "detail": "Pharmacy context required."}, status=400)
@@ -338,11 +346,9 @@ class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        pharmacy = getattr(self.request, "pharmacy", None)
-        if not pharmacy:
-            hospital = getattr(self.request.user, "hospital", None)
-            pharmacy = hospital.pharmacies.first() if hospital else None
-            
+        pharmacy = _resolve_request_pharmacy(self.request)
+        if pharmacy is None:
+            raise ValidationError({"detail": ["Pharmacy branch context required."]})
         batch = serializer.save(pharmacy_id=pharmacy.id)
         create_audit_log(
             request=self.request,
@@ -396,7 +402,7 @@ class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
 
 class StockLedgerViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
-    queryset = StockLedger.objects.all().select_related("medicine", "batch", "hospital").order_by("-created_at")
+    queryset = StockLedger.objects.all().select_related("medicine", "batch", "pharmacy").order_by("-created_at")
     filter_backends = (DjangoFilterBackend, SearchFilter)
     filterset_fields = ("batch", "medicine")
     search_fields = ("medicine__name", "batch__batch_no", "reference_type", "reference_id")
@@ -479,7 +485,7 @@ class StockLedgerViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
         create_audit_log(
             request=self.request,
-            pharmacy=hospital,
+            pharmacy=pharmacy,
             module="inventory",
             action="create_stock_ledger",
             obj=entry,

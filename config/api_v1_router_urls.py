@@ -8,6 +8,13 @@ app in ``config.urls`` as usual.
 
 from django.urls import include, path
 
+from apps.accounts.views import UserAdminViewSet
+from apps.attendance.admin_views import (
+    AttendanceRegularizationAdminViewSet,
+    LeaveApplicationAdminViewSet,
+    StaffDailyAttendanceAdminViewSet,
+    StaffLeaveBalanceAdminViewSet,
+)
 from apps.dashboard.views import DoctorFinancialAnalyticsView
 from apps.appointments.views import AppointmentViewSet
 from apps.attendance.views import (
@@ -20,6 +27,7 @@ from apps.attendance.views import (
 from apps.billing.views import BillingInvoiceViewSet
 from apps.doctors.views import (
     DoctorDailyAvailabilityViewSet,
+    DoctorPortalPreferenceView,
     DoctorProfileViewSet,
     DoctorWeeklyScheduleViewSet,
     SpecialtyViewSet,
@@ -37,6 +45,12 @@ from apps.opd.views import OPDVisitViewSet, follow_up_alerts
 from apps.patients.views import PatientViewSet
 from apps.payments.views import PaymentTransactionViewSet, payment_quick_services
 from apps.roles_permissions.user_permission_views import UserPermissionProfileViewSet
+from apps.roles_permissions.admin_views import (
+    ModuleAdminViewSet,
+    PermissionAdminViewSet,
+    PermissionGroupAdminViewSet,
+    RoleAdminViewSet,
+)
 from apps.shared.routers import PublicApiRootRouter
 from apps.staff.views import (
     DepartmentViewSet,
@@ -125,6 +139,15 @@ router.register(
     UserPermissionProfileViewSet,
     basename="user-permission-profiles",
 )
+router.register(r"admin/users", UserAdminViewSet, basename="admin-users")
+router.register(r"admin/rbac/modules", ModuleAdminViewSet, basename="admin-rbac-modules")
+router.register(r"admin/rbac/permissions", PermissionAdminViewSet, basename="admin-rbac-permissions")
+router.register(r"admin/rbac/permission-groups", PermissionGroupAdminViewSet, basename="admin-rbac-permission-groups")
+router.register(r"admin/rbac/roles", RoleAdminViewSet, basename="admin-rbac-roles")
+router.register(r"admin/attendance/daily-records", StaffDailyAttendanceAdminViewSet, basename="admin-attendance-daily-records")
+router.register(r"admin/attendance/regularizations", AttendanceRegularizationAdminViewSet, basename="admin-attendance-regularizations")
+router.register(r"admin/attendance/leaves", LeaveApplicationAdminViewSet, basename="admin-attendance-leaves")
+router.register(r"admin/attendance/leave-balances", StaffLeaveBalanceAdminViewSet, basename="admin-attendance-leave-balances")
 router.register(r"weekly-schedules", DoctorWeeklyScheduleViewSet, basename="weekly-schedules")
 router.register(r"treatment-plans", TreatmentPlanViewSet, basename="treatment-plans")
 router.register(r"treatment-plan-items", TreatmentPlanItemViewSet, basename="treatment-plan-items")
@@ -145,6 +168,7 @@ router.register(r"pharmacy/items", PharmacyInvoiceItemViewSet, basename="pharmac
 router.register(r"pharmacy/suppliers", PharmacySupplierViewSet, basename="pharmacy-suppliers")
 
 urlpatterns = [
+    path("doctors/portal-preferences/", DoctorPortalPreferenceView.as_view(), name="doctors-portal-preferences"),
     path("doctor-analytics/", DoctorFinancialAnalyticsView.as_view(), name="doctor-analytics"),
     path("follow-up-alerts/", follow_up_alerts, name="follow-up-alerts"),
     path("pharmacy/dashboard/", PharmacyDashboardView.as_view(), name="pharmacy-dashboard"),

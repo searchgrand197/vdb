@@ -14,29 +14,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterUniqueTogether(
-            name='medicine',
-            unique_together={('pharmacy', 'sku')},
-        ),
-        migrations.AlterUniqueTogether(
-            name='medicinebatch',
-            unique_together={('pharmacy', 'medicine', 'batch_no')},
-        ),
-        migrations.AlterUniqueTogether(
-            name='medicinecategory',
-            unique_together={('pharmacy', 'name')},
-        ),
-        migrations.AlterUniqueTogether(
-            name='medicinereorderrule',
-            unique_together={('pharmacy', 'medicine')},
-        ),
         migrations.RemoveField(
             model_name='stockledger',
             name='hospital',
-        ),
-        migrations.AlterUniqueTogether(
-            name='unit',
-            unique_together={('pharmacy', 'code')},
         ),
         migrations.AddField(
             model_name='medicine',
@@ -73,6 +53,26 @@ class Migration(migrations.Migration):
             name='pharmacy',
             field=models.ForeignKey(default='1f88d8fb-de32-4ee8-a937-a0e619a87818', on_delete=django.db.models.deletion.PROTECT, related_name='units', to='pharmacy.pharmacy'),
             preserve_default=False,
+        ),
+        migrations.AlterUniqueTogether(
+            name='medicine',
+            unique_together={('pharmacy', 'sku')},
+        ),
+        migrations.AlterUniqueTogether(
+            name='medicinebatch',
+            unique_together={('pharmacy', 'medicine', 'batch_no')},
+        ),
+        migrations.AlterUniqueTogether(
+            name='medicinecategory',
+            unique_together={('pharmacy', 'name')},
+        ),
+        migrations.AlterUniqueTogether(
+            name='medicinereorderrule',
+            unique_together={('pharmacy', 'medicine')},
+        ),
+        migrations.AlterUniqueTogether(
+            name='unit',
+            unique_together={('pharmacy', 'code')},
         ),
         migrations.AddIndex(
             model_name='medicine',
