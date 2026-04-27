@@ -4,7 +4,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from rest_framework import permissions, status
+from rest_framework import permissions, serializers, status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -168,4 +168,67 @@ class PasswordResetConfirmView(APIView):
         user.set_password(new_password)
         user.save(update_fields=["password"])
         return success_response(message="Password reset successfully.")
+
+
+class PharmacyBranchListView(APIView):
+    """
+    GET /api/v1/auth/pharmacies/
+
+    Public endpoint — returns all active Hospital rows flagged as
+    pharmacy branches (is_pharmacy=True, is_active=True).
+
+    Used by the login page to populate the pharmacy branch selector
+    before the user authenticates.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        from apps.pharmacy.models import Pharmacy
+
+        branches = (
+            Pharmacy.objects.filter(is_active=True)
+            .order_by("display_name", "name")
+            .values("id", "name", "display_name")
+        )
+        data = [
+            {
+                "id": str(b["id"]),
+                "label": b["display_name"].strip() or b["name"],
+                "name": b["name"],
+            }
+            for b in branches
+        ]
+        return success_response(data=data)
+
+
+class SuperuserOnly(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+class UserAdminSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "phone",
+            "first_name",
+            "last_name",
+            "hospital",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "date_joined",
+            "last_login",
+        ]
+        read_only_fields = ["id", "date_joined", "last_login"]
+
+
+class UserAdminViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.select_related("hospital").all().order_by("-date_joined")
+    serializer_class = UserAdminSerializer
+    permission_classes = [permissions.IsAuthenticated, SuperuserOnly]
+
 

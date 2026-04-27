@@ -20,6 +20,11 @@ class HospitalTenantTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs: dict) -> dict:
+        username_field = getattr(self, "username_field", "email")
+        raw_identifier = attrs.get(username_field)
+        if isinstance(raw_identifier, str):
+            attrs[username_field] = raw_identifier.strip().lower()
+
         data = super().validate(attrs)
         user = self.user
         data["is_active"] = bool(user.is_active)

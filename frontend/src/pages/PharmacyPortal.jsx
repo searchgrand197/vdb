@@ -29,6 +29,7 @@ import PurchaseChallanPanel from '../pharmacy/PurchaseChallanPanel'
 import PurchaseHistoryDashboard from '../pharmacy/PurchaseHistoryDashboard'
 import PharmacyDashboard from '../pharmacy/PharmacyDashboard'
 import PharmacyCategoriesView from '../pharmacy/PharmacyCategoriesView'
+import DraftsView from '../pharmacy/DraftsView'
 import { parseApiError } from '../pharmacy/pharmacyCalculations'
 import {
   resolveCategoryRules,
@@ -88,6 +89,7 @@ export default function PharmacyPortal() {
   const [showAddPatient, setShowAddPatient] = useState(false)
   const [outletSettings, setOutletSettings] = useState(null)
   const [billingPatient, setBillingPatient] = useState(null)
+  const [draftInvoiceToLoad, setDraftInvoiceToLoad] = useState(null)
   const [purchaseSubView, setPurchaseSubView] = useState('entry')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 1200)
 
@@ -154,6 +156,7 @@ export default function PharmacyPortal() {
         <nav className="flex-1 py-2 flex flex-col gap-0.5">
           {[
             { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+            { id: 'drafts', label: 'Drafts', icon: FileText },
             { id: 'billing', label: 'Sales', icon: ShoppingBag },
             { id: 'purchase', label: 'Purchase', icon: Truck },
             { id: 'inventory', label: 'Inventory', icon: Package },
@@ -216,6 +219,18 @@ export default function PharmacyPortal() {
               <ErrorBoundary componentName="PharmacyDashboard">
                 {view === 'dashboard' && <PharmacyDashboard />}
               </ErrorBoundary>
+              <ErrorBoundary componentName="DraftsView">
+                {view === 'drafts' && (
+                  <DraftsView
+                    onLoadDraft={(draft) => {
+                      setDraftInvoiceToLoad(draft)
+                      setView('billing')
+                    }}
+                    completedInvoices={invoices}
+                    onViewInvoice={(inv) => setPrintingInvoice(inv)}
+                  />
+                )}
+              </ErrorBoundary>
               <ErrorBoundary componentName="ErpBillingView">
                 {view === 'billing' && (
                   <ErpBillingView
@@ -229,6 +244,8 @@ export default function PharmacyPortal() {
                     selectedPt={billingPatient}
                     setSelectedPt={setBillingPatient}
                     outletSettings={outletSettings}
+                    draftInvoiceToLoad={draftInvoiceToLoad}
+                    setDraftInvoiceToLoad={setDraftInvoiceToLoad}
                   />
                 )}
               </ErrorBoundary>

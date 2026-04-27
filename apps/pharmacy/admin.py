@@ -12,10 +12,10 @@ from apps.pharmacy.models import (
 
 @admin.register(PharmacySupplier)
 class PharmacySupplierAdmin(admin.ModelAdmin):
-    list_display = ("name", "hospital", "phone", "gst_number", "is_active", "updated_at")
-    list_filter = ("is_active", "hospital")
+    list_display = ("name", "pharmacy", "phone", "gst_number", "is_active", "updated_at")
+    list_filter = ("is_active", "pharmacy")
     search_fields = ("name", "phone", "gst_number", "address")
-    raw_id_fields = ("hospital",)
+    raw_id_fields = ("pharmacy",)
 
 
 class PharmacyPurchaseChallanLineInline(admin.TabularInline):
@@ -31,7 +31,7 @@ class PharmacyPurchaseChallanAdmin(admin.ModelAdmin):
     list_display = (
         "challan_no",
         "purchase_date",
-        "hospital",
+        "pharmacy",
         "supplier",
         "supplier_name_snapshot",
         "total_items",
@@ -40,10 +40,10 @@ class PharmacyPurchaseChallanAdmin(admin.ModelAdmin):
         "payment_type",
         "created_at",
     )
-    list_filter = ("hospital", "gst_enabled", "payment_type", "purchase_date")
+    list_filter = ("pharmacy", "gst_enabled", "payment_type", "purchase_date")
     search_fields = ("challan_no", "supplier_name_snapshot", "id")
     date_hierarchy = "purchase_date"
-    raw_id_fields = ("hospital", "supplier", "created_by")
+    raw_id_fields = ("pharmacy", "supplier", "created_by")
     readonly_fields = ("created_at", "updated_at")
     inlines = (PharmacyPurchaseChallanLineInline,)
 
@@ -60,7 +60,7 @@ class PharmacyPurchaseChallanLineAdmin(admin.ModelAdmin):
         "final_amount",
         "created_at",
     )
-    list_filter = ("quantity_basis", "rate_type", "challan__hospital")
+    list_filter = ("quantity_basis", "rate_type", "challan__pharmacy")
     search_fields = ("challan__challan_no", "medicine__name", "batch__batch_no")
     raw_id_fields = ("challan", "medicine", "batch")
     readonly_fields = ("created_at", "updated_at")
@@ -69,7 +69,7 @@ class PharmacyPurchaseChallanLineAdmin(admin.ModelAdmin):
 @admin.register(PharmacyOutletSettings)
 class PharmacyOutletSettingsAdmin(admin.ModelAdmin):
     list_display = (
-        "hospital",
+        "pharmacy",
         "business_name",
         "gst_number",
         "dl_number",
@@ -77,8 +77,8 @@ class PharmacyOutletSettingsAdmin(admin.ModelAdmin):
         "default_gst_percent",
         "updated_at",
     )
-    search_fields = ("business_name", "gst_number", "dl_number", "hospital__name", "email")
-    raw_id_fields = ("hospital",)
+    search_fields = ("business_name", "gst_number", "dl_number", "pharmacy__name", "email")
+    raw_id_fields = ("pharmacy",)
 
 
 class PharmacyInvoiceItemInline(admin.TabularInline):
@@ -94,7 +94,7 @@ class PharmacyInvoiceAdmin(admin.ModelAdmin):
     list_display = (
         "invoice_no",
         "date",
-        "hospital",
+        "pharmacy",
         "patient",
         "status",
         "gst_enabled",
@@ -103,7 +103,7 @@ class PharmacyInvoiceAdmin(admin.ModelAdmin):
         "paid_amount",
         "created_at",
     )
-    list_filter = ("status", "gst_enabled", "payment_method", "hospital", "date")
+    list_filter = ("status", "gst_enabled", "payment_method", "pharmacy", "date")
     search_fields = (
         "invoice_no",
         "patient__uhid",
@@ -112,7 +112,7 @@ class PharmacyInvoiceAdmin(admin.ModelAdmin):
         "remarks",
     )
     date_hierarchy = "date"
-    raw_id_fields = ("hospital", "patient", "ipd_admission", "referred_by", "created_by")
+    raw_id_fields = ("pharmacy", "patient", "ipd_admission", "referred_by", "created_by")
     readonly_fields = ("created_at", "updated_at")
     inlines = (PharmacyInvoiceItemInline,)
 
@@ -130,7 +130,7 @@ class PharmacyInvoiceItemAdmin(admin.ModelAdmin):
         "sgst_rate",
         "created_at",
     )
-    list_filter = ("invoice__hospital", "invoice__status")
+    list_filter = ("invoice__pharmacy", "invoice__status")
     search_fields = ("invoice__invoice_no", "medicine__name", "batch__batch_no")
     raw_id_fields = ("invoice", "medicine", "batch")
     readonly_fields = ("created_at", "updated_at")

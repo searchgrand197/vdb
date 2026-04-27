@@ -2,7 +2,7 @@ import React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { LogOut, Hospital } from 'lucide-react'
 
-export default function Layout({ title, subtitle, color = 'blue', children, tabs, activeTab, onTab, headerExtra }) {
+export default function Layout({ title, subtitle, color = 'blue', children, tabs, activeTab, onTab, headerExtra, noScroll }) {
   const nav = useNavigate()
 
   function logout() {
@@ -58,7 +58,7 @@ export default function Layout({ title, subtitle, color = 'blue', children, tabs
         </div>
       )}
 
-      <main className="flex-1 overflow-auto p-4 min-h-0">{children}</main>
+      <main className={`flex-1 p-4 min-h-0 flex flex-col ${noScroll ? 'overflow-hidden' : 'overflow-auto'}`}>{children}</main>
     </div>
   )
 }

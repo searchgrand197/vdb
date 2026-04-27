@@ -8,10 +8,25 @@ from apps.doctors.models import DoctorProfile
 from apps.inventory.models import Medicine, MedicineBatch
 
 
+class Pharmacy(TimeStampedModel, UUIDPrimaryKeyModel):
+    hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="pharmacies")
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=64, unique=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    display_name = models.CharField(max_length=200, blank=True, default="")
+
+    def __str__(self) -> str:
+        return self.name
+
+    @property
+    def branch_label(self) -> str:
+        return self.display_name.strip() or self.name
+
+
 class PharmacySupplier(TimeStampedModel, UUIDPrimaryKeyModel):
     """Purchase party / distributor (Marg-style supplier master)."""
 
-    hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="pharmacy_suppliers")
+    pharmacy = models.ForeignKey(Pharmacy, on_delete=models.CASCADE, related_name="pharmacy_suppliers")
     name = models.CharField(max_length=200)
     phone = models.CharField(max_length=40, blank=True, default="")
     gst_number = models.CharField(max_length=40, blank=True, default="")
@@ -20,8 +35,8 @@ class PharmacySupplier(TimeStampedModel, UUIDPrimaryKeyModel):
 
     class Meta:
         indexes = [
-            models.Index(fields=["hospital", "name"]),
-            models.Index(fields=["hospital", "is_active"]),
+            models.Index(fields=["pharmacy", "name"]),
+            models.Index(fields=["pharmacy", "is_active"]),
         ]
 
     def __str__(self) -> str:
@@ -31,7 +46,7 @@ class PharmacySupplier(TimeStampedModel, UUIDPrimaryKeyModel):
 class PharmacyPurchaseChallan(TimeStampedModel, UUIDPrimaryKeyModel):
     """Persisted purchase challan (Marg-style history); one row per POST to purchase-challan."""
 
-    hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="pharmacy_purchase_challans")
+    pharmacy = models.ForeignKey(Pharmacy, on_delete=models.CASCADE, related_name="pharmacy_purchase_challans")
     supplier = models.ForeignKey(
         PharmacySupplier,
         on_delete=models.SET_NULL,
@@ -71,8 +86,8 @@ class PharmacyPurchaseChallan(TimeStampedModel, UUIDPrimaryKeyModel):
     class Meta:
         ordering = ("-purchase_date", "-created_at")
         indexes = [
-            models.Index(fields=["hospital", "purchase_date"], name="pharm_pc_hosp_date_idx"),
-            models.Index(fields=["hospital", "supplier"], name="pharm_pc_hosp_sup_idx"),
+            models.Index(fields=["pharmacy", "purchase_date"], name="pharm_pc_hosp_date_idx"),
+            models.Index(fields=["pharmacy", "supplier"], name="pharm_pc_hosp_sup_idx"),
         ]
 
     def __str__(self) -> str:
@@ -132,9 +147,9 @@ class PharmacyPurchaseChallanLine(TimeStampedModel, UUIDPrimaryKeyModel):
 
 
 class PharmacyOutletSettings(TimeStampedModel, UUIDPrimaryKeyModel):
-    """Editable pharmacy letterhead / GST details for invoices (one row per hospital)."""
+    """Editable pharmacy letterhead / GST details for invoices (one row per pharmacy)."""
 
-    hospital = models.OneToOneField(Hospital, on_delete=models.CASCADE, related_name="pharmacy_outlet_settings")
+    pharmacy = models.OneToOneField(Pharmacy, on_delete=models.CASCADE, related_name="pharmacy_outlet_settings")
     business_name = models.CharField(max_length=200, blank=True, default="")
     address = models.TextField(blank=True, default="")
     mobile = models.CharField(max_length=40, blank=True, default="")
@@ -146,7 +161,7 @@ class PharmacyOutletSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     default_sale_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
 
     def __str__(self) -> str:
-        return f"Pharmacy settings ({self.hospital_id})"
+        return f"Pharmacy settings ({self.pharmacy_id})"
 
 
 class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
@@ -155,7 +170,7 @@ class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
         FINALIZED = "finalized", "Finalized"
         CANCELLED = "cancelled", "Cancelled"
 
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="pharmacy_invoices")
+    pharmacy = models.ForeignKey(Pharmacy, on_delete=models.PROTECT, related_name="pharmacy_invoices")
     patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="pharmacy_invoices")
     ipd_admission = models.ForeignKey(
         "ipd.IPDAdmission",

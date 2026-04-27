@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from apps.doctors.models import (
     DoctorDailyAvailability,
+    DoctorPortalPreference,
     DoctorProfile,
     DoctorWeeklySchedule,
     Specialty,
@@ -118,4 +119,90 @@ class DoctorDailyAvailabilityCreateUpdateSerializer(serializers.ModelSerializer)
     class Meta:
         model = DoctorDailyAvailability
         fields = ["doctor", "date", "is_available", "open_from_time", "open_to_time", "closed_reason"]
+
+
+class DoctorPortalPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DoctorPortalPreference
+        fields = [
+            "id",
+            "followup_day_options",
+            "rx_default_day_options",
+            "dosage_pattern_options",
+            "food_timing_options",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    @staticmethod
+    def _normalize_days(value, fallback):
+        arr = value if isinstance(value, list) else []
+        cleaned = sorted({int(n) for n in arr if isinstance(n, (int, float)) and 1 <= int(n) <= 365})
+        return cleaned or fallback
+
+    def validate_followup_day_options(self, value):
+        return self._normalize_days(value, [3, 5, 7, 10, 14, 30])
+
+    def validate_rx_default_day_options(self, value):
+        return self._normalize_days(value, [1, 3, 5, 7, 10, 14, 30])
+
+    @staticmethod
+    def _normalize_option_pairs(value, fallback):
+        arr = value if isinstance(value, list) else []
+        cleaned = []
+        seen = set()
+        for row in arr:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("v", "")).strip()[:20]
+            label = str(row.get("l", "")).strip()[:80]
+            if not code or not label or code in seen:
+                continue
+            seen.add(code)
+            cleaned.append({"v": code, "l": label})
+        return cleaned or fallback
+
+    @staticmethod
+    def _normalize_dosage_option_pairs(value, fallback):
+        arr = value if isinstance(value, list) else []
+        cleaned = []
+        seen = set()
+        for row in arr:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("v", "")).strip()[:20]
+            label = str(row.get("l", "")).strip()[:80]
+            qty = row.get("q", 0)
+            try:
+                qty = float(qty)
+            except (TypeError, ValueError):
+                qty = 0
+            if not code or not label or code in seen:
+                continue
+            if qty <= 0:
+                continue
+            seen.add(code)
+            cleaned.append({"v": code, "l": label, "q": qty})
+        return cleaned or fallback
+
+    def validate_dosage_pattern_options(self, value):
+        return self._normalize_dosage_option_pairs(
+            value,
+            [
+                {"v": "1", "l": "1 (OD)", "q": 1},
+                {"v": "1-0-1", "l": "1-0-1 (BD)", "q": 2},
+                {"v": "1-1", "l": "1-1 (BD)", "q": 2},
+            ],
+        )
+
+    def validate_food_timing_options(self, value):
+        return self._normalize_option_pairs(
+            value,
+            [
+                {"v": "AF", "l": "After Food"},
+                {"v": "BF", "l": "Before Food"},
+                {"v": "EM", "l": "Empty Stomach"},
+            ],
+        )
 

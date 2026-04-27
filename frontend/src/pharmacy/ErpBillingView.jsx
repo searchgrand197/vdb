@@ -226,6 +226,8 @@ function ErpBillingViewInner({
   selectedPt,
   setSelectedPt,
   outletSettings,
+  draftInvoiceToLoad,
+  setDraftInvoiceToLoad,
 }) {
   const now = new Date()
   const defaultInvoiceDate = format(now, 'yyyy-MM-dd')
@@ -412,7 +414,9 @@ function ErpBillingViewInner({
       const ix = prev.findIndex((r) => r.id === rowId)
       if (ix < 0) return prev
       const merged = { ...prev[ix], ...partial }
-      if (Number(merged.pack_size) <= 1) {
+      // Only blank loose when user explicitly edits packs on a single-unit medicine.
+      // Do NOT blank it unconditionally — draft-loaded loose values must survive.
+      if (Number(merged.pack_size) <= 1 && 'packs' in partial) {
         merged.loose = ''
       }
       if ('packs' in partial || 'loose' in partial || 'pack_size' in partial) {
@@ -496,6 +500,85 @@ function ErpBillingViewInner({
     }
   }, [activeRow, rows, replacingRowId])
 
+  React.useEffect(() => {
+    if (!draftInvoiceToLoad) return
+
+    // ── Auto-select patient ──────────────────────────────────────────────────
+    const pd = draftInvoiceToLoad.patient_details
+    if (pd && pd.id) {
+      setSelectedPt({
+        id: pd.id,
+        name: `${pd.first_name || ''} ${pd.last_name || ''}`.trim(),
+        phone: pd.phone || '',
+        uhid: pd.uhid || '',
+        age: pd.age || '',
+        gender: pd.gender || '',
+        ...pd,
+      })
+    }
+
+    // ── Map inline items (already in invoice serializer response) ────────────
+    const draftItems = Array.isArray(draftInvoiceToLoad.items) ? draftInvoiceToLoad.items : []
+    if (draftItems.length === 0) {
+      toast('Draft has no medicines', { icon: '⚠️' })
+      return
+    }
+
+    const newRows = draftItems.map(item => {
+      const mId = typeof item.medicine === 'object' ? item.medicine?.id : item.medicine
+      const bId = typeof item.batch === 'object' ? item.batch?.id : item.batch
+
+      // Try to find full objects from already-loaded portal data (may be empty if cross-hospital)
+      const m = _medicines.find(x => x.id === mId) || {
+        id: mId,
+        name: item.medicine_name || 'Unknown',
+        pack_size: 1,
+        hsn_code: '',
+        pack_info: '',
+        gst_percent: '0',
+        unit_conversions: {},
+      }
+      const b = _batches.find(x => x.id === bId) || {
+        id: bId,
+        batch_no: item.batch_no || item.snapshot_batch_no || '',
+        sale_rate: item.rate || '0',
+        mrp: item.mrp || '0',
+        expiry_date: item.expiry_date || item.snapshot_expiry_date || null,
+      }
+
+      const qty = Number(item.qty) || 0
+      const packSize = Math.max(1, Number(m?.pack_size) || 1)
+
+      // Doctors always prescribe in individual/loose units — always populate 'loose'.
+      // qty is also set directly so amount calculation works immediately.
+      // For single-unit medicines (pack_size=1) the loose field is visually hidden
+      // but qty on the row is still correct for billing.
+      return {
+        id: newBillingRowId(),
+        medicine: m,
+        batch: b,
+        packs: '',
+        loose: String(qty),
+        pack_size: packSize,
+        qty: qty,
+        rate: Number(b?.sale_rate || item.rate || 0),
+        amount: 0,
+        hsn: m?.hsn_code || '',
+        pack: m?.pack_info || '',
+        gst_percent: m?.gst_percent != null ? String(m.gst_percent) : '',
+        gst_type: 'exclusive',
+        no_gst: false,
+        line_discount: discountPercentFromMrpAndRate(b?.mrp, b?.sale_rate),
+        discount_user_set: false,
+        expiry_status: null,
+      }
+    })
+
+    setRows(normalizeRows(newRows, createNewRow))
+    toast.success(`Loaded ${draftItems.length} medicine(s) from draft`)
+  }, [draftInvoiceToLoad, setSelectedPt])
+
+
   const lineMarg = useMemo(() => {
     return rows.map((r) => {
       if (!r.medicine || !(Number(r.qty) > 0)) return null
@@ -543,6 +626,7 @@ function ErpBillingViewInner({
         gst_percent: pick.medicine.gst_percent,
         unit_conversions: pick.medicine.unit_conversions,
         unit_name: pick.medicine.unit_name,
+        pack_size: pick.medicine.pack_size,  // ← needed so isSingleUnitPack can fall back to this
       }
       const b = {
         id: pick.batch.id,
@@ -583,13 +667,19 @@ function ErpBillingViewInner({
     setSearchResults([])
     const pickedPackSize = Math.max(1, Number(pick?.medicine?.pack_size) || 1)
     setActiveField(pickedPackSize > 1 ? 'loose' : 'packs')
-    setTimeout(() => {
-      if (pickedPackSize > 1 && looseRefs.current[rowId]) {
-        looseRefs.current[rowId].focus()
-        return
-      }
-      packRefs.current[rowId]?.focus()
-    }, 50)
+    // Give React time to re-render the row (loose input only mounts when pack_size > 1)
+    const focusWithRetry = (attempts = 0) => {
+      setTimeout(() => {
+        if (pickedPackSize > 1) {
+          const el = looseRefs.current[rowId]
+          if (el) { el.focus(); return }
+          if (attempts < 8) focusWithRetry(attempts + 1)
+        } else {
+          packRefs.current[rowId]?.focus()
+        }
+      }, attempts === 0 ? 80 : 60)
+    }
+    focusWithRetry()
   }, [])
 
   function handleRowEnter(e, rowId, field) {
@@ -657,6 +747,12 @@ function ErpBillingViewInner({
 
     let createdInvoice = null
     try {
+      if (draftInvoiceToLoad?.id) {
+        // Clean up draft before finalizing to prevent duplicate invoice numbers or logic tangles
+        await api.delete(`/pharmacy/invoices/${draftInvoiceToLoad.id}/`).catch(() => {})
+        setDraftInvoiceToLoad(null)
+      }
+
       const { data: invData } = await api.post('/pharmacy/invoices/', {
         patient: selectedPt.id,
         ipd_admission: linkedAdmission?.id || null,
@@ -951,7 +1047,20 @@ function ErpBillingViewInner({
               {rows.map((row, idx) => {
                 const expSt = rowExpiryStatus(row)
                 const badgeCls = expiryBadgeClass(expSt)
-                const isSingleUnitPack = (Number(row.pack_size) || 1) <= 1
+                // Resolve effective pack size: row.pack_size > medicine.pack_size > unit_conversions > 1
+                const resolvedPackSize = (() => {
+                  const rps = Number(row.pack_size)
+                  if (rps > 1) return rps
+                  const mps = Number(row.medicine?.pack_size)
+                  if (mps > 1) return mps
+                  const conv = row.medicine?.unit_conversions || {}
+                  for (const k of ['strip', 'STRIP', 'box', 'BOX', 'carton', 'CARTON']) {
+                    const v = Number(conv[k])
+                    if (v > 1) return v
+                  }
+                  return 1
+                })()
+                const isSingleUnitPack = resolvedPackSize <= 1
                 return (
                   <div
                     key={row.id}
@@ -1077,10 +1186,10 @@ function ErpBillingViewInner({
                     </div>
                     <div
                       className={`${CELL_NUM} text-[10px] text-slate-700`}
-                      title="Strip MRP (unit MRP × pack size)"
+                      title="Unit MRP from batch"
                     >
-                      {row.batch?.mrp != null
-                        ? (Number(row.batch.mrp) * Math.max(1, Number(row.pack_size) || 1)).toFixed(2)
+                      {row.batch?.mrp != null && Number(row.batch.mrp) > 0
+                        ? Number(row.batch.mrp).toFixed(2)
                         : ''}
                     </div>
                     <div className={CELL_INP_WRAP}>

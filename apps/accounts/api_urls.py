@@ -6,6 +6,7 @@ from apps.accounts.views import (
     PasswordResetConfirmView,
     PasswordResetRequestView,
     PasswordChangeView,
+    PharmacyBranchListView,
     TokenObtainPairWithResponse,
     UserProfileView,
 )
@@ -18,5 +19,8 @@ urlpatterns = [
     path("auth/password-change/", PasswordChangeView.as_view(), name="auth-password-change"),
     path("auth/password-reset/request/", PasswordResetRequestView.as_view(), name="auth-password-reset-request"),
     path("auth/password-reset/confirm/", PasswordResetConfirmView.as_view(), name="auth-password-reset-confirm"),
+    # Public: pharmacy branch list for login-page selector
+    path("auth/pharmacies/", PharmacyBranchListView.as_view(), name="auth-pharmacies"),
 ]
+
 

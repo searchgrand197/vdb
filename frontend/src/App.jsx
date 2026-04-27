@@ -10,6 +10,7 @@ const TVDisplay = lazy(() => import('./pages/TVDisplay'))
 const LabPortal = lazy(() => import('./pages/LabPortal'))
 const PrintSlipPage = lazy(() => import('./pages/PrintSlipPage'))
 const PharmacyPortal = lazy(() => import('./pages/PharmacyPortal'))
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
 
 const ROLE_PATHS = {
   staff: '/staff',
@@ -17,6 +18,7 @@ const ROLE_PATHS = {
   receptionist: '/receptionist',
   lab: '/lab',
   pharmacy: '/pharmacy',
+  admin: '/admin-dashboard',
 }
 
 function PrivateRoute({ children }) {
@@ -30,6 +32,19 @@ function HomeRedirect() {
     return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
   }
   return <Navigate to="/login" replace />
+}
+
+function SuperuserRoute({ children }) {
+  const token = localStorage.getItem('access')
+  if (!token) return <Navigate to="/login" replace />
+  try {
+    const user = JSON.parse(localStorage.getItem('user') || '{}')
+    if (user?.is_superuser) return children
+  } catch {
+    // fall through to redirect
+  }
+  const role = localStorage.getItem('role') || 'staff'
+  return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
 }
 
 function PageLoading() {
@@ -53,11 +68,13 @@ function AppHeadManager() {
       if (firstSegment === 'pharmacy') return 'pharmacy'
       if (firstSegment === 'receptionist' || firstSegment === 'reception') return 'receptionist'
       if (firstSegment === 'staff') return 'staff'
+      if (firstSegment === 'admin-dashboard') return 'admin'
 
       const savedRole = localStorage.getItem('role')
       if (savedRole === 'doctor') return 'doctor'
       if (savedRole === 'pharmacy') return 'pharmacy'
       if (savedRole === 'receptionist' || savedRole === 'reception') return 'receptionist'
+      if (savedRole === 'admin') return 'admin'
       return 'staff'
     }
 
@@ -80,6 +97,11 @@ function AppHeadManager() {
       },
       staff: {
         title: 'Staff Portal - Vardaan',
+        iconHref: '/icons/icon-staff-192.png?v=4',
+        manifestHref: '/manifest-staff.json?v=4',
+      },
+      admin: {
+        title: 'Admin Portal - Vardaan',
         iconHref: '/icons/icon-staff-192.png?v=4',
         manifestHref: '/manifest-staff.json?v=4',
       },
@@ -209,6 +231,22 @@ export default function App() {
             <PrivateRoute>
               <PharmacyPortal />
             </PrivateRoute>
+          }
+        />
+        <Route
+          path="/admin-dashboard"
+          element={
+            <SuperuserRoute>
+              <AdminDashboard />
+            </SuperuserRoute>
+          }
+        />
+        <Route
+          path="/admin-dashboard/:moduleKey"
+          element={
+            <SuperuserRoute>
+              <AdminDashboard />
+            </SuperuserRoute>
           }
         />
         <Route path="/tv/:roomCode" element={<TVDisplay />} />

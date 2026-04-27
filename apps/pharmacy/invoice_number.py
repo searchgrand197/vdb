@@ -10,10 +10,10 @@ from apps.pharmacy.models import PharmacyInvoice
 INV_RE = re.compile(r"^INV-(\d{4})-(\d+)$", re.IGNORECASE)
 
 
-def next_pharmacy_invoice_number(hospital_id, year: int | None = None) -> str:
+def next_pharmacy_invoice_number(pharmacy_id, year: int | None = None) -> str:
     y = year or datetime.now().year
     prefix = f"INV-{y}-"
-    qs = PharmacyInvoice.objects.filter(hospital_id=hospital_id, invoice_no__istartswith=prefix).values_list(
+    qs = PharmacyInvoice.objects.filter(pharmacy_id=pharmacy_id, invoice_no__istartswith=prefix).values_list(
         "invoice_no", flat=True
     )
     max_seq = 0

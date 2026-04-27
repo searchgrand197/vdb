@@ -98,3 +98,58 @@ class DoctorDailyAvailability(TimeStampedModel, UUIDPrimaryKeyModel):
 
 def default_doctor_daily_date() -> timezone.datetime.date:
     return timezone.now().date()
+
+
+def default_followup_days() -> list[int]:
+    return [3, 5, 7, 10, 14, 30]
+
+
+def default_rx_days() -> list[int]:
+    return [1, 3, 5, 7, 10, 14, 30]
+
+
+def default_dosage_pattern_options() -> list[dict]:
+    return [
+        {"v": "1", "l": "1 (OD)", "q": 1},
+        {"v": "1-0-1", "l": "1-0-1 (BD)", "q": 2},
+        {"v": "1-1", "l": "1-1 (BD)", "q": 2},
+        {"v": "1-1-1", "l": "1-1-1 (TDS)", "q": 3},
+        {"v": "1-1-1-1", "l": "1-1-1-1 (QID)", "q": 4},
+        {"v": "0-1", "l": "0-1 (Night)", "q": 1},
+        {"v": "1-0", "l": "1-0 (Morning)", "q": 1},
+        {"v": "2-2", "l": "2-2 (BD)", "q": 4},
+        {"v": "2-2-2", "l": "2-2-2 (TDS)", "q": 6},
+        {"v": "0.5-0.5", "l": "0.5-0.5 (Half BD)", "q": 1},
+    ]
+
+
+def default_food_timing_options() -> list[dict]:
+    return [
+        {"v": "AF", "l": "After Food"},
+        {"v": "BF", "l": "Before Food"},
+        {"v": "EM", "l": "Empty Stomach"},
+        {"v": "BD", "l": "Twice Daily"},
+        {"v": "TDS", "l": "Three Times"},
+        {"v": "QID", "l": "Four Times"},
+        {"v": "HS", "l": "Bedtime"},
+        {"v": "SOS", "l": "As Needed"},
+    ]
+
+
+class DoctorPortalPreference(TimeStampedModel, UUIDPrimaryKeyModel):
+    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="doctor_portal_preferences")
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="doctor_portal_preference",
+    )
+    followup_day_options = models.JSONField(default=default_followup_days)
+    rx_default_day_options = models.JSONField(default=default_rx_days)
+    dosage_pattern_options = models.JSONField(default=default_dosage_pattern_options)
+    food_timing_options = models.JSONField(default=default_food_timing_options)
+
+    class Meta:
+        indexes = [models.Index(fields=["hospital", "user"])]
+
+    def __str__(self) -> str:
+        return f"DoctorPortalPreference<{self.user_id}>"

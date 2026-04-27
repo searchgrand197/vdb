@@ -7,6 +7,13 @@ function clearAuthStorage() {
   localStorage.removeItem('refresh')
   localStorage.removeItem('role')
   localStorage.removeItem('user')
+  localStorage.removeItem('pharmacy_branch_id')
+  localStorage.removeItem('pharmacy_branch_label')
+}
+
+// Helper – read selected pharmacy branch id (set on login when role=pharmacy)
+export function getPharmacyBranchId() {
+  return localStorage.getItem('pharmacy_branch_id') || null
 }
 
 // Helper – read hospital_id from the stored user object
@@ -22,6 +29,17 @@ export function getHospitalId() {
 api.interceptors.request.use(cfg => {
   const token = localStorage.getItem('access')
   if (token) cfg.headers.Authorization = `Bearer ${token}`
+
+  // ── Pharmacy branch override ───────────────────────────────────────────
+  // When role=pharmacy the user picks a branch on login. We send its ID as a
+  // custom header so the backend middleware can scope all DB queries to that
+  // specific pharmacy branch (Hospital row), regardless of which Hospital the
+  // user account is linked to in the DB.
+  const role = localStorage.getItem('role')
+  const branchId = getPharmacyBranchId()
+  if (role === 'pharmacy' && branchId) {
+    cfg.headers['X-Pharmacy-Branch'] = branchId
+  }
 
   const hospitalId = getHospitalId()
   if (hospitalId && ['post', 'put', 'patch'].includes((cfg.method || '').toLowerCase())) {

@@ -9,7 +9,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.inventory.models import MedicineBatch, StockLedger
-from apps.shared.models import Hospital
+from apps.pharmacy.models import Pharmacy
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,7 @@ class BatchDeduction:
 
 def get_batch_available_qty(batch: MedicineBatch) -> Decimal:
     total = (
-        StockLedger.objects.filter(hospital_id=batch.hospital_id, batch_id=batch.id)
+        StockLedger.objects.filter(pharmacy_id=batch.pharmacy_id, batch_id=batch.id)
         .aggregate(s=Sum("qty_change"))
         .get("s")
     )
@@ -30,7 +30,7 @@ def get_batch_available_qty(batch: MedicineBatch) -> Decimal:
 def deduct_stock_fifo(
     *,
     request,
-    hospital: Hospital,
+    pharmacy: Pharmacy,
     medicine_batch_pairs: Sequence[Tuple[MedicineBatch, Decimal]],
     reference_id: str = "",
 ) -> None:
@@ -55,7 +55,7 @@ def deduct_stock_fifo(
             raise ValueError(f"Insufficient stock for batch={batch.batch_no}. Available={available} requested={qty}")
 
         StockLedger.objects.create(
-            hospital_id=hospital.id,
+            pharmacy_id=pharmacy.id,
             medicine_id=batch.medicine_id,
             batch_id=batch.id,
             qty_change=(-qty),
@@ -66,7 +66,7 @@ def deduct_stock_fifo(
         )
 
 
-def deduct_stock_for_medicine_fifo(*, request, hospital: Hospital, medicine_id, qty_needed: Decimal, max_batches: int = 50) -> List[BatchDeduction]:
+def deduct_stock_for_medicine_fifo(*, request, pharmacy: Pharmacy, medicine_id, qty_needed: Decimal, max_batches: int = 50) -> List[BatchDeduction]:
     """
     Deducts required qty from earliest expiry batches (FIFO).
     """
@@ -82,8 +82,8 @@ def deduct_stock_for_medicine_fifo(*, request, hospital: Hospital, medicine_id, 
 
     with transaction.atomic():
         batches = (
-            MedicineBatch.objects.select_related("medicine", "hospital")
-            .filter(hospital_id=hospital.id, medicine_id=medicine_id)
+            MedicineBatch.objects.select_related("medicine", "pharmacy")
+            .filter(pharmacy_id=pharmacy.id, medicine_id=medicine_id)
             .order_by("expiry_date", "created_at")
         )[:max_batches]
 
@@ -104,7 +104,7 @@ def deduct_stock_for_medicine_fifo(*, request, hospital: Hospital, medicine_id, 
         if remaining > 0:
             raise ValueError(f"Insufficient stock. Remaining qty={remaining}")
 
-        deduct_stock_fifo(request=request, hospital=hospital, medicine_batch_pairs=deductions, reference_id="")
+        deduct_stock_fifo(request=request, pharmacy=pharmacy, medicine_batch_pairs=deductions, reference_id="")
 
     return [BatchDeduction(batch_id=str(b.id), qty=q) for b, q in deductions]
 
