@@ -27,5 +27,3 @@ Open **http://127.0.0.1:5173** — Vite proxies `/api/*` to the Django server on
 
 - Hostinger VPS (Django + Gunicorn + Nginx): `docs/HOSTINGER_DJANGO_DEPLOY.md`
 - One-shot setup script: `scripts/deploy_hostinger.sh`
-# new pharmacy added successfully
-# draft medicine added successfully
