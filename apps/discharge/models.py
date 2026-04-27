@@ -13,6 +13,19 @@ class DischargeSummary(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     medications_on_discharge = models.TextField(blank=True, default="")
     follow_up_advice = models.TextField(blank=True, default="")
     
+    # New Medanta-style fields
+    reason_for_admission = models.TextField(blank=True, default="")
+    diagnosis = models.TextField(blank=True, default="")
+    allergies = models.TextField(blank=True, default="")
+    procedure_surgery = models.TextField(blank=True, default="")
+    medical_history = models.TextField(blank=True, default="")
+    physical_examination = models.TextField(blank=True, default="")
+    investigations = models.TextField(blank=True, default="")
+    course_in_hospital = models.TextField(blank=True, default="")
+    diet_advice = models.TextField(blank=True, default="")
+    activity_advice = models.TextField(blank=True, default="")
+    warning_signs = models.TextField(blank=True, default="")
+    
     # Financial capture at the moment of discharge (snapshot)
     total_billed = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)

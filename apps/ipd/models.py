@@ -1,9 +1,22 @@
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 
 from apps.opd.models import OPDVisit
 from apps.patients.models import Patient
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
+
+
+class IPDAdmissionSequence(TimeStampedModel):
+    hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="ipd_admission_sequences")
+    year = models.PositiveIntegerField()
+    last_seq = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = [("hospital", "year")]
+
+    def __str__(self) -> str:
+        return f"{self.hospital_id}-{self.year}-{self.last_seq}"
 
 
 class IPDAdmission(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
@@ -50,6 +63,7 @@ class IPDAdmission(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     discharged_at = models.DateTimeField(null=True, blank=True)
     discharge_notes = models.TextField(blank=True, default="")
+    ipd_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
 
     class Meta:
         indexes = [
@@ -59,7 +73,31 @@ class IPDAdmission(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         ]
 
     def __str__(self) -> str:
-        return f"IPD {self.patient.uhid} ({self.admission_date})"
+        return f"IPD {self.ipd_no or self.id} ({self.admission_date})"
+
+    def generate_ipd_no(self):
+        if self.ipd_no:
+            return self.ipd_no
+        
+        now = timezone.now()
+        year = now.year
+        
+        with transaction.atomic():
+            seq_obj, _ = IPDAdmissionSequence.objects.select_for_update().get_or_create(
+                hospital=self.hospital,
+                year=year
+            )
+            seq_obj.last_seq += 1
+            seq_obj.save(update_fields=["last_seq", "updated_at"])
+            
+            slug = (getattr(self.hospital, "slug", "") or getattr(self.hospital, "name", "HOSP") or "HOSP")
+            slug_part = "".join(ch for ch in str(slug).upper() if ch.isalnum())[:4] or "HOSP"
+            return f"IPD-{slug_part}-{year}-{seq_obj.last_seq:05d}"
+
+    def save(self, *args, **kwargs):
+        if not self.ipd_no:
+            self.ipd_no = self.generate_ipd_no()
+        super().save(*args, **kwargs)
 
 
 class IPDAdmissionStatusHistory(TimeStampedModel, UUIDPrimaryKeyModel):

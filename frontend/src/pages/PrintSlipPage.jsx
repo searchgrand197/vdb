@@ -36,7 +36,11 @@ export default function PrintSlipPage() {
       // ── Path 2: Token Queue navigated here with URL query params ───────────
       const params = new URLSearchParams(window.location.search)
       const values = {}
-      for (const [k, v] of params.entries()) values[k] = v
+      // Read the _bg control param (1 = with background, 0 = plain paper), default true
+      const withBackground = params.get('_bg') !== '0'
+      for (const [k, v] of params.entries()) {
+        if (k !== '_bg') values[k] = v
+      }
 
       // Fetch the saved layout from the backend
       let layout = null
@@ -66,8 +70,7 @@ export default function PrintSlipPage() {
       }
 
       if (!cancelled) {
-        // Token Queue prints using the template background image as well.
-        const html = buildPrintHtml(layout, values, true)
+        const html = buildPrintHtml(layout, values, withBackground)
         renderAndPrint(html)
       }
     }
@@ -93,13 +96,18 @@ function renderAndPrint(html) {
   const closeScript = `
     <script>
       (function () {
-        // afterprint fires when the print dialog closes (print or cancel)
-        window.addEventListener('afterprint', function () {
-          window.close();
-        });
-        // Fallback: if afterprint never fires (some browsers), close after 60s
-        var fallback = setTimeout(function () { window.close(); }, 60000);
-        window.addEventListener('afterprint', function () { clearTimeout(fallback); });
+        let finalized = false;
+        function finalize() {
+          if (finalized) return;
+          finalized = true;
+          try { window.location.replace('about:blank'); } catch (e) {}
+          setTimeout(function () {
+            try { window.close(); } catch (e) {}
+          }, 50);
+        }
+        window.addEventListener('afterprint', finalize, { once: true });
+        window.addEventListener('focus', function () { setTimeout(finalize, 200); }, { once: true });
+        setTimeout(finalize, 120000);
       })();
     </script>
   `

@@ -51,6 +51,7 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
             "phone",
             "email",
             "website",
+            "print_with_background",
             "created_at",
             "updated_at",
         ]

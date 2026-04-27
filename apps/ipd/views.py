@@ -287,6 +287,8 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         ).prefetch_related("items").order_by("-created_at")
         
         record_charges = []
+        grouped_charge_map = {}
+        invoice_to_group_key = {}
         invoices_total = Decimal("0.00")
         for inv in invoices:
             # Paid advance invoices are deposits, not billable charges.
@@ -295,6 +297,16 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
             invoices_total += inv.total_amount
             items = list(inv.items.all())
             desc = items[0].description if len(items) == 1 else f"{len(items)} items"
+            quantity = Decimal("1")
+            unit_price = inv.total_amount
+            charge_times = [inv.created_at.isoformat()]
+            if items:
+                quantity = sum((it.quantity or Decimal("0.00")) for it in items) or Decimal("1")
+                charge_times = [(it.created_at or inv.created_at).isoformat() for it in items]
+                if len(items) == 1:
+                    unit_price = items[0].unit_price if items[0].unit_price is not None else inv.total_amount
+                else:
+                    unit_price = (inv.total_amount / quantity) if quantity else inv.total_amount
             if inv.invoice_no.startswith("IPDADV-") and (inv.amount_paid or Decimal("0.00")) == Decimal("0.00"):
                 desc = "Advance (Credit / Due)"
             record_charges.append({
@@ -303,7 +315,36 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 "date": inv.created_at.isoformat(),
                 "description": desc,
                 "amount": str(inv.total_amount),
-                "invoice_no": inv.invoice_no
+                "invoice_no": inv.invoice_no,
+                "quantity": str(quantity),
+                "unit_price": str(unit_price),
+                "charge_times": charge_times,
+                "payment_mode": "credit" if (inv.amount_paid or Decimal("0.00")) <= Decimal("0.00") else "cash",
+            })
+
+            group_key = (desc or "").strip().lower()
+            invoice_to_group_key[str(inv.id)] = group_key
+            if group_key not in grouped_charge_map:
+                grouped_charge_map[group_key] = {
+                    "id": f"grp-{str(inv.id)}",
+                    "description": desc,
+                    "quantity": Decimal("0.00"),
+                    "total_amount": Decimal("0.00"),
+                    "total_paid": Decimal("0.00"),
+                    "events": [],
+                }
+            grouped_charge_map[group_key]["quantity"] += quantity
+            grouped_charge_map[group_key]["total_amount"] += inv.total_amount
+            grouped_charge_map[group_key]["events"].append({
+                "id": str(inv.id),
+                "name": desc,
+                "date": inv.created_at.isoformat(),
+                "price": str(inv.total_amount),
+                "quantity": str(quantity),
+                "invoice_no": inv.invoice_no,
+                "payment_mode": "credit" if (inv.amount_paid or Decimal("0.00")) <= Decimal("0.00") else "cash",
+                "paid_amount": "0.00",
+                "slip_number": "",
             })
 
         pharmacy_invoices = PharmacyInvoice.objects.filter(
@@ -394,6 +435,18 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 "amount": str(p.amount),
                 "invoice_no": p.invoice.invoice_no
             })
+            group_key = invoice_to_group_key.get(str(p.invoice_id))
+            if group_key and group_key in grouped_charge_map:
+                grouped_charge_map[group_key]["total_paid"] += p.amount
+                # allocate payment to latest event for same invoice
+                group_events = grouped_charge_map[group_key]["events"]
+                for ev in reversed(group_events):
+                    if ev.get("id") == str(p.invoice_id):
+                        existing = Decimal(str(ev.get("paid_amount", "0.00")))
+                        ev["paid_amount"] = str(existing + p.amount)
+                        ev["payment_mode"] = p.payment_mode or ev.get("payment_mode") or "other"
+                        ev["slip_number"] = getattr(p, "slip_number", "") or ev.get("slip_number") or ""
+                        break
         # Include pharmacy payments in totals so statement math stays consistent.
         total_paid += pharmacy_paid
         record_payments.extend(pharmacy_payment_rows)
@@ -405,6 +458,17 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
             "total_paid": str(total_paid),
             "balance_due": str(balance_due),
             "charges": record_charges,
+            "grouped_charges": [
+                {
+                    "id": row["id"],
+                    "description": row["description"],
+                    "quantity": str(row["quantity"]),
+                    "total_amount": str(row["total_amount"]),
+                    "total_paid": str(row["total_paid"]),
+                    "events": sorted(row["events"], key=lambda e: e["date"]),
+                }
+                for row in grouped_charge_map.values()
+            ],
             "payments": record_payments,
             "room_rent": str(room_rent),
             "days": days
@@ -568,18 +632,15 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["patch"], url_path="update-charge")
     @transaction.atomic
     def update_charge(self, request, pk=None):
-        """Update the amount of an existing service charge."""
+        """Update the amount and/or quantity of an existing service charge."""
         admission = self.get_object()
         invoice_id = request.data.get("invoice_id")
         amount_str = request.data.get("amount")
+        quantity_str = request.data.get("quantity")
+        unit_price_str = request.data.get("unit_price")
 
-        if not invoice_id or not amount_str:
-            return Response({"error": "Invoice ID and amount are required"}, status=400)
-
-        try:
-            amount = Decimal(str(amount_str))
-        except:
-            return Response({"error": "Invalid amount format"}, status=400)
+        if not invoice_id:
+            return Response({"error": "Invoice ID is required"}, status=400)
 
         # 1. Find the invoice — must belong to this admission
         if invoice_id == "room_rent":
@@ -602,19 +663,58 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         # Typically these service charges have only one item
         item = invoice.items.first()
         if item:
-            item.unit_price = amount
-            item.line_total = amount
-            item.save(update_fields=["unit_price", "line_total"])
+            current_quantity = item.quantity or Decimal("1")
+            current_unit_price = item.unit_price if item.unit_price is not None else (
+                (invoice.total_amount / current_quantity) if current_quantity else invoice.total_amount
+            )
+
+            quantity = current_quantity
+            unit_price = current_unit_price
+
+            if quantity_str is not None:
+                try:
+                    quantity = Decimal(str(quantity_str))
+                except Exception:
+                    return Response({"error": "Invalid quantity format"}, status=400)
+                if quantity <= 0:
+                    return Response({"error": "Quantity must be greater than 0"}, status=400)
+
+            if amount_str is not None:
+                try:
+                    amount = Decimal(str(amount_str))
+                except Exception:
+                    return Response({"error": "Invalid amount format"}, status=400)
+                unit_price = (amount / quantity) if quantity else amount
+                new_total = amount
+            elif unit_price_str is not None:
+                try:
+                    unit_price = Decimal(str(unit_price_str))
+                except Exception:
+                    return Response({"error": "Invalid unit price format"}, status=400)
+                new_total = unit_price * quantity
+            elif quantity_str is not None:
+                new_total = unit_price * quantity
+            else:
+                return Response({"error": "Provide amount, quantity, or unit_price to update"}, status=400)
+
+            item.quantity = quantity
+            item.unit_price = unit_price
+            item.line_total = new_total
+            item.save(update_fields=["quantity", "unit_price", "line_total"])
+        else:
+            return Response({"error": "No invoice item found to update"}, status=400)
 
         # 3. Update invoice totals directly
         # We bypass recalc_totals() here because that method incorrectly zeroes out 
         # negative totals, but our IPD system uses negative amounts for discounts.
-        invoice.subtotal_amount = amount
-        invoice.total_amount = amount
+        invoice.subtotal_amount = item.line_total
+        invoice.total_amount = item.line_total
         invoice.save(update_fields=["subtotal_amount", "total_amount"])
 
         return Response({
             "success": True,
             "invoice_no": invoice.invoice_no,
+            "quantity": str(item.quantity),
+            "unit_price": str(item.unit_price),
             "new_total": str(invoice.total_amount)
         })

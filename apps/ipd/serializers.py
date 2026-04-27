@@ -18,6 +18,7 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
             "patient",
             "patient_name",
             "patient_uhid",
+            "ipd_no",
             "opd_visit",
             "admission_date",
             "expected_discharge_date",

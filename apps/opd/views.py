@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import permissions, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.response import Response
@@ -31,6 +33,7 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
         "create": "opd.create_opd_visit",
         "update": "opd.update_opd_visit",
         "partial_update": "opd.update_opd_visit",
+        "cancel": "opd.update_opd_visit",
         "destroy": "opd.delete_opd_visit",
     }
 
@@ -48,7 +51,7 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset().select_related(
-            'patient', 'patient__address', 'patient__guardian', 'doctor_user', 'created_by'
+            'patient', 'patient__address', 'patient__guardian', 'doctor_user', 'created_by', 'cancelled_by'
         )
         user = self.request.user
         if not user.hospital_id:
@@ -101,6 +104,13 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def perform_update(self, serializer):
         visit: OPDVisit = serializer.instance
+        if visit.status == OPDVisit.Status.CANCELLED:
+            raise ValidationError({"detail": "Cancelled OPD slips are view-only."})
+
+        requested_status = serializer.validated_data.get("status")
+        if requested_status == OPDVisit.Status.CANCELLED:
+            raise ValidationError({"detail": "Use the cancel action to cancel an OPD slip."})
+
         old_status = visit.status
         serializer.save()
         new_status = serializer.instance.status
@@ -120,6 +130,53 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
                 before={"status": old_status},
                 after={"status": new_status},
             )
+
+    @action(detail=True, methods=["post"], url_path="cancel")
+    @transaction.atomic
+    def cancel(self, request, *args, **kwargs):
+        visit: OPDVisit = self.get_object()
+
+        if visit.status == OPDVisit.Status.CANCELLED:
+            raise ValidationError({"detail": "This OPD slip is already cancelled."})
+
+        reason = str(request.data.get("cancel_reason") or request.data.get("reason") or "").strip()
+        if not reason:
+            raise ValidationError({"cancel_reason": ["Cancellation reason is required."]})
+
+        old_status = visit.status
+        visit.status = OPDVisit.Status.CANCELLED
+        visit.cancel_reason = reason
+        visit.cancelled_by = request.user
+        visit.cancelled_at = timezone.now()
+        visit.save(update_fields=["status", "cancel_reason", "cancelled_by", "cancelled_at", "updated_at"])
+
+        OPDVisitStatusHistory.objects.create(
+            visit=visit,
+            from_status=old_status,
+            to_status=OPDVisit.Status.CANCELLED,
+            changed_by=request.user,
+            notes=reason,
+        )
+        create_audit_log(
+            request=request,
+            hospital=visit.hospital,
+            module="opd",
+            action="cancel_visit",
+            obj=visit,
+            before={"status": old_status},
+            after={
+                "status": OPDVisit.Status.CANCELLED,
+                "cancel_reason": reason,
+                "cancelled_by": str(request.user.id),
+                "cancelled_at": visit.cancelled_at.isoformat() if visit.cancelled_at else None,
+            },
+        )
+
+        visit_full = OPDVisit.objects.select_related(
+            "patient", "patient__address", "patient__guardian", "doctor_user", "created_by", "cancelled_by"
+        ).get(pk=visit.pk)
+        data = OPDVisitSerializer(visit_full, context=self.get_serializer_context()).data
+        return success_response(data=data)
 
 from datetime import date, timedelta
 from rest_framework.decorators import api_view, permission_classes

@@ -23,7 +23,7 @@ export function buildPrintHtml(layout, values, withBackground) {
   const hasBg      = !!bgSrc
   const showBg     = withBackground && hasBg
   const showChrome = withBackground && !hasBg
-  const sheetClass = hasBg
+  const sheetClass = showBg
     ? 'template-editor-canvas opd-sheet opd-sheet--with-bg'
     : 'template-editor-canvas opd-sheet'
 
@@ -55,17 +55,32 @@ export function buildPrintHtml(layout, values, withBackground) {
     return '<div class="field-box" style="left:' + left + '%;top:' + top + '%;font-size:' + fs + 'cqw;">' + text + '</div>'
   }).join('\n')
 
-  const bgTag = bgSrc ? '<img src="' + bgSrc + '" alt="" />' : ''
+  const bgTag = showBg ? '<img src="' + bgSrc + '" alt="" />' : ''
 
   const chromeDisplay = showChrome ? 'flex' : 'none'
   const imgDisplay    = showBg    ? 'block' : 'none'
 
   // Build inline script as array joined with '' to avoid esbuild parsing the closing tag
   const inlineScript = [
-    'window.addEventListener("load", function() {',
-    '  window.print();',
-    '  window.close();',
-    '});',
+    '(function () {',
+    '  var finalized = false;',
+    '  function finalize() {',
+    '    if (finalized) return;',
+    '    finalized = true;',
+    '    try { window.location.replace("about:blank"); } catch (e) {}',
+    '    setTimeout(function () {',
+    '      try { window.close(); } catch (e) {}',
+    '    }, 50);',
+    '  }',
+    '  window.addEventListener("afterprint", finalize, { once: true });',
+    '  window.addEventListener("focus", function () { setTimeout(finalize, 200); }, { once: true });',
+    '  setTimeout(finalize, 120000);',
+    '  window.addEventListener("load", function () {',
+    '    setTimeout(function () {',
+    '      try { window.print(); } catch (e) { finalize(); }',
+    '    }, 0);',
+    '  }, { once: true });',
+    '})();',
   ].join('\n')
 
   const parts = [

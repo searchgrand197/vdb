@@ -19,6 +19,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
     doctor_user_email = serializers.EmailField(source="doctor_user.email", read_only=True)
     doctor_name = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
+    cancelled_by_name = serializers.SerializerMethodField()
     hospital_id = serializers.UUIDField(read_only=True)
 
     class Meta:
@@ -28,6 +29,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "hospital_id",
             "patient",
             "patient_uhid",
+            "opd_no",
             "patient_name",
             "patient_phone",
             "patient_age",
@@ -58,6 +60,10 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "payment_mode",
             "created_by",
             "created_by_name",
+            "cancel_reason",
+            "cancelled_by",
+            "cancelled_by_name",
+            "cancelled_at",
             "created_at",
             "updated_at",
         ]
@@ -126,6 +132,14 @@ class OPDVisitSerializer(serializers.ModelSerializer):
         name = f"{first} {last}".strip()
         return name or obj.created_by.email
 
+    def get_cancelled_by_name(self, obj):
+        if not obj.cancelled_by:
+            return ""
+        first = getattr(obj.cancelled_by, "first_name", "") or ""
+        last = getattr(obj.cancelled_by, "last_name", "") or ""
+        name = f"{first} {last}".strip()
+        return name or obj.cancelled_by.email
+
 
 class OPDVisitCreateUpdateSerializer(serializers.ModelSerializer):
     # Backward-compatibility aliases for existing frontend:
@@ -155,6 +169,7 @@ class OPDVisitCreateUpdateSerializer(serializers.ModelSerializer):
             "status",
             "amount",
             "payment_mode",
+            "cancel_reason",
         ]
 
     def validate(self, attrs):
@@ -174,6 +189,18 @@ class OPDVisitCreateUpdateSerializer(serializers.ModelSerializer):
         # Map frontend status alias.
         if attrs.get("status") == "in_consultation":
             attrs["status"] = OPDVisit.Status.IN_PROGRESS
+
+        instance = getattr(self, "instance", None)
+        target_status = attrs.get("status", getattr(instance, "status", None))
+        cancel_reason = (attrs.get("cancel_reason") or "").strip()
+
+        if target_status == OPDVisit.Status.CANCELLED and not cancel_reason:
+            raise serializers.ValidationError({"cancel_reason": ["Cancellation reason is required."]})
+
+        if instance and instance.status == OPDVisit.Status.CANCELLED:
+            incoming_status = attrs.get("status")
+            if incoming_status and incoming_status != OPDVisit.Status.CANCELLED:
+                raise serializers.ValidationError({"status": ["Cancelled OPD slips are view-only."]})
 
         return attrs
 

@@ -63,6 +63,7 @@ class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     phone = models.CharField(max_length=40, blank=True, default="+91-XXXXXXXXXX")
     email = models.CharField(max_length=120, blank=True, default="info@vardraanhospital.com")
     website = models.CharField(max_length=200, blank=True, default="www.vardraanhospital.com")
+    print_with_background = models.BooleanField(default=True)
 
     def __str__(self) -> str:
         return f"Reception settings ({self.hospital_id})"
