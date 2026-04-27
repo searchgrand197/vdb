@@ -55,6 +55,13 @@ class MedicineCategory(TimeStampedModel, UUIDPrimaryKeyModel):
 
     hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="medicine_categories")
     name = models.CharField(max_length=120)
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        related_name="subcategories",
+        null=True,
+        blank=True,
+    )
     is_active = models.BooleanField(default=True)
     rule_type = models.CharField(
         max_length=20,
@@ -69,7 +76,10 @@ class MedicineCategory(TimeStampedModel, UUIDPrimaryKeyModel):
 
     class Meta:
         unique_together = [("hospital", "name")]
-        indexes = [models.Index(fields=["hospital", "name"])]
+        indexes = [
+            models.Index(fields=["hospital", "name"]),
+            models.Index(fields=["hospital", "parent"]),
+        ]
 
     def __str__(self) -> str:
         return self.name

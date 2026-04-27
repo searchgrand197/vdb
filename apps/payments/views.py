@@ -25,7 +25,7 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
         "invoice__items"
     )
     filter_backends = (SearchFilter, OrderingFilter)
-    search_fields = ("invoice__invoice_no", "invoice__patient__uhid", "transaction_reference", "receipt_no")
+    search_fields = ("invoice__invoice_no", "invoice__patient__uhid", "transaction_reference", "receipt_no", "slip_number")
     ordering_fields = ("paid_at", "created_at", "amount")
     ordering = ("-paid_at", "-created_at")
 
@@ -195,6 +195,7 @@ def _build_collection_snapshot(user):
         hospital_id=user.hospital_id,
         created_by_id=user.id,
         is_deleted=False,
+        status__in=[OPDVisit.Status.WAITING, OPDVisit.Status.IN_PROGRESS, OPDVisit.Status.COMPLETED],
     )
     incoming_qs = CashHandover.objects.filter(
         hospital_id=user.hospital_id,
@@ -254,6 +255,7 @@ def _build_collection_entries(user):
         hospital_id=user.hospital_id,
         created_by_id=user.id,
         is_deleted=False,
+        status__in=[OPDVisit.Status.WAITING, OPDVisit.Status.IN_PROGRESS, OPDVisit.Status.COMPLETED],
     ).select_related("patient", "created_by")
 
     if since:

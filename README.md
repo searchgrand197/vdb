@@ -1,8 +1,9 @@
 # Hospital Management System (HMS)
 # naveen code
+# fixed all issues includind vardraan into vardaan
 Django REST API backend + React admin UI.
 
-## Backend
+## Backend thing
 
 ```bash
 .\.venv\Scripts\python.exe manage.py runserver 127.0.0.1:8000
@@ -27,3 +28,5 @@ Open **http://127.0.0.1:5173** — Vite proxies `/api/*` to the Django server on
 
 - Hostinger VPS (Django + Gunicorn + Nginx): `docs/HOSTINGER_DJANGO_DEPLOY.md`
 - One-shot setup script: `scripts/deploy_hostinger.sh`
+
+

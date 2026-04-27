@@ -46,7 +46,10 @@ export default function LabPortal() {
   }
 
   function handleLogout() {
-    localStorage.clear()
+    localStorage.removeItem('access')
+    localStorage.removeItem('refresh')
+    localStorage.removeItem('role')
+    localStorage.removeItem('user')
     window.location.href = '/login'
   }
 

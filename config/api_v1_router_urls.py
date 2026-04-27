@@ -47,7 +47,8 @@ from apps.staff.views import (
     StaffProfileViewSet,
     StaffShiftAssignmentViewSet,
 )
-from apps.settings_management.views import LeaveApproverViewSet
+from apps.settings_management.views import LeaveApproverViewSet, ReceptionPortalSettingsView
+from apps.emergency.views import EmergencyCaseViewSet
 from apps.tokens.views import TokenViewSet
 from apps.notifications.views import NotificationViewSet
 from apps.treatment.views import (
@@ -96,6 +97,7 @@ router.register(r"departments", DepartmentViewSet, basename="departments")
 router.register(r"designations", DesignationViewSet, basename="designations")
 router.register(r"doctor-profiles", DoctorProfileViewSet, basename="doctor-profiles")
 router.register(r"emergency-contacts", EmergencyContactViewSet, basename="emergency-contacts")
+router.register(r"emergency/cases", EmergencyCaseViewSet, basename="emergency-cases")
 router.register(r"follow-ups", FollowUpViewSet, basename="follow-ups")
 router.register(r"invoices", BillingInvoiceViewSet, basename="invoices")
 router.register(r"ipd-admissions", IPDAdmissionViewSet, basename="ipd-admissions")
@@ -150,6 +152,7 @@ urlpatterns = [
     path("pharmacy/dashboard/", PharmacyDashboardView.as_view(), name="pharmacy-dashboard"),
     path("pharmacy/invoice/next-number/", PharmacyNextInvoiceNumberView.as_view(), name="pharmacy-next-invoice"),
     path("pharmacy/settings/", PharmacyOutletSettingsView.as_view(), name="pharmacy-outlet-settings"),
+    path("settings/reception-portal/", ReceptionPortalSettingsView.as_view(), name="settings-reception-portal"),
     path("pharmacy/purchase-challan/", PharmacyPurchaseChallanView.as_view(), name="pharmacy-purchase-challan"),
     path("pharmacy/purchase-history/", PurchaseHistoryListView.as_view(), name="pharmacy-purchase-history"),
     path(

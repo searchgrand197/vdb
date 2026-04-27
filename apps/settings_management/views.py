@@ -1,9 +1,10 @@
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import permissions, viewsets
+from rest_framework import permissions, viewsets, generics
+from rest_framework.exceptions import NotFound
 
 from apps.roles_permissions.permissions import HasRequiredPermission
-from apps.settings_management.models import LeaveApprover
-from apps.settings_management.serializers import LeaveApproverSerializer
+from apps.settings_management.models import LeaveApprover, ReceptionPortalSettings
+from apps.settings_management.serializers import LeaveApproverSerializer, ReceptionPortalSettingsSerializer
 from apps.shared.response import success_response
 
 
@@ -89,3 +90,18 @@ class LeaveApproverViewSet(viewsets.ModelViewSet):
         pk = inst.pk
         inst.delete()
         return success_response(data={"id": str(pk)})
+
+
+class ReceptionPortalSettingsView(generics.RetrieveUpdateAPIView):
+    serializer_class = ReceptionPortalSettingsSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        hospital = getattr(self.request.user, "hospital", None)
+        if hospital is None:
+            raise NotFound("Hospital context required.")
+        obj, _ = ReceptionPortalSettings.objects.get_or_create(
+            hospital=hospital,
+            defaults={"default_city": "Jind", "default_state": "Haryana"},
+        )
+        return obj

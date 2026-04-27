@@ -1,11 +1,23 @@
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 from apps.billing.models import BillingInvoice
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
+
+
+class PaymentSlipSequence(TimeStampedModel):
+    hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="payment_slip_sequences")
+    year = models.PositiveIntegerField()
+    last_seq = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = [("hospital", "year")]
+
+    def __str__(self) -> str:
+        return f"{self.hospital_id}-{self.year}-{self.last_seq}"
 
 
 class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
@@ -30,6 +42,7 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
 
     transaction_reference = models.CharField(max_length=120, blank=True, default="")
     receipt_no = models.CharField(max_length=60, blank=True, default="")
+    slip_number = models.CharField(max_length=80, unique=True, db_index=True, blank=True, default="")
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUCCESS, db_index=True)
     paid_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -39,6 +52,32 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
         on_delete=models.PROTECT,
         related_name="collected_payments",
     )
+
+    @staticmethod
+    def _build_slip_number(hospital, year: int, seq: int) -> str:
+        slug = (getattr(hospital, "slug", "") or getattr(hospital, "name", "HOSP") or "HOSP")
+        slug_part = "".join(ch for ch in str(slug).upper() if ch.isalnum())[:5] or "HOSP"
+        return f"PSL-{slug_part}-{year}-{seq:06d}"
+
+    def _generate_slip_number(self) -> str:
+        if not self.hospital_id:
+            return ""
+        now = self.paid_at or timezone.now()
+        year = now.year
+        with transaction.atomic():
+            seq_obj, _ = PaymentSlipSequence.objects.select_for_update().get_or_create(
+                hospital_id=self.hospital_id,
+                year=year,
+            )
+            seq_obj.last_seq += 1
+            seq_obj.save(update_fields=["last_seq", "updated_at"])
+            hospital = getattr(self, "hospital", None) or Hospital.objects.only("id", "slug", "name").get(id=self.hospital_id)
+            return self._build_slip_number(hospital, year, seq_obj.last_seq)
+
+    def save(self, *args, **kwargs):
+        if not self.slip_number:
+            self.slip_number = self._generate_slip_number()
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.invoice.invoice_no} - {self.amount} ({self.status})"

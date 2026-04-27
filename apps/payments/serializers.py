@@ -26,6 +26,7 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             "amount",
             "transaction_reference",
             "receipt_no",
+            "slip_number",
             "status",
             "paid_at",
             "collected_by",

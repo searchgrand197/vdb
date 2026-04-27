@@ -68,12 +68,15 @@ function PharmacyCategoriesView() {
   const [categoriesLoading, setCategoriesLoading] = useState(true)
   const [categorySearch, setCategorySearch] = useState('')
   const [medicineSearch, setMedicineSearch] = useState('')
-  const [selectedCategory, setSelectedCategory] = useState('')
+  const [categoryStack, setCategoryStack] = useState([])
   const [customCategories, setCustomCategories] = useState([])
   const [newCategory, setNewCategory] = useState('')
+  const [newCategoryParentId, setNewCategoryParentId] = useState('')
   const [rulesCategory, setRulesCategory] = useState('')
   const [rulesDraft, setRulesDraft] = useState({ ...DEFAULT_CATEGORY_RULE })
   const [rulesSaving, setRulesSaving] = useState(false)
+
+  const selectedCategory = categoryStack[categoryStack.length - 1] || ''
 
   useEffect(() => {
     let cancelled = false
@@ -136,9 +139,41 @@ function PharmacyCategoriesView() {
 
   const categories = useMemo(() => {
     const fromMedicines = medicines.map((m) => m.form).filter(Boolean)
-    const fromApi = customCategories.map((c) => c.name).filter(Boolean)
+    const fromApi = customCategories
+      .filter((c) => !c.parent)
+      .map((c) => c.name)
+      .filter(Boolean)
     return uniqCategories([...DEFAULT_CATEGORIES, ...fromMedicines, ...fromApi])
   }, [medicines, customCategories])
+
+  const topLevelCustomCategories = useMemo(
+    () => customCategories.filter((c) => !c.parent),
+    [customCategories],
+  )
+
+  const subcategoriesByParentName = useMemo(() => {
+    const map = new Map()
+    customCategories.forEach((cat) => {
+      const parentName = (cat.parent_name || '').trim()
+      if (!parentName) return
+      const key = normalize(parentName)
+      if (!map.has(key)) map.set(key, [])
+      map.get(key).push(cat)
+    })
+    return map
+  }, [customCategories])
+
+  const categoryByName = useMemo(() => {
+    const map = new Map()
+    customCategories.forEach((cat) => {
+      const key = normalize(cat.name)
+      if (!key || map.has(key)) return
+      map.set(key, cat)
+    })
+    return map
+  }, [customCategories])
+
+  const selectedCategoryRow = selectedCategory ? categoryByName.get(normalize(selectedCategory)) : null
 
   const visibleCategories = useMemo(() => {
     const q = normalize(categorySearch)
@@ -158,25 +193,78 @@ function PharmacyCategoriesView() {
     })
   }, [medicines, selectedCategory, medicineSearch])
 
-  function addCategory() {
+  function openCategory(name) {
+    const clean = (name || '').trim()
+    if (!clean) return
+    setCategoryStack((prev) => {
+      if (normalize(prev[prev.length - 1] || '') === normalize(clean)) return prev
+      return [...prev, clean]
+    })
+  }
+
+  function openTopLevelCategory(name) {
+    const clean = (name || '').trim()
+    if (!clean) return
+    setCategoryStack([clean])
+  }
+
+  async function addCategory({ parentId = null, parentName = '' } = {}) {
     const raw = newCategory.trim()
     if (!raw) return
-    if (categories.some((c) => normalize(c) === normalize(raw))) {
+    const duplicate = customCategories.some((c) => {
+      if (normalize(c.name) !== normalize(raw)) return false
+      const cParentName = normalize(c.parent_name || '')
+      return cParentName === normalize(parentName)
+    })
+    if (duplicate || (!parentId && categories.some((c) => normalize(c) === normalize(raw)))) {
       toast('Category already exists')
       return
     }
-    api
-      .post('/medicine-categories/', { name: raw, is_active: true })
-      .then((res) => {
-        const created = res.data?.data || res.data
-        setCustomCategories((prev) => [...prev, created])
-        setNewCategory('')
-        setSelectedCategory(raw)
-        toast.success('Category added')
-      })
-      .catch((e) => {
-        toast.error(e?.response?.data?.detail || 'Failed to add category')
-      })
+    const payload = { name: raw, is_active: true }
+    if (parentId) payload.parent = parentId
+    try {
+      const res = await api.post('/medicine-categories/', payload)
+      const created = res.data?.data || res.data
+      setCustomCategories((prev) => [...prev, created])
+      setNewCategory('')
+      setNewCategoryParentId('')
+      if (parentName) {
+        setCategoryStack([parentName, raw])
+      } else {
+        setCategoryStack([raw])
+      }
+      toast.success(parentId ? 'Sub-category added' : 'Category added')
+      return created
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Failed to add category')
+      return null
+    }
+  }
+
+  async function ensureParentCategory(parentName) {
+    const cleanName = (parentName || '').trim()
+    if (!cleanName) return null
+    const existing = customCategories.find((c) => normalize(c.name) === normalize(cleanName))
+    if (existing?.id) return existing
+    try {
+      const preset = presetRuleForForm(cleanName)
+      const payload = {
+        name: cleanName,
+        is_active: true,
+        rule_type: preset.rule_type,
+        allow_loose_sale: !!preset.allow_loose_sale,
+        base_unit_label: (preset.base_unit_label || 'unit').trim().slice(0, 40),
+        retail_pack_label: (preset.retail_pack_label || '').trim().slice(0, 40),
+        outer_pack_label: (preset.outer_pack_label || '').trim().slice(0, 40),
+      }
+      const res = await api.post('/medicine-categories/', payload)
+      const created = res.data?.data || res.data
+      setCustomCategories((prev) => [...prev, created])
+      return created
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Could not save parent category')
+      return null
+    }
   }
 
   function removeCustomCategory(cat) {
@@ -187,7 +275,7 @@ function PharmacyCategoriesView() {
       .then(() => {
         setCustomCategories((prev) => prev.filter((c) => c.id !== row.id))
         if (normalize(selectedCategory) === normalize(cat)) {
-          setSelectedCategory('All')
+          setCategoryStack([])
         }
         toast.success(`Deleted category: ${cat}`)
       })
@@ -272,9 +360,27 @@ function PharmacyCategoriesView() {
             placeholder="Add category"
             className="px-3 py-1.5 text-sm rounded border border-slate-200 bg-white"
           />
+          <select
+            value={newCategoryParentId}
+            onChange={(e) => setNewCategoryParentId(e.target.value)}
+            className="px-2 py-1.5 text-sm rounded border border-slate-200 bg-white"
+          >
+            <option value="">Main category</option>
+            {topLevelCustomCategories.map((cat) => (
+              <option key={cat.id} value={cat.id}>
+                Sub of {cat.name}
+              </option>
+            ))}
+          </select>
           <button
             type="button"
-            onClick={addCategory}
+            onClick={() => {
+              const parentRow = customCategories.find((c) => String(c.id) === String(newCategoryParentId))
+              addCategory({
+                parentId: newCategoryParentId || null,
+                parentName: parentRow?.name || '',
+              })
+            }}
             className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm font-semibold inline-flex items-center gap-1"
           >
             <Plus size={14} /> Add
@@ -398,11 +504,13 @@ function PharmacyCategoriesView() {
               const count = medicines.filter((m) => normalize(m.form) === normalize(cat)).length
               const css = colorForText(cat)
               const isCustom = customCategories.some((c) => normalize(c.name) === normalize(cat))
+              const subcats = subcategoriesByParentName.get(normalize(cat)) || []
               return (
                 <div key={cat} className="rounded-xl border px-3 py-3 min-h-[86px] transition" style={css}>
-                  <button type="button" onClick={() => setSelectedCategory(cat)} className="w-full text-left">
+                  <button type="button" onClick={() => openTopLevelCategory(cat)} className="w-full text-left">
                     <div className="text-base font-bold leading-tight">{cat}</div>
                     <div className="text-xs opacity-75 mt-1">{count} items</div>
+                    {subcats.length > 0 && <div className="text-[11px] mt-1 opacity-80">{subcats.length} sub-categories</div>}
                   </button>
                   {isCustom && (
                     <button
@@ -425,15 +533,25 @@ function PharmacyCategoriesView() {
               <button
                 type="button"
                 onClick={() => {
-                  setSelectedCategory('')
+                  setCategoryStack((prev) => prev.slice(0, -1))
                   setMedicineSearch('')
                 }}
                 className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 text-sm text-slate-700 hover:bg-slate-50"
               >
                 <ArrowLeft size={14} /> Back
               </button>
-              <div className="text-sm font-semibold text-slate-700">
-                {selectedCategory} Medicines ({visibleMeds.length})
+              <div className="text-sm font-semibold text-slate-700 flex items-center gap-2 flex-wrap">
+                <span>
+                  {selectedCategory} Medicines ({visibleMeds.length})
+                </span>
+                <span className="text-xs text-slate-500 font-medium">
+                  {categoryStack.join(' / ')}
+                </span>
+                {!!selectedCategoryRow?.parent_name && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
+                    Sub-category of {selectedCategoryRow.parent_name}
+                  </span>
+                )}
               </div>
             </div>
             <div className="relative">
@@ -444,6 +562,43 @@ function PharmacyCategoriesView() {
                 placeholder="Search medicine..."
                 className="pl-8 pr-3 py-1 text-sm rounded border border-slate-200"
               />
+            </div>
+          </div>
+          <div className="px-3 py-2 border-b border-slate-100 bg-slate-50/70">
+            <div className="text-[11px] font-semibold text-slate-600 mb-1">Sub-categories</div>
+            <div className="flex flex-wrap gap-1.5">
+              {(subcategoriesByParentName.get(normalize(selectedCategory)) || []).map((sub) => (
+                <button
+                  key={sub.id}
+                  type="button"
+                  onClick={() => openCategory(sub.name)}
+                  className="px-2 py-0.5 rounded-full text-xs border border-indigo-200 text-indigo-700 bg-indigo-50 hover:bg-indigo-100"
+                >
+                  {sub.name}
+                </button>
+              ))}
+              {(subcategoriesByParentName.get(normalize(selectedCategory)) || []).length === 0 && (
+                <span className="text-xs text-slate-500">No sub-categories yet.</span>
+              )}
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value)}
+                placeholder={`Add sub-category under ${selectedCategory}`}
+                className="px-2 py-1 text-sm rounded border border-slate-200 bg-white"
+              />
+              <button
+                type="button"
+                onClick={async () => {
+                  const parentRow = await ensureParentCategory(selectedCategory)
+                  if (!parentRow?.id) return
+                  await addCategory({ parentId: parentRow.id, parentName: parentRow.name })
+                }}
+                className="px-2.5 py-1 rounded bg-indigo-600 text-white text-xs font-semibold inline-flex items-center gap-1"
+              >
+                <Plus size={12} /> Add sub-category
+              </button>
             </div>
           </div>
           <div className="flex-1 min-h-0 overflow-auto">

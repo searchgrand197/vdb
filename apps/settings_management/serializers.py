@@ -1,6 +1,7 @@
 from rest_framework import serializers
+from django.contrib.auth import get_user_model
 
-from apps.settings_management.models import LeaveApprover
+from apps.settings_management.models import LeaveApprover, ReceptionPortalSettings
 
 
 class LeaveApproverSerializer(serializers.ModelSerializer):
@@ -28,3 +29,30 @@ class LeaveApproverSerializer(serializers.ModelSerializer):
         u = obj.user
         full = f"{getattr(u, 'first_name', '')} {getattr(u, 'last_name', '')}".strip()
         return full or u.email
+
+
+class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
+    default_doctor_user = serializers.PrimaryKeyRelatedField(
+        queryset=get_user_model().objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = ReceptionPortalSettings
+        fields = [
+            "id",
+            "default_city",
+            "default_state",
+            "default_doctor_user",
+            "hospital_name",
+            "address",
+            "pin_code",
+            "phone",
+            "email",
+            "website",
+            "print_with_background",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]

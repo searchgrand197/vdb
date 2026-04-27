@@ -6,7 +6,10 @@ export default function Layout({ title, subtitle, color = 'blue', children, tabs
   const nav = useNavigate()
 
   function logout() {
-    localStorage.clear()
+    localStorage.removeItem('access')
+    localStorage.removeItem('refresh')
+    localStorage.removeItem('role')
+    localStorage.removeItem('user')
     nav('/login')
   }
 

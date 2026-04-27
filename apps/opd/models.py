@@ -1,8 +1,20 @@
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 
 from apps.patients.models import Patient
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
+
+class OPDVisitSequence(TimeStampedModel):
+    hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="opd_visit_sequences")
+    year = models.PositiveIntegerField()
+    last_seq = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = [("hospital", "year")]
+
+    def __str__(self) -> str:
+        return f"{self.hospital_id}-{self.year}-{self.last_seq}"
 
 
 class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
@@ -22,6 +34,7 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     visit_date = models.DateField()
     queue_number = models.PositiveIntegerField(default=0, db_index=True)
+    opd_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
 
     doctor_user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -53,6 +66,15 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         blank=True,
         related_name="opd_visits_created",
     )
+    cancel_reason = models.TextField(blank=True, default="")
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="opd_visits_cancelled",
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:
         indexes = [
@@ -63,7 +85,31 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         ]
 
     def __str__(self) -> str:
-        return f"OPD {self.patient.uhid} ({self.visit_date})"
+        return f"OPD {self.opd_no or self.id} ({self.visit_date})"
+
+    def generate_opd_no(self):
+        if self.opd_no:
+            return self.opd_no
+        
+        now = timezone.now()
+        year = now.year
+        
+        with transaction.atomic():
+            seq_obj, _ = OPDVisitSequence.objects.select_for_update().get_or_create(
+                hospital=self.hospital,
+                year=year
+            )
+            seq_obj.last_seq += 1
+            seq_obj.save(update_fields=["last_seq", "updated_at"])
+            
+            slug = (getattr(self.hospital, "slug", "") or getattr(self.hospital, "name", "HOSP") or "HOSP")
+            slug_part = "".join(ch for ch in str(slug).upper() if ch.isalnum())[:4] or "HOSP"
+            return f"OPD-{slug_part}-{year}-{seq_obj.last_seq:05d}"
+
+    def save(self, *args, **kwargs):
+        if not self.opd_no:
+            self.opd_no = self.generate_opd_no()
+        super().save(*args, **kwargs)
 
 
 class OPDVisitStatusHistory(TimeStampedModel, UUIDPrimaryKeyModel):

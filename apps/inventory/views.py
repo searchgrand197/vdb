@@ -128,7 +128,7 @@ class UnitViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
 
 class MedicineCategoryViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
-    queryset = MedicineCategory.objects.all().order_by("name")
+    queryset = MedicineCategory.objects.all().select_related("parent").order_by("name")
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("name",)
     permission_classes = [permissions.IsAuthenticated, HasRequiredPermission]
@@ -251,6 +251,7 @@ class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
                             "id": str(med.id),
                             "name": med.name,
                             "sku": med.sku,
+                            "form": med.form or "",
                             "pack_info": med.pack_info or "",
                             "hsn_code": med.hsn_code or "",
                             "gst_percent": str(med.gst_percent),

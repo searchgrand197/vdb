@@ -75,6 +75,7 @@ class MedicineCreateUpdateSerializer(serializers.ModelSerializer):
 
 class MedicineCategorySerializer(serializers.ModelSerializer):
     hospital_id = serializers.UUIDField(read_only=True)
+    parent_name = serializers.CharField(source="parent.name", read_only=True)
 
     class Meta:
         model = MedicineCategory
@@ -82,6 +83,8 @@ class MedicineCategorySerializer(serializers.ModelSerializer):
             "id",
             "hospital_id",
             "name",
+            "parent",
+            "parent_name",
             "is_active",
             "rule_type",
             "allow_loose_sale",
@@ -94,10 +97,22 @@ class MedicineCategorySerializer(serializers.ModelSerializer):
 
 
 class MedicineCategoryCreateUpdateSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        parent = attrs.get("parent")
+        if not parent:
+            return attrs
+        request = self.context.get("request")
+        if request and parent.hospital_id != request.user.hospital_id:
+            raise serializers.ValidationError({"parent": "Parent category must belong to your hospital."})
+        if self.instance and str(parent.id) == str(self.instance.id):
+            raise serializers.ValidationError({"parent": "A category cannot be its own parent."})
+        return attrs
+
     class Meta:
         model = MedicineCategory
         fields = [
             "name",
+            "parent",
             "is_active",
             "rule_type",
             "allow_loose_sale",

@@ -127,7 +127,10 @@ export default function PharmacyPortal() {
   }, [])
 
   function handleLogout() {
-    localStorage.clear()
+    localStorage.removeItem('access')
+    localStorage.removeItem('refresh')
+    localStorage.removeItem('role')
+    localStorage.removeItem('user')
     window.location.href = '/login'
   }
 
@@ -1352,23 +1355,186 @@ function HistoryView({ invoices: _invoices, setPrintingInvoice }) {
 }
 
 function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
+  const patientInfo = invoice?.patient_details || {}
+  const initialName = [patientInfo.first_name, patientInfo.last_name].filter(Boolean).join(' ').trim()
   const [paymentMethod, setPaymentMethod] = useState(invoice.payment_method || 'cash')
   const [paidAmount, setPaidAmount] = useState(String(invoice.paid_amount ?? invoice.grand_total ?? '0'))
   const [remarks, setRemarks] = useState(invoice.remarks || '')
+  const [settlementType, setSettlementType] = useState(() => {
+    const due = Number(invoice.due_amount ?? (Number(invoice.grand_total || 0) - Number(invoice.paid_amount || 0)))
+    return due > 0 ? 'due' : 'paid'
+  })
+  const [patientName, setPatientName] = useState(initialName)
+  const [patientPhone, setPatientPhone] = useState(patientInfo.phone || '')
+  const [patientGender, setPatientGender] = useState(patientInfo.gender || 'male')
+  const [patientAge, setPatientAge] = useState(patientInfo.age != null ? String(patientInfo.age) : '')
+  const [guardianName, setGuardianName] = useState(patientInfo.guardian_name || '')
+  const [addressLine1, setAddressLine1] = useState(patientInfo.address_line1 || '')
+  const [city, setCity] = useState(patientInfo.city || '')
+  const [state, setState] = useState(patientInfo.state || '')
+  const [medicines, setMedicines] = useState([])
+  const [batches, setBatches] = useState([])
+  const [items, setItems] = useState(() =>
+    Array.isArray(invoice.items) && invoice.items.length > 0
+      ? invoice.items.map((it) => ({
+          medicine: String(it.medicine || ''),
+          batch: String(it.batch || ''),
+          qty: String(it.qty ?? '1'),
+          mrp: String(it.mrp ?? '0'),
+          rate: String(it.rate ?? '0'),
+          cgst_rate: String(it.cgst_rate ?? '0'),
+          sgst_rate: String(it.sgst_rate ?? '0'),
+        }))
+      : [{ medicine: '', batch: '', qty: '1', mrp: '0', rate: '0', cgst_rate: '0', sgst_rate: '0' }],
+  )
   const [saving, setSaving] = useState(false)
 
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([
+      api.get('/medicines/?limit=2000').catch(() => ({ data: [] })),
+      api.get('/batches/?limit=4000').catch(() => ({ data: [] })),
+    ]).then(([mRes, bRes]) => {
+      if (cancelled) return
+      setMedicines(mRes.data?.data || mRes.data?.results || [])
+      setBatches(bRes.data?.data || bRes.data?.results || [])
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const totals = useMemo(() => {
+    let subtotal = 0
+    let cgst = 0
+    let sgst = 0
+    items.forEach((row) => {
+      const qty = Number(row.qty || 0)
+      const rate = Number(row.rate || 0)
+      const cg = Number(row.cgst_rate || 0)
+      const sg = Number(row.sgst_rate || 0)
+      const base = qty * rate
+      subtotal += base
+      cgst += (base * cg) / 100
+      sgst += (base * sg) / 100
+    })
+    const grandTotal = subtotal + cgst + sgst
+    const paid = paymentMethod === 'credit' ? 0 : Number(paidAmount || 0)
+    const due = Math.max(0, grandTotal - Math.max(0, paid))
+    return { subtotal, cgst, sgst, grandTotal, due }
+  }, [items, paymentMethod, paidAmount])
+
+  useEffect(() => {
+    if (settlementType === 'due') {
+      setPaymentMethod('credit')
+      setPaidAmount('0')
+    } else {
+      if (paymentMethod === 'credit') {
+        setPaymentMethod('cash')
+      }
+      // For "Paid", always use the latest recalculated edited bill total.
+      setPaidAmount(String((totals?.grandTotal || 0).toFixed(2)))
+    }
+  }, [settlementType, paymentMethod, totals?.grandTotal])
+
+  function updateItem(index, patch) {
+    setItems((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  }
+
+  function addItem() {
+    setItems((prev) => [...prev, { medicine: '', batch: '', qty: '1', mrp: '0', rate: '0', cgst_rate: '0', sgst_rate: '0' }])
+  }
+
+  function removeItem(index) {
+    setItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== index)))
+  }
+
+  function handleMedicineChange(index, medicineId) {
+    const med = medicines.find((m) => String(m.id) === String(medicineId))
+    const medBatches = batches
+      .filter((b) => String(b.medicine) === String(medicineId))
+      .sort((a, b) => new Date(a.expiry_date || 0).getTime() - new Date(b.expiry_date || 0).getTime())
+    const firstBatch = medBatches[0] || null
+    const gst = Number(med?.gst_percent || 0)
+    const half = gst > 0 ? (gst / 2) : 0
+    updateItem(index, {
+      medicine: medicineId,
+      batch: firstBatch ? String(firstBatch.id) : '',
+      mrp: firstBatch ? String(firstBatch.mrp ?? 0) : '0',
+      rate: firstBatch ? String(firstBatch.sale_rate ?? firstBatch.mrp ?? 0) : '0',
+      cgst_rate: String(half),
+      sgst_rate: String(half),
+    })
+  }
+
+  function handleBatchChange(index, batchId) {
+    const selectedBatch = batches.find((b) => String(b.id) === String(batchId))
+    if (!selectedBatch) {
+      updateItem(index, { batch: '' })
+      return
+    }
+    const med = medicines.find((m) => String(m.id) === String(selectedBatch.medicine))
+    const gst = Number(med?.gst_percent || 0)
+    const half = gst > 0 ? (gst / 2) : 0
+    updateItem(index, {
+      batch: String(batchId),
+      mrp: String(selectedBatch.mrp ?? 0),
+      rate: String(selectedBatch.sale_rate ?? selectedBatch.mrp ?? 0),
+      cgst_rate: String(half),
+      sgst_rate: String(half),
+    })
+  }
+
   async function save() {
+    const validItems = items
+      .map((row) => ({
+        medicine: row.medicine,
+        batch: row.batch,
+        qty: Number(row.qty || 0),
+        mrp: Number(row.mrp || 0),
+        rate: Number(row.rate || 0),
+        cgst_rate: Number(row.cgst_rate || 0),
+        sgst_rate: Number(row.sgst_rate || 0),
+      }))
+      .filter((row) => row.medicine && row.batch && row.qty > 0)
+    if (validItems.length === 0) {
+      toast.error('Add at least one valid medicine row')
+      return
+    }
+
+    const fullName = String(patientName || '').trim()
+    const parts = fullName.split(/\s+/).filter(Boolean)
+    if (parts.length === 0) {
+      toast.error('Patient name is required')
+      return
+    }
+
     setSaving(true)
     try {
-      await api.patch(`/pharmacy/invoices/${invoice.id}/`, {
-        payment_method: paymentMethod,
-        paid_amount: paymentMethod === 'credit' ? '0.00' : Number(paidAmount || 0).toFixed(2),
-        remarks,
+      await api.patch(`/pharmacy/invoices/${invoice.id}/update-full/`, {
+        patient: {
+          first_name: parts[0],
+          last_name: parts.slice(1).join(' '),
+          phone: patientPhone || '',
+          gender: patientGender || 'male',
+          age: patientAge === '' ? null : Number(patientAge),
+          guardian_name: guardianName || '',
+          address_line1: addressLine1 || '',
+          city: city || '',
+          state: state || '',
+        },
+        invoice: {
+          payment_method: settlementType === 'due' ? 'credit' : paymentMethod,
+          paid_amount: settlementType === 'due' ? 0 : Number(totals.grandTotal || 0),
+          remarks,
+          total_discount: Number(invoice.total_discount || 0),
+        },
+        items: validItems,
       })
       toast.success('Invoice updated')
       onSaved?.()
-    } catch {
-      toast.error('Failed to update invoice')
+    } catch (err) {
+      toast.error(parseApiError(err, 'Failed to update invoice'))
     } finally {
       setSaving(false)
     }
@@ -1376,45 +1542,157 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
 
   return (
     <div className="fixed inset-0 z-[400] bg-black/50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-4 border border-slate-200">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-5xl p-4 border border-slate-200 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-bold text-slate-900">Edit sale invoice</h3>
           <button type="button" onClick={onClose} className="text-slate-500 hover:text-slate-800">
             <X size={16} />
           </button>
         </div>
-        <div className="space-y-3">
-          <label className="block">
-            <span className="text-[10px] font-semibold text-slate-500 uppercase">Payment method</span>
-            <select
-              value={paymentMethod}
-              onChange={(e) => setPaymentMethod(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm bg-white"
-            >
-              {['cash', 'upi', 'other', 'bank_transfer', 'credit'].map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </label>
-          <label className="block">
-            <span className="text-[10px] font-semibold text-slate-500 uppercase">Paid amount</span>
-            <input
-              type="number"
-              value={paymentMethod === 'credit' ? '0' : paidAmount}
-              onChange={(e) => setPaidAmount(e.target.value)}
-              disabled={paymentMethod === 'credit'}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm disabled:bg-slate-100"
-            />
-          </label>
-          <label className="block">
-            <span className="text-[10px] font-semibold text-slate-500 uppercase">Remarks</span>
-            <textarea
-              rows={2}
-              value={remarks}
-              onChange={(e) => setRemarks(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm"
-            />
-          </label>
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Patient name</span>
+              <input value={patientName} onChange={(e) => setPatientName(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Phone</span>
+              <input value={patientPhone} onChange={(e) => setPatientPhone(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Gender</span>
+              <select value={patientGender} onChange={(e) => setPatientGender(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm bg-white">
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Age</span>
+              <input type="number" min="0" value={patientAge} onChange={(e) => setPatientAge(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block md:col-span-2">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Guardian</span>
+              <input value={guardianName} onChange={(e) => setGuardianName(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block md:col-span-2">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Address</span>
+              <input value={addressLine1} onChange={(e) => setAddressLine1(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">City</span>
+              <input value={city} onChange={(e) => setCity(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">State</span>
+              <input value={state} onChange={(e) => setState(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+          </div>
+
+          <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <div className="px-2 py-2 bg-slate-50 flex items-center justify-between">
+              <span className="text-[11px] font-bold text-slate-700">Medicines</span>
+              <button type="button" onClick={addItem} className="px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700 text-[10px] font-semibold">+ Add row</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead className="bg-white text-slate-500 uppercase text-[10px]">
+                  <tr>
+                    <th className="px-2 py-1 text-left">Medicine</th>
+                    <th className="px-2 py-1 text-left">Batch</th>
+                    <th className="px-2 py-1 text-right">Qty</th>
+                    <th className="px-2 py-1 text-right">MRP</th>
+                    <th className="px-2 py-1 text-right">Rate</th>
+                    <th className="px-2 py-1 text-right">CGST%</th>
+                    <th className="px-2 py-1 text-right">SGST%</th>
+                    <th className="px-2 py-1 text-right">Line</th>
+                    <th className="px-2 py-1 text-right"> </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {items.map((row, idx) => {
+                    const medBatches = batches.filter((b) => String(b.medicine) === String(row.medicine))
+                    const line = (Number(row.qty || 0) * Number(row.rate || 0)) * (1 + (Number(row.cgst_rate || 0) + Number(row.sgst_rate || 0)) / 100)
+                    return (
+                      <tr key={idx}>
+                        <td className="px-2 py-1 min-w-[190px]">
+                          <select value={row.medicine} onChange={(e) => handleMedicineChange(idx, e.target.value)} className="w-full rounded border border-slate-200 px-2 py-1 bg-white">
+                            <option value="">Select</option>
+                            {medicines.map((m) => <option key={m.id} value={String(m.id)}>{m.name}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-2 py-1 min-w-[160px]">
+                          <select value={row.batch} onChange={(e) => handleBatchChange(idx, e.target.value)} className="w-full rounded border border-slate-200 px-2 py-1 bg-white">
+                            <option value="">Select</option>
+                            {medBatches.map((b) => <option key={b.id} value={String(b.id)}>{b.batch_no}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-2 py-1"><input type="number" min="0.01" step="0.01" value={row.qty} onChange={(e) => updateItem(idx, { qty: e.target.value })} className="w-20 rounded border border-slate-200 px-2 py-1 text-right" /></td>
+                        <td className="px-2 py-1"><input type="number" min="0" step="0.01" value={row.mrp} onChange={(e) => updateItem(idx, { mrp: e.target.value })} className="w-20 rounded border border-slate-200 px-2 py-1 text-right" /></td>
+                        <td className="px-2 py-1"><input type="number" min="0" step="0.01" value={row.rate} onChange={(e) => updateItem(idx, { rate: e.target.value })} className="w-20 rounded border border-slate-200 px-2 py-1 text-right" /></td>
+                        <td className="px-2 py-1"><input type="number" min="0" step="0.01" value={row.cgst_rate} onChange={(e) => updateItem(idx, { cgst_rate: e.target.value })} className="w-16 rounded border border-slate-200 px-2 py-1 text-right" /></td>
+                        <td className="px-2 py-1"><input type="number" min="0" step="0.01" value={row.sgst_rate} onChange={(e) => updateItem(idx, { sgst_rate: e.target.value })} className="w-16 rounded border border-slate-200 px-2 py-1 text-right" /></td>
+                        <td className="px-2 py-1 text-right font-semibold">₹{Number.isFinite(line) ? line.toFixed(2) : '0.00'}</td>
+                        <td className="px-2 py-1 text-right">
+                          <button type="button" onClick={() => removeItem(idx)} className="px-2 py-1 rounded border border-rose-200 bg-rose-50 text-rose-700 text-[10px] font-semibold">Del</button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Settlement</span>
+              <select
+                value={settlementType}
+                onChange={(e) => setSettlementType(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm bg-white"
+              >
+                <option value="paid">Paid</option>
+                <option value="due">Due</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Payment method</span>
+              <select
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+                disabled={settlementType === 'due'}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm bg-white"
+              >
+                {['cash', 'upi', 'other', 'bank_transfer', 'credit'].map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Paid amount</span>
+              <input
+                type="number"
+                value={settlementType === 'due' ? '0' : Number(totals.grandTotal || 0).toFixed(2)}
+                readOnly
+                disabled
+                className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm disabled:bg-slate-100"
+              />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase">Remarks</span>
+              <input value={remarks} onChange={(e) => setRemarks(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm" />
+            </label>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+            <div className="rounded border border-slate-200 p-2"><div className="text-slate-500">Subtotal</div><div className="font-bold">₹{totals.subtotal.toFixed(2)}</div></div>
+            <div className="rounded border border-slate-200 p-2"><div className="text-slate-500">CGST</div><div className="font-bold">₹{totals.cgst.toFixed(2)}</div></div>
+            <div className="rounded border border-slate-200 p-2"><div className="text-slate-500">SGST</div><div className="font-bold">₹{totals.sgst.toFixed(2)}</div></div>
+            <div className="rounded border border-slate-200 p-2"><div className="text-slate-500">Grand total</div><div className="font-bold">₹{totals.grandTotal.toFixed(2)}</div></div>
+            <div className="rounded border border-slate-200 p-2"><div className="text-slate-500">Due</div><div className="font-bold text-amber-700">₹{totals.due.toFixed(2)}</div></div>
+          </div>
+
           <button
             type="button"
             onClick={save}

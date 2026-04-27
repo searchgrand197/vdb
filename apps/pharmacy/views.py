@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db.models import F
+from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, permissions, serializers, status, viewsets
 from rest_framework.decorators import action
@@ -10,6 +11,7 @@ from rest_framework.filters import SearchFilter
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.inventory.models import Medicine, MedicineBatch, StockLedger
 from apps.inventory.services.stock_service import deduct_stock_fifo, get_batch_available_qty
 
 from apps.pharmacy.invoice_number import next_pharmacy_invoice_number
@@ -226,6 +228,206 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 "total_pending_amount": str(total_pending),
             },
         )
+
+    @action(detail=True, methods=["patch"], url_path="update-full")
+    @transaction.atomic
+    def update_full(self, request, *args, **kwargs):
+        """
+        Edit invoice in one transaction:
+        - update patient details
+        - replace invoice items
+        - reverse old stock + deduct new stock
+        - recalculate and persist invoice totals
+        """
+        invoice: PharmacyInvoice = self.get_object()
+        payload = request.data or {}
+        patient_payload = payload.get("patient") or {}
+        invoice_payload = payload.get("invoice") or {}
+        items_payload = payload.get("items") or []
+
+        if not isinstance(items_payload, list) or len(items_payload) == 0:
+            return Response(
+                {"detail": "At least one medicine item is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 1) Update patient details (best-effort editable fields used by frontend)
+        patient = invoice.patient
+        if isinstance(patient_payload, dict) and patient_payload:
+            first_name = (patient_payload.get("first_name") or "").strip()
+            last_name = (patient_payload.get("last_name") or "").strip()
+            patient.first_name = first_name or patient.first_name
+            patient.last_name = last_name
+
+            phone = (patient_payload.get("phone") or "").strip()
+            if phone:
+                patient.phone = phone
+            gender = (patient_payload.get("gender") or "").strip()
+            if gender:
+                patient.gender = gender
+            age = patient_payload.get("age")
+            if age not in (None, ""):
+                patient.age = age
+
+            guardian_name = patient_payload.get("guardian_name")
+            if guardian_name is not None:
+                try:
+                    if hasattr(patient, "guardian") and patient.guardian is not None:
+                        patient.guardian.name = guardian_name or ""
+                        patient.guardian.save(update_fields=["name", "updated_at"])
+                except Exception:
+                    pass
+
+            address_line1 = patient_payload.get("address_line1")
+            city = patient_payload.get("city")
+            state = patient_payload.get("state")
+            if address_line1 is not None or city is not None or state is not None:
+                try:
+                    if hasattr(patient, "address") and patient.address is not None:
+                        if address_line1 is not None:
+                            patient.address.line1 = address_line1 or ""
+                        if city is not None:
+                            patient.address.city = city or ""
+                        if state is not None:
+                            patient.address.state = state or ""
+                        patient.address.save(update_fields=["line1", "city", "state", "updated_at"])
+                except Exception:
+                    pass
+
+            patient.save()
+
+        # 2) Restore stock for old items before replacing items
+        old_items = list(invoice.items.select_related("batch").all())
+        for old in old_items:
+            if old.batch_id and (old.qty or Decimal("0")) > 0:
+                StockLedger.objects.create(
+                    hospital_id=invoice.hospital_id,
+                    medicine_id=old.medicine_id,
+                    batch_id=old.batch_id,
+                    qty_change=Decimal(old.qty),
+                    reason=StockLedger.Reason.RETURN_IN,
+                    reference_type="pharmacy_invoice_edit",
+                    reference_id=str(invoice.id),
+                    created_by=request.user,
+                )
+        invoice.items.all().delete()
+
+        # 3) Validate and create new items; collect stock deductions
+        subtotal = Decimal("0.00")
+        cgst_total = Decimal("0.00")
+        sgst_total = Decimal("0.00")
+        deductions = []
+
+        for idx, row in enumerate(items_payload):
+            if not isinstance(row, dict):
+                return Response({"detail": f"Invalid item at row {idx + 1}."}, status=status.HTTP_400_BAD_REQUEST)
+
+            med_id = row.get("medicine")
+            batch_id = row.get("batch")
+            if not med_id or not batch_id:
+                return Response(
+                    {"detail": f"Medicine and batch are required at row {idx + 1}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            medicine = Medicine.objects.filter(id=med_id).first()
+            if medicine is None:
+                return Response({"detail": f"Invalid medicine at row {idx + 1}."}, status=status.HTTP_400_BAD_REQUEST)
+
+            batch = MedicineBatch.objects.filter(
+                id=batch_id,
+                hospital_id=invoice.hospital_id,
+                medicine_id=medicine.id,
+            ).first()
+            if batch is None:
+                return Response({"detail": f"Invalid batch at row {idx + 1}."}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                qty = Decimal(str(row.get("qty") or "0"))
+                mrp = Decimal(str(row.get("mrp") or "0"))
+                rate = Decimal(str(row.get("rate") or "0"))
+                cgst_rate = Decimal(str(row.get("cgst_rate") or "0"))
+                sgst_rate = Decimal(str(row.get("sgst_rate") or "0"))
+            except Exception:
+                return Response({"detail": f"Invalid numeric values at row {idx + 1}."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if qty <= 0:
+                return Response({"detail": f"Quantity must be > 0 at row {idx + 1}."}, status=status.HTTP_400_BAD_REQUEST)
+
+            base_amount = (qty * rate).quantize(Decimal("0.01"))
+            line_cgst = (base_amount * cgst_rate / Decimal("100")).quantize(Decimal("0.01"))
+            line_sgst = (base_amount * sgst_rate / Decimal("100")).quantize(Decimal("0.01"))
+            line_total = (base_amount + line_cgst + line_sgst).quantize(Decimal("0.01"))
+
+            PharmacyInvoiceItem.objects.create(
+                invoice=invoice,
+                medicine=medicine,
+                batch=batch,
+                qty=qty,
+                mrp=mrp,
+                rate=rate,
+                cgst_rate=cgst_rate,
+                sgst_rate=sgst_rate,
+                amount=line_total,
+            )
+            deductions.append((batch, qty))
+            subtotal += base_amount
+            cgst_total += line_cgst
+            sgst_total += line_sgst
+
+        # 4) Check stock then deduct for new items
+        for batch, qty in deductions:
+            available = get_batch_available_qty(batch)
+            if available < qty:
+                return Response(
+                    {"detail": f"Insufficient stock for batch {batch.batch_no}. Available {available}, requested {qty}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        deduct_stock_fifo(
+            request=request,
+            hospital=invoice.hospital,
+            medicine_batch_pairs=deductions,
+            reference_id=str(invoice.id),
+        )
+
+        # 5) Recalculate invoice totals and save editable invoice fields
+        total_discount = Decimal(str(invoice_payload.get("total_discount") or invoice.total_discount or "0"))
+        if total_discount < 0:
+            total_discount = Decimal("0")
+        grand_total = (subtotal - total_discount + cgst_total + sgst_total).quantize(Decimal("0.01"))
+        if grand_total < 0:
+            grand_total = Decimal("0.00")
+
+        payment_method = (invoice_payload.get("payment_method") or invoice.payment_method or "cash").lower()
+        if payment_method == "credit":
+            paid_amount = Decimal("0.00")
+        else:
+            try:
+                paid_amount = Decimal(str(invoice_payload.get("paid_amount") if invoice_payload.get("paid_amount") is not None else invoice.paid_amount))
+            except Exception:
+                paid_amount = Decimal("0.00")
+            if paid_amount < 0:
+                paid_amount = Decimal("0.00")
+            if paid_amount > grand_total:
+                paid_amount = grand_total
+
+        invoice.subtotal = subtotal.quantize(Decimal("0.01"))
+        invoice.total_discount = total_discount.quantize(Decimal("0.01"))
+        invoice.cgst = cgst_total.quantize(Decimal("0.01"))
+        invoice.sgst = sgst_total.quantize(Decimal("0.01"))
+        invoice.grand_total = grand_total
+        invoice.payment_method = payment_method
+        invoice.paid_amount = paid_amount.quantize(Decimal("0.01"))
+        if "remarks" in invoice_payload:
+            invoice.remarks = invoice_payload.get("remarks") or ""
+        if "date" in invoice_payload and invoice_payload.get("date"):
+            parsed = parse_date(str(invoice_payload.get("date")))
+            if parsed:
+                invoice.date = parsed
+        invoice.save()
+
+        serializer = self.get_serializer(invoice)
+        return success_response(serializer.data, message="Invoice updated")
 
 
 class PharmacyInvoiceItemViewSet(viewsets.ModelViewSet):

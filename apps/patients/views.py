@@ -38,6 +38,7 @@ class PatientViewSet(viewsets.ModelViewSet):
         "list": "patients.view_patient",
         "retrieve": "patients.view_patient",
         "by_phone": "patients.view_patient",
+        "lifetime_timeline": "patients.view_patient",
         "create": "patients.create_patient",
         "update": "patients.update_patient",
         "partial_update": "patients.update_patient",
@@ -107,6 +108,103 @@ class PatientViewSet(viewsets.ModelViewSet):
             key=lambda p: id_order[p.id],
         )
         return success_response(data=PatientSerializer(ordered, many=True).data)
+
+    @action(detail=False, methods=["get"], url_path="lifetime-timeline")
+    def lifetime_timeline(self, request, *args, **kwargs):
+        uhid = (request.query_params.get("uhid") or "").strip()
+        patient_id = (request.query_params.get("patient_id") or "").strip()
+        if not uhid and not patient_id:
+            return Response(
+                {"success": False, "errors": {"uhid": ["Provide `uhid` or `patient_id`."]}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = self.get_queryset()
+        patient = qs.filter(uhid__iexact=uhid).first() if uhid else qs.filter(pk=patient_id).first()
+        if not patient:
+            return Response(
+                {"success": False, "errors": {"patient": ["Patient not found."]}},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from apps.opd.models import OPDVisit
+        from apps.ipd.models import IPDAdmission
+        from apps.discharge.models import DischargeSummary
+
+        opd_rows = OPDVisit.objects.filter(
+            patient=patient,
+            hospital_id=patient.hospital_id,
+            is_deleted=False,
+        ).select_related("doctor_user").order_by("-visit_date", "-created_at")
+
+        ipd_rows = IPDAdmission.objects.filter(
+            patient=patient,
+            hospital_id=patient.hospital_id,
+            is_deleted=False,
+        ).select_related("assigned_doctor").order_by("-admission_date", "-created_at")
+
+        discharge_map = {
+            str(d.admission_id): d
+            for d in DischargeSummary.objects.filter(
+                admission_id__in=[a.id for a in ipd_rows],
+                hospital_id=patient.hospital_id,
+                is_deleted=False,
+            )
+        }
+
+        data = {
+            "patient": PatientSerializer(patient).data,
+            "opd_visits": [
+                {
+                    "id": str(v.id),
+                    "visit_date": v.visit_date,
+                    "created_at": v.created_at,
+                    "status": v.status,
+                    "queue_number": v.queue_number,
+                    "visit_reason": v.visit_reason,
+                    "diagnosis": v.diagnosis,
+                    "revisit_advice": v.revisit_advice,
+                    "amount": v.amount,
+                    "payment_mode": v.payment_mode,
+                    "doctor_name": v.doctor_user.full_name if v.doctor_user_id else "",
+                }
+                for v in opd_rows
+            ],
+            "ipd_admissions": [
+                {
+                    "id": str(a.id),
+                    "admission_date": a.admission_date,
+                    "created_at": a.created_at,
+                    "status": a.status,
+                    "department": a.department,
+                    "ward_name": a.ward_name,
+                    "room_name": a.room_name,
+                    "bed_code": a.bed_code,
+                    "admission_diagnosis": a.admission_diagnosis,
+                    "admission_notes": a.admission_notes,
+                    "discharged_at": a.discharged_at,
+                    "doctor_name": a.assigned_doctor.full_name if a.assigned_doctor_id else "",
+                    "discharge_summary": (
+                        {
+                            "id": str(discharge_map[str(a.id)].id),
+                            "summary_notes": discharge_map[str(a.id)].summary_notes,
+                            "treatment_given": discharge_map[str(a.id)].treatment_given,
+                            "condition_at_discharge": discharge_map[str(a.id)].condition_at_discharge,
+                            "medications_on_discharge": discharge_map[str(a.id)].medications_on_discharge,
+                            "follow_up_advice": discharge_map[str(a.id)].follow_up_advice,
+                            "total_billed": discharge_map[str(a.id)].total_billed,
+                            "total_paid": discharge_map[str(a.id)].total_paid,
+                            "outstanding_balance": discharge_map[str(a.id)].outstanding_balance,
+                            "created_at": discharge_map[str(a.id)].created_at,
+                        }
+                        if str(a.id) in discharge_map
+                        else None
+                    ),
+                }
+                for a in ipd_rows
+            ],
+        }
+        return success_response(data=data)
 
     def create(self, request, *args, **kwargs):
         if not request.user.is_superuser and not request.user.hospital_id:

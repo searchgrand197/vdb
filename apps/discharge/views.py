@@ -21,14 +21,16 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.request.user.is_superuser:
-            return qs
-        return qs.filter(hospital_id=self.request.user.hospital_id)
+            filtered_qs = qs
+        else:
+            filtered_qs = qs.filter(hospital_id=self.request.user.hospital_id)
 
-    def perform_create(self, serializer):
-        admission = serializer.validated_data["admission"]
-        hospital_id = admission.hospital_id
-        serializer.save(hospital_id=hospital_id)
-        
+        admission_id = self.request.query_params.get("admission_id")
+        if admission_id:
+            filtered_qs = filtered_qs.filter(admission_id=admission_id)
+        return filtered_qs
+
+    def _finalize_admission(self, admission, hospital_id):
         # 1. Finalize Room Charges before closing
         from django.utils import timezone
         from apps.beds.models import Bed
@@ -89,6 +91,71 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
                 bed_code=admission.bed_code,
                 hospital_id=hospital_id,
             ).update(status=Bed.Status.AVAILABLE)
+
+    def create(self, request, *args, **kwargs):
+        admission_id = request.data.get("admission")
+        if not admission_id:
+            return Response({"admission": ["This field is required."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            admission = IPDAdmission.objects.select_related("hospital").get(pk=admission_id)
+        except IPDAdmission.DoesNotExist:
+            return Response({"admission": ["Invalid admission id."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not request.user.is_superuser and admission.hospital_id != request.user.hospital_id:
+            return Response({"detail": "Not permitted for this admission."}, status=status.HTTP_403_FORBIDDEN)
+
+        hospital_id = admission.hospital_id
+
+        summary, created = DischargeSummary.objects.get_or_create(
+            admission=admission,
+            defaults={"hospital_id": hospital_id},
+        )
+
+        for field in [
+            "summary_notes",
+            "treatment_given",
+            "condition_at_discharge",
+            "medications_on_discharge",
+            "follow_up_advice",
+            "reason_for_admission",
+            "diagnosis",
+            "allergies",
+            "procedure_surgery",
+            "medical_history",
+            "physical_examination",
+            "investigations",
+            "course_in_hospital",
+            "diet_advice",
+            "activity_advice",
+            "warning_signs",
+        ]:
+            if field in request.data:
+                setattr(summary, field, request.data.get(field) or "")
+
+        is_finalize_payload = all(
+            key in request.data for key in ["total_billed", "total_paid", "outstanding_balance"]
+        )
+        if is_finalize_payload:
+            try:
+                summary.total_billed = Decimal(str(request.data.get("total_billed", summary.total_billed)))
+                summary.total_paid = Decimal(str(request.data.get("total_paid", summary.total_paid)))
+                summary.outstanding_balance = Decimal(str(request.data.get("outstanding_balance", summary.outstanding_balance)))
+            except Exception:
+                return Response(
+                    {"detail": "Invalid financial values in finalize payload."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        summary.hospital_id = hospital_id
+        summary.save()
+
+        if is_finalize_payload and admission.status != IPDAdmission.Status.DISCHARGED:
+            self._finalize_admission(admission, hospital_id)
+
+        out = self.get_serializer(summary)
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(out.data, status=status_code)
 
     @action(detail=False, methods=["get"], url_path="billing-summary")
     def billing_summary(self, request):

@@ -39,3 +39,31 @@ class LeaveApprover(TimeStampedModel, UUIDPrimaryKeyModel):
 
     def __str__(self) -> str:
         return f"{self.user.email} → {self.hospital.name}"
+
+
+class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
+    hospital = models.OneToOneField(
+        Hospital,
+        on_delete=models.CASCADE,
+        related_name="reception_portal_settings",
+    )
+    default_city = models.CharField(max_length=120, blank=True, default="Jind")
+    default_state = models.CharField(max_length=120, blank=True, default="Haryana")
+    default_doctor_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="default_reception_portal_for_hospitals",
+    )
+
+    hospital_name = models.CharField(max_length=200, blank=True, default="Vardraan Hospital")
+    address = models.CharField(max_length=255, blank=True, default="Jind, Haryana, 126102")
+    pin_code = models.CharField(max_length=30, blank=True, default="126102")
+    phone = models.CharField(max_length=40, blank=True, default="+91-XXXXXXXXXX")
+    email = models.CharField(max_length=120, blank=True, default="info@vardraanhospital.com")
+    website = models.CharField(max_length=200, blank=True, default="www.vardraanhospital.com")
+    print_with_background = models.BooleanField(default=True)
+
+    def __str__(self) -> str:
+        return f"Reception settings ({self.hospital_id})"
