@@ -8,21 +8,21 @@ from apps.shared.models import Hospital, TimeStampedModel, UUIDPrimaryKeyModel
 
 
 class Unit(TimeStampedModel, UUIDPrimaryKeyModel):
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="units")
+    pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="units")
     code = models.CharField(max_length=20)
     name = models.CharField(max_length=100)
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("hospital", "code")]
-        indexes = [models.Index(fields=["hospital", "name"])]
+        unique_together = [("pharmacy", "code")]
+        indexes = [models.Index(fields=["pharmacy", "name"])]
 
     def __str__(self) -> str:
         return self.name
 
 
 class Medicine(TimeStampedModel, UUIDPrimaryKeyModel):
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="medicines")
+    pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="medicines")
     sku = models.CharField(max_length=80)
     name = models.CharField(max_length=250)
     company_name = models.CharField(max_length=200, blank=True, default="")
@@ -39,8 +39,8 @@ class Medicine(TimeStampedModel, UUIDPrimaryKeyModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("hospital", "sku")]
-        indexes = [models.Index(fields=["hospital", "name"])]
+        unique_together = [("pharmacy", "sku")]
+        indexes = [models.Index(fields=["pharmacy", "name"])]
 
     def __str__(self) -> str:
         return self.name
@@ -53,15 +53,8 @@ class MedicineCategory(TimeStampedModel, UUIDPrimaryKeyModel):
         FLEXIBLE = "flexible", "Flexible (outer + retail + base)"
         UNIT_ONLY = "unit_only", "Unit only"
 
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="medicine_categories")
+    pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="medicine_categories")
     name = models.CharField(max_length=120)
-    parent = models.ForeignKey(
-        "self",
-        on_delete=models.PROTECT,
-        related_name="subcategories",
-        null=True,
-        blank=True,
-    )
     is_active = models.BooleanField(default=True)
     rule_type = models.CharField(
         max_length=20,
@@ -75,28 +68,25 @@ class MedicineCategory(TimeStampedModel, UUIDPrimaryKeyModel):
     outer_pack_label = models.CharField(max_length=40, blank=True, default="")
 
     class Meta:
-        unique_together = [("hospital", "name")]
-        indexes = [
-            models.Index(fields=["hospital", "name"]),
-            models.Index(fields=["hospital", "parent"]),
-        ]
+        unique_together = [("pharmacy", "name")]
+        indexes = [models.Index(fields=["pharmacy", "name"])]
 
     def __str__(self) -> str:
         return self.name
 
 
 class MedicineReorderRule(TimeStampedModel, UUIDPrimaryKeyModel):
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="reorder_rules")
+    pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="reorder_rules")
     medicine = models.ForeignKey(Medicine, on_delete=models.PROTECT, related_name="reorder_rules")
     reorder_level = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0"))
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("hospital", "medicine")]
+        unique_together = [("pharmacy", "medicine")]
 
 
 class MedicineBatch(TimeStampedModel, UUIDPrimaryKeyModel):
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="batches")
+    pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="batches")
     medicine = models.ForeignKey(Medicine, on_delete=models.PROTECT, related_name="batches")
     batch_no = models.CharField(max_length=80)
     expiry_date = models.DateField(db_index=True, null=True, blank=True)
@@ -108,8 +98,8 @@ class MedicineBatch(TimeStampedModel, UUIDPrimaryKeyModel):
     sale_rate = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00")) # Standard Sale Rate
 
     class Meta:
-        unique_together = [("hospital", "medicine", "batch_no")]
-        indexes = [models.Index(fields=["hospital", "medicine", "expiry_date"])]
+        unique_together = [("pharmacy", "medicine", "batch_no")]
+        indexes = [models.Index(fields=["pharmacy", "medicine", "expiry_date"])]
 
     def __str__(self) -> str:
         return f"{self.medicine_id} - {self.batch_no}"
@@ -122,7 +112,7 @@ class StockLedger(TimeStampedModel, UUIDPrimaryKeyModel):
         RETURN_IN = "return_in"
         ADJUST = "adjust"
 
-    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="stock_ledger")
+    pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="stock_ledger")
     medicine = models.ForeignKey(Medicine, on_delete=models.PROTECT, related_name="ledger_entries")
     batch = models.ForeignKey(MedicineBatch, on_delete=models.PROTECT, related_name="ledger_entries")
 
@@ -138,7 +128,7 @@ class StockLedger(TimeStampedModel, UUIDPrimaryKeyModel):
     created_at = models.DateTimeField(default=timezone.now, editable=False)
 
     class Meta:
-        indexes = [models.Index(fields=["hospital", "medicine", "batch"])]
+        indexes = [models.Index(fields=["pharmacy", "medicine", "batch"])]
 
     def __str__(self) -> str:
         return f"{self.medicine_id} {self.batch_id} {self.qty_change}"
