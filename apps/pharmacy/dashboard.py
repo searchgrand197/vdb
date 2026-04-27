@@ -244,7 +244,9 @@ class PharmacyDashboardView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        hospital = getattr(request.user, "hospital", None)
+        # Use the branch resolved by PharmacyBranchMiddleware (X-Pharmacy-Branch header)
+        # so the dashboard shows data for whichever branch was selected at login.
+        hospital = getattr(request, "pharmacy_hospital", None) or getattr(request.user, "hospital", None)
         if hospital is None:
             return Response(
                 {"success": False, "detail": "Hospital context required."},
@@ -267,3 +269,4 @@ class PharmacyDashboardView(APIView):
             "today_total_for_tab": _today_sales_block(hospital_id, target_date=timezone.now().date()).get("total", 0.0),
         }
         return success_response(data)
+

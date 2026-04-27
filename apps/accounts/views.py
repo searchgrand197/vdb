@@ -169,3 +169,36 @@ class PasswordResetConfirmView(APIView):
         user.save(update_fields=["password"])
         return success_response(message="Password reset successfully.")
 
+
+class PharmacyBranchListView(APIView):
+    """
+    GET /api/v1/auth/pharmacies/
+
+    Public endpoint — returns all active Hospital rows flagged as
+    pharmacy branches (is_pharmacy=True, is_active=True).
+
+    Used by the login page to populate the pharmacy branch selector
+    before the user authenticates.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        from apps.pharmacy.models import Pharmacy
+
+        branches = (
+            Pharmacy.objects.filter(is_active=True)
+            .order_by("display_name", "name")
+            .values("id", "name", "display_name")
+        )
+        data = [
+            {
+                "id": str(b["id"]),
+                "label": b["display_name"].strip() or b["name"],
+                "name": b["name"],
+            }
+            for b in branches
+        ]
+        return success_response(data=data)
+
+

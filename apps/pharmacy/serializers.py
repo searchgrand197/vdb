@@ -161,13 +161,13 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
 
 
 class PharmacySupplierSerializer(serializers.ModelSerializer):
-    hospital_id = serializers.UUIDField(read_only=True)
+    pharmacy_id = serializers.UUIDField(read_only=True)
 
     class Meta:
         model = PharmacySupplier
         fields = (
             "id",
-            "hospital_id",
+            "pharmacy_id",
             "name",
             "phone",
             "gst_number",
@@ -176,10 +176,12 @@ class PharmacySupplierSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "hospital_id", "created_at", "updated_at")
+        read_only_fields = ("id", "pharmacy_id", "created_at", "updated_at")
 
     def create(self, validated_data):
-        validated_data["hospital_id"] = self.context["request"].user.hospital_id
+        request = self.context.get("request")
+        hospital = getattr(request, "pharmacy_hospital", None) or getattr(request.user, "hospital", None)
+        validated_data["pharmacy_id"] = hospital.id
         return super().create(validated_data)
 
 
@@ -234,9 +236,10 @@ class PurchaseChallanSerializer(serializers.Serializer):
         attrs.setdefault("invoice_no", "")
         sid = attrs.get("supplier_id")
         if sid is not None:
-            user = self.context["request"].user
-            hid = getattr(user, "hospital_id", None)
-            if hid and not PharmacySupplier.objects.filter(pk=sid, hospital_id=hid, is_active=True).exists():
+            request = self.context["request"]
+            hospital = getattr(request, "pharmacy_hospital", None) or getattr(request.user, "hospital", None)
+            hid = getattr(hospital, "id", None)
+            if hid and not PharmacySupplier.objects.filter(pk=sid, pharmacy_id=hid, is_active=True).exists():
                 raise serializers.ValidationError({"supplier_id": ["Invalid supplier for this hospital."]})
         return attrs
 

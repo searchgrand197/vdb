@@ -4,11 +4,13 @@ import DoctorAnalytics from '../components/DoctorAnalytics'
 import TreatmentPlansModule from '../components/TreatmentPlansModule'
 import api from '../api'
 import toast from 'react-hot-toast'
+import DraftPrescriptionModal from '../components/DraftPrescriptionModal'
+import { useDebouncedValue } from '../pharmacy/useDebouncedValue'
 import { format, addDays } from 'date-fns'
 import {
   Users, ChevronRight, ClipboardList, Plus, Trash2,
   Clock, CheckCircle, ArrowRight, GripVertical, Stethoscope, X, Mic, MicOff, UserPlus,
-  CalendarClock, Receipt, Activity, Pill, Scissors, FileText
+  CalendarClock, Receipt, Activity, Pill, Scissors, FileText, Search, Loader2
 } from 'lucide-react'
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors
@@ -627,30 +629,31 @@ function TreatmentAuditTimeline({ events = [], onSelectEvent, maxHeightClass = '
   )
 }
 
-// ─── Manual Follow-Up Date Component ─────────────────────────────────────────
+// ─── Enhanced Follow-Up Component with quick-day buttons ─────────────────────
 function ManualFollowUp({ visitId, existingDate }) {
   const [date, setDate] = useState(existingDate || '');
   const [saved, setSaved] = useState(!!existingDate);
   const [editing, setEditing] = useState(!existingDate);
+  const QUICK_DAYS = [3, 5, 7, 10, 14, 30];
 
   useEffect(() => {
     if (existingDate) { setDate(existingDate); setSaved(true); setEditing(false); }
   }, [existingDate]);
 
-  async function save() {
-    if (!date) return toast.error('Pick a date first');
+  async function save(d) {
+    const target = d || date;
+    if (!target) return toast.error('Pick a date first');
     try {
       await api.patch(`/opd-visits/${visitId}/`, {
-        follow_up_date: date,
-        revisit_advice: `Follow up on ${format(new Date(date), 'dd MMM yyyy')}`,
+        follow_up_date: target,
+        revisit_advice: `Follow up on ${format(new Date(target), 'dd MMM yyyy')}`,
       });
-      setSaved(true);
-      setEditing(false);
-      toast.success(`✅ Follow-up set for ${format(new Date(date), 'dd MMM yyyy')} — Receptionist will be alerted!`);
+      setDate(target); setSaved(true); setEditing(false);
+      toast.success(`✅ Follow-up: ${format(new Date(target), 'dd MMM yyyy')}`);
     } catch { toast.error('Failed to save'); }
   }
 
-  async function cancel() {
+  async function clear() {
     try {
       await api.patch(`/opd-visits/${visitId}/`, { follow_up_date: null, revisit_advice: '' });
       setDate(''); setSaved(false); setEditing(true);
@@ -660,45 +663,38 @@ function ManualFollowUp({ visitId, existingDate }) {
 
   if (saved && !editing) {
     return (
-      <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+      <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-3 py-2">
         <CheckCircle size={14} className="text-green-600 shrink-0" />
-        <span className="text-xs font-bold text-green-700 flex-1">
-          {format(new Date(date), 'dd MMM yyyy')}
-        </span>
-        <button onClick={() => setEditing(true)}
-          className="text-[10px] font-bold px-2 py-1 bg-white border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50">
-          Edit
-        </button>
-        <button onClick={cancel}
-          className="text-[10px] font-bold px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-lg hover:bg-red-100">
-          Cancel
-        </button>
+        <span className="text-xs font-bold text-green-700 flex-1">{format(new Date(date), 'dd MMM yyyy')}</span>
+        <button onClick={() => setEditing(true)} className="text-[10px] font-bold px-2 py-1 bg-white border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50">Edit</button>
+        <button onClick={clear} className="text-[10px] font-bold px-2 py-1 bg-red-50 border border-red-200 text-red-600 rounded-lg hover:bg-red-100">Clear</button>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <input
-        type="date"
-        value={date}
-        min={format(new Date(), 'yyyy-MM-dd')}
-        onChange={e => { setDate(e.target.value); setSaved(false); }}
-        className="flex-1 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-500/10"
-      />
-      <button onClick={save}
-        className="text-xs font-bold bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition-all shrink-0 shadow-sm">
-        Save &amp; Alert
-      </button>
-      {existingDate && (
-        <button onClick={() => setEditing(false)}
-          className="text-xs font-bold bg-gray-100 text-gray-600 px-2.5 py-1.5 rounded-lg hover:bg-gray-200">
-          Back
-        </button>
-      )}
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-1.5">
+        {QUICK_DAYS.map(d => (
+          <button key={d} onClick={() => save(format(addDays(new Date(), d), 'yyyy-MM-dd'))}
+            className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 transition-colors">
+            +{d}d
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center gap-2">
+        <input type="date" value={date} min={format(new Date(), 'yyyy-MM-dd')}
+          onChange={e => { setDate(e.target.value); setSaved(false); }}
+          className="flex-1 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400" />
+        <button onClick={() => save()}
+          className="text-xs font-bold bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 shrink-0">Save</button>
+        {existingDate && <button onClick={() => setEditing(false)} className="text-xs font-bold bg-gray-100 text-gray-600 px-2.5 py-1.5 rounded-lg">Back</button>}
+      </div>
     </div>
   );
 }
+
+
 
 // ─── Speech-to-Text Glow AI Transition Overlay ───────────────────────────────
 function AITransitionOverlay({ onDone }) {
@@ -798,6 +794,245 @@ function AITransitionOverlay({ onDone }) {
   );
 }
 
+
+// ─── Inline Rx Panel (embedded prescription, no modal) ───────────────────────
+function InlineRxPanel({ visit }) {
+  const [open, setOpen] = useState(true)
+  const [branches, setBranches] = useState([])
+  const [branchId, setBranchId] = useState('')
+  const [search, setSearch] = useState('')
+  const [results, setResults] = useState([])
+  const [searching, setSearching] = useState(false)
+  const [items, setItems] = useState([])
+  const [saving, setSaving] = useState(false)
+  const [globalDays, setGlobalDays] = useState(3)
+  const searchRef = useRef(null)
+  const debouncedQ = useDebouncedValue(search, 320)
+
+  useEffect(() => {
+    if (!open || branches.length) return
+    api.get('/auth/pharmacies/').then(r => {
+      const list = r.data?.data || r.data?.results || []
+      setBranches(list)
+      if (list.length) setBranchId(String(list[0].id))
+    }).catch(() => {})
+  }, [open])
+
+  useEffect(() => {
+    if (!branchId || debouncedQ.length < 2) { setResults([]); return }
+    setSearching(true)
+    api.get('/pharmacy/doctor-stock-search/', { params: { hospital_id: branchId, q: debouncedQ } })
+      .then(r => setResults(Array.isArray(r.data?.data || r.data) ? (r.data?.data || r.data) : []))
+      .catch(() => setResults([]))
+      .finally(() => setSearching(false))
+  }, [debouncedQ, branchId])
+
+  const TIMING = [
+    { v: 'AF', l: 'After Food' }, { v: 'BF', l: 'Before Food' },
+    { v: 'EM', l: 'Empty Stomach' }, { v: 'BD', l: 'Twice Daily' },
+    { v: 'TDS', l: 'Three Times' }, { v: 'QID', l: 'Four Times' },
+    { v: 'HS', l: 'Bedtime' }, { v: 'SOS', l: 'As Needed' },
+  ]
+
+  const DOSAGE_PATTERNS = [
+    { v: '1', l: '1 (OD)' },
+    { v: '1-0-1', l: '1-0-1 (BD)' },
+    { v: '1-1', l: '1-1 (BD)' },
+    { v: '1-1-1', l: '1-1-1 (TDS)' },
+    { v: '1-1-1-1', l: '1-1-1-1 (QID)' },
+    { v: '0-1', l: '0-1 (Night)' },
+    { v: '1-0', l: '1-0 (Morning)' },
+    { v: '2-2', l: '2-2 (BD)' },
+    { v: '2-2-2', l: '2-2-2 (TDS)' },
+    { v: '0.5-0.5', l: '0.5-0.5 (Half BD)' },
+  ]
+
+  const calculateQty = (pattern, days) => {
+    const sum = String(pattern).split('-').reduce((acc, curr) => acc + (Number(curr) || 0), 0)
+    return Math.ceil(sum * (Number(days) || 1)) || 1
+  }
+
+  const handleGlobalDaysChange = (d) => {
+    setGlobalDays(d)
+    setItems(p => p.map(it => ({ ...it, days: d, qty: calculateQty(it.pattern || '1-0-1', d) })))
+  }
+
+  const addItem = pick => {
+    if (items.some(i => String(i.batch.id) === String(pick.batch.id))) return toast.error('Already added')
+    setItems(p => [...p, { ...pick, pattern: '1-0-1', qty: calculateQty('1-0-1', globalDays), days: globalDays, timing: 'AF' }])
+    setSearch(''); setResults([]); searchRef.current?.focus()
+  }
+
+  const upd = (idx, f, v) => setItems(p => p.map((it, i) => {
+    if (i !== idx) return it
+    const updated = { ...it, [f]: v }
+    if (f === 'pattern' || f === 'days') {
+      updated.qty = calculateQty(updated.pattern, updated.days)
+    }
+    return updated
+  }))
+  const rem = idx => setItems(p => p.filter((_, i) => i !== idx))
+
+  const handleSend = async () => {
+    const final = items.map(i => ({ ...i, qty: Number(i.qty) || 0 })).filter(i => i.qty > 0)
+    if (!final.length) return toast.error('Add at least one medicine with qty > 0')
+    setSaving(true)
+    try {
+      const bn = branches.find(b => String(b.id) === String(branchId))?.name || branchId
+      const remarks = `Doctor Prescription (Branch: ${bn}):\n` +
+        final.map(i => `${i.medicine.name} x${i.qty} (${i.pattern}) | ${TIMING.find(t => t.v === i.timing)?.l || i.timing} | ${i.days} day${i.days > 1 ? 's' : ''}`).join('\n')
+      await api.post('/pharmacy/invoices/create-draft/', {
+        patient: visit.patient,
+        ipd_admission: visit.ipd_admission || null,
+        remarks,
+        items: final.map(it => ({
+          medicine: it.medicine.id, batch: it.batch.id, qty: it.qty,
+          mrp: it.batch.mrp, rate: it.batch.sale_rate,
+          amount: (Number(it.qty) * Number(it.batch.sale_rate)).toFixed(2),
+        })),
+      }, { headers: { 'X-Pharmacy-Branch': branchId } })
+      toast.success(`✅ Draft sent to ${bn} — ${final.length} medicine(s)`)
+      setItems([]); setOpen(false)
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Failed to send draft', { duration: 6000 })
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="border border-emerald-200 rounded-xl overflow-hidden">
+      <button onClick={() => setOpen(o => !o)}
+        className={`w-full flex items-center gap-2 px-3 py-2.5 text-left transition-colors ${
+          open ? 'bg-emerald-600 text-white' : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700'
+        }`}>
+        <Pill size={14} />
+        <span className="text-xs font-bold flex-1">💊 Pharmacy Prescription</span>
+        {items.length > 0 && <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+          open ? 'bg-white/20 text-white' : 'bg-emerald-200 text-emerald-800'
+        }`}>{items.length} added</span>}
+        <span className="text-[10px] opacity-70">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div className="bg-white">
+          {/* Branch selector */}
+          {branches.length > 1 && (
+            <div className="px-3 py-1.5 border-b border-slate-100 flex items-center gap-2">
+              <span className="text-[10px] font-bold text-slate-500 uppercase">Branch:</span>
+              <select value={branchId} onChange={e => { setBranchId(e.target.value); setItems([]) }}
+                className="text-[11px] border border-slate-200 rounded px-2 py-0.5 outline-none flex-1">
+                {branches.map(b => <option key={b.id} value={b.id}>{b.label || b.name}</option>)}
+              </select>
+            </div>
+          )}
+
+          {/* Global Days */}
+          <div className="px-3 pt-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Default Days:</span>
+              <div className="flex flex-wrap gap-1">
+                {[1, 3, 5, 7, 10, 14, 30].map(d => (
+                  <button key={d} onClick={() => handleGlobalDaysChange(d)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all border ${globalDays === d ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm' : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'}`}>
+                    {d}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Search */}
+          <div className="px-3 pt-2 pb-1">
+            <div className="relative">
+              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input ref={searchRef} value={search} onChange={e => setSearch(e.target.value)}
+                placeholder="Search medicine..." autoFocus
+                className="w-full h-8 pl-8 pr-3 text-[12px] border border-slate-200 rounded-lg outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-400/30" />
+              {searching && <Loader2 size={11} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-emerald-500 animate-spin" />}
+            </div>
+          </div>
+
+          {/* Search results */}
+          {results.length > 0 && (
+            <div className="mx-3 mb-2 border border-slate-200 rounded-lg overflow-hidden max-h-40 overflow-y-auto">
+              {results.slice(0, 8).map((pick, i) => {
+                const added = items.some(it => String(it.batch.id) === String(pick.batch.id))
+                return (
+                  <button key={i} onClick={() => !added && addItem(pick)} disabled={added}
+                    className={`w-full text-left flex items-center gap-2 px-2.5 py-1.5 transition-colors border-b border-slate-100 last:border-0 ${
+                      added ? 'opacity-40 cursor-default bg-slate-50' : 'hover:bg-emerald-50'
+                    }`}>
+                    <Pill size={11} className="text-emerald-600 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[11px] font-bold text-slate-900 truncate">{pick.medicine.name}</div>
+                      <div className="text-[9px] text-slate-400">{pick.batch.batch_no} · Stock: {pick.batch.stock}</div>
+                    </div>
+                    <span className="text-[11px] font-bold text-emerald-700 shrink-0">₹{Number(pick.batch.sale_rate).toFixed(0)}</span>
+                    {added ? <CheckCircle size={11} className="text-emerald-400" /> : <Plus size={11} className="text-emerald-500" />}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Added items */}
+          {items.length > 0 && (
+            <div className="px-3 pb-2 space-y-1.5 mt-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-500 uppercase">Prescription ({items.length})</span>
+                <button onClick={() => setItems([])} className="text-[9px] text-rose-500 font-bold hover:underline">Clear all</button>
+              </div>
+              {items.map((item, idx) => (
+                <div key={idx} className="bg-white border border-slate-200 rounded-lg flex flex-col gap-1 px-2 py-1.5 shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <Pill size={12} className="text-emerald-500 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-bold text-slate-900 truncate" title={item.medicine.name}>{item.medicine.name}</p>
+                    </div>
+                    <button onClick={() => rem(idx)} className="text-slate-300 hover:text-rose-500 shrink-0 transition-colors">
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                  
+                  <div className="flex items-center gap-1 shrink-0 bg-slate-50 p-1 rounded-md border border-slate-100">
+                    <select value={item.pattern} onChange={e => upd(idx, 'pattern', e.target.value)} title="Dosage Pattern"
+                      className="w-[60px] h-6 text-[9px] font-bold text-center border border-slate-200 rounded bg-white outline-none cursor-pointer focus:border-emerald-400 transition-colors">
+                      {DOSAGE_PATTERNS.map(p => <option key={p.v} value={p.v}>{p.v}</option>)}
+                    </select>
+                    <span className="text-[9px] text-slate-400">×</span>
+                    <input type="number" min="1" value={item.days} onChange={e => upd(idx, 'days', e.target.value)} title="Days"
+                      className="w-8 h-6 text-[10px] font-bold text-center border border-slate-200 rounded bg-white outline-none focus:border-blue-400 transition-colors" />
+                    <span className="text-[9px] text-slate-400 font-medium mr-0.5">d</span>
+                    <span className="text-[9px] text-slate-400">=</span>
+                    <input type="number" min="1" value={item.qty} onChange={e => upd(idx, 'qty', e.target.value)} title="Total Quantity"
+                      className="w-8 h-6 text-[10px] font-bold text-center border border-emerald-200 rounded bg-emerald-50 text-emerald-700 outline-none focus:border-emerald-500 transition-colors" />
+                    
+                    <select value={item.timing} onChange={e => upd(idx, 'timing', e.target.value)} title="Timing"
+                      className="flex-1 h-6 text-[9px] font-bold border border-slate-200 rounded bg-white outline-none cursor-pointer focus:border-purple-400 transition-colors ml-0.5">
+                      {TIMING.map(t => <option key={t.v} value={t.v}>{t.l}</option>)}
+                    </select>
+                  </div>
+                </div>
+              ))}
+
+              <button onClick={handleSend} disabled={saving}
+                className="w-full py-2 rounded-lg text-[12px] font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 flex items-center justify-center gap-1.5 mt-1 shadow-sm">
+                {saving ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle size={13} />}
+                {saving ? 'Sending...' : `Send to Pharmacy (${items.length} medicine${items.length > 1 ? 's' : ''})`}
+              </button>
+            </div>
+          )}
+
+          {!items.length && search.length < 2 && (
+            <div className="py-4 text-center text-slate-400 text-[11px]">
+              <Pill size={22} className="mx-auto mb-1 opacity-30" />
+              Search and add medicines above
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── OPD Tab ─────────────────────────────────────────────────────────────────
 function OPDTab({ aiMode = false }) {
@@ -982,185 +1217,237 @@ function OPDTab({ aiMode = false }) {
   )
 
   return (
-    <div className="max-w-3xl mx-auto space-y-4">
-      {/* Summary row */}
-      <div className="grid grid-cols-3 gap-3">
-        {[
-          { label: 'Waiting', count: waiting.length, color: 'amber' },
-          { label: 'In Room', count: inProgress.length, color: 'blue' },
-          { label: 'Done', count: done.length, color: 'green' },
-        ].map(s => (
-          <div key={s.label} className={`bg-${s.color}-50 border border-${s.color}-200 rounded-2xl p-4 text-center`}>
-            <p className={`text-3xl font-black text-${s.color}-700`}>{s.count}</p>
-            <p className={`text-xs font-semibold text-${s.color}-600 mt-0.5`}>{s.label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Next token button */}
-      <button onClick={callNext}
-        className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-4 rounded-2xl font-bold text-base flex items-center justify-center gap-2 hover:opacity-90 transition-all shadow-lg">
-        <ChevronRight size={22} />
-        Call Next Token {waiting[0] ? `— #${waiting[0].token_number}` : ''}
-      </button>
-
-      {/* In-progress */}
-      {inProgress.length > 0 && (
-        <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 space-y-2">
-          <p className="text-sm font-bold text-blue-700">🔵 Currently In Room</p>
-          {inProgress.map(v => {
-            const { meds, followupDays } = extractMedAndFollowup(v.chief_complaint);
-            const followupDate = followupDays
-              ? format(addDays(new Date(), followupDays), 'yyyy-MM-dd')
-              : null;
-            return (
-            <div key={v.id} data-no-copy="true" className="doctor-no-copy bg-white rounded-xl p-2.5 flex gap-3 shadow-sm border border-slate-100">
-              <div className="flex-1 min-w-0 flex flex-col gap-2">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-blue-600 rounded-xl text-white font-black text-lg flex items-center justify-center">{v.token_number}</div>
-                  <div className="flex-1">
-                    <p className="font-semibold text-gray-800">{v.patient_name || 'Patient'}</p>
-                    <p className="text-xs text-gray-400">Time: {v.visit_time || ''}</p>
-                  </div>
-                  <button onClick={() => completeVisit(v)}
-                    className="bg-green-600 text-white text-xs px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1 hover:bg-green-700">
-                    <CheckCircle size={12} /> Done
-                  </button>
-                </div>
-
-                {/* Notes area — AI mode: with dictate mic (auto-start) | Manual mode: plain textarea */}
-                <div className={`relative border rounded-lg overflow-hidden shadow-sm transition-colors duration-300 ${
-                  aiMode ? 'border-purple-300 bg-gradient-to-br from-indigo-50/50 to-purple-50/50 focus-within:border-purple-500' : 'border-gray-200 bg-gray-50/50 focus-within:border-blue-400'
-                }`}>
-                  <textarea
-                    value={v.chief_complaint || ''}
-                    onChange={(e) => updateVisitNotes(v.id, e.target.value)}
-                    onFocus={() => { noteStartRef.current[v.id] = v.chief_complaint || '' }}
-                    onBlur={(e) => commitVisitNoteHistory(v, e.target.value)}
-                    placeholder={aiMode ? '🎙️ Dictate freely — say "follow up in 7 days", medicines, symptoms...' : 'Type patient notes, symptoms, and observations...'}
-                    className="w-full text-sm text-gray-700 bg-transparent p-2.5 min-h-[74px] outline-none resize-none"
-                    style={{ paddingBottom: aiMode ? '44px' : '10px' }}
-                  />
-                  {aiMode && (
-                    <div className="absolute bottom-2 right-2 flex gap-2 items-center bg-white shadow-sm border border-purple-100 rounded-full pl-3 pr-1 py-1">
-                      <span className="text-[10px] text-purple-500 font-black tracking-widest uppercase">Dictate</span>
-                      <MicrophoneInput autoStart={true} onTranscript={(text) => appendVisitNotes(v.id, v.chief_complaint, text)} />
-                    </div>
-                  )}
-                </div>
-
-                {/* Follow-up Panel — conditional on AI mode */}
-                {aiMode ? (
-                  <div className="rounded-lg border border-purple-200 bg-gradient-to-br from-indigo-50 to-purple-50 p-2.5 space-y-2 shadow-sm">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm">🤖</span>
-                      <span className="text-[11px] font-extrabold uppercase tracking-widest text-purple-700">AI Follow-up Detection</span>
-                      <span className="ml-auto text-[10px] bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full font-bold">AUTO</span>
-                    </div>
-
-                    {/* AI detected follow-up */}
-                    {followupDays ? (
-                      <div className="flex items-center gap-2 bg-green-50 border border-green-300 rounded-lg px-3 py-2">
-                        <span className="text-xs text-green-700 font-semibold">✅ Follow up in <strong>{followupDays} days</strong> — {format(addDays(new Date(), followupDays), 'dd MMM yyyy')}</span>
-                        <button
-                          onClick={() => {
-                            const fupISODate = format(addDays(new Date(), followupDays), 'yyyy-MM-dd');
-                            api.patch(`/opd-visits/${v.id}/`, {
-                              revisit_advice: `Follow up after ${followupDays} days`,
-                              follow_up_date: fupISODate,
-                            })
-                              .then(() => {
-                                setVisits(prev => prev.map(x => x.id === v.id ? { ...x, follow_up_date: fupISODate } : x));
-                                pushHistoryEvent({
-                                  visitId: v.id,
-                                  category: 'Appointment',
-                                  text: `Follow-up advised for ${format(addDays(new Date(), followupDays), 'dd MMM yyyy')}`,
-                                })
-                                toast.success(`✅ Follow-up saved!`);
-                              })
-                              .catch(() => {});
-                          }}
-                          className="ml-auto text-[10px] font-bold bg-green-600 text-white px-2.5 py-1 rounded-lg hover:bg-green-700 transition-all shrink-0">
-                          Use this
-                        </button>
-                      </div>
-                    ) : (
-                      <p className="text-xs text-purple-400 italic">🎙️ Dictate something like "follow up in 7 days" to auto-detect...</p>
-                    )}
-
-                    {/* AI extracted medicines */}
-                    {meds.length > 0 && (
-                      <div className="pt-2 border-t border-purple-100">
-                        <p className="text-[10px] font-bold text-purple-600 uppercase tracking-wider mb-1.5">💊 AI Detected Medicines</p>
-                        <div className="flex flex-wrap gap-1">
-                          {meds.map((med, i) => (
-                            <span key={i} className="text-xs text-purple-900 bg-purple-100 rounded-full px-2.5 py-1 border border-purple-200 font-semibold">{med}</span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="rounded-lg border border-gray-200 bg-white p-2.5 space-y-2 shadow-sm">
-                    <div className="flex items-center gap-1.5">
-                      <Clock size={13} className="text-gray-500" />
-                      <span className="text-[11px] font-extrabold uppercase tracking-widest text-gray-600">Set Follow-up Date</span>
-                      <span className="ml-auto text-[10px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-bold">MANUAL</span>
-                    </div>
-                    <ManualFollowUp visitId={v.id} existingDate={v.follow_up_date} />
-                  </div>
-                )}
-              </div>
-              <PatientHistoryTimeline
-                events={historyByVisit[v.id] || []}
-                filter={historyFilters[v.id] || 'all'}
-                onFilterChange={(nextFilter) =>
-                  setHistoryFilters((prev) => ({ ...prev, [v.id]: nextFilter }))
-                }
-              />
-            </div>
-          )})}
-        </div>
-      )}
-
-      {/* Waiting queue */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-          <p className="font-bold text-gray-800">Queue</p>
-          <span className="text-xs text-gray-400">{visits.length} total today</span>
-        </div>
-        <div className="divide-y divide-gray-50 max-h-80 overflow-y-auto">
-          {visits.length === 0 ? (
-            <div className="text-center py-10 text-gray-400 text-sm">No visits today</div>
-          ) : visitsQueueOrder.map(v => (
-            <div key={v.id} className="px-4 py-3 flex items-center gap-3">
-              <div className={`w-9 h-9 rounded-xl font-bold text-sm flex items-center justify-center ${
-                (v.status === 'in_progress' || v.status === 'in_consultation') ? 'bg-blue-600 text-white' :
-                v.status === 'completed' ? 'bg-green-100 text-green-700' :
-                'bg-gray-100 text-gray-700'
-              }`}>{v.token_number}</div>
-              <div className="flex-1">
-                <p className="text-sm font-semibold text-gray-800">{v.patient_name || `Patient #${v.token_number}`}</p>
-                <p className="text-xs text-gray-400">{v.chief_complaint || 'General'} · {v.visit_time || ''}</p>
-              </div>
-              <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${statusBadge[v.status] || 'bg-gray-100 text-gray-600'}`}>
-                {v.status?.replace(/_/g, ' ')}
-              </span>
+    <div className="h-full flex gap-3 overflow-hidden">
+      {/* LEFT: Stats + Queue sidebar */}
+      <div className="w-64 shrink-0 flex flex-col gap-2 overflow-hidden">
+        
+        {/* Stats Row */}
+        <div className="flex items-center gap-2 shrink-0">
+          {[
+            { label: 'Wait', count: waiting.length, bg: 'bg-amber-50 border-amber-200', txt: 'text-amber-700' },
+            { label: 'Room', count: inProgress.length, bg: 'bg-blue-50 border-blue-200', txt: 'text-blue-700' },
+            { label: 'Done', count: done.length, bg: 'bg-green-50 border-green-200', txt: 'text-green-700' },
+          ].map(s => (
+            <div key={s.label} className={`${s.bg} border rounded-xl flex-1 py-1.5 text-center shadow-sm`}>
+              <p className={`text-xl font-black ${s.txt}`}>{s.count}</p>
+              <p className={`text-[9px] font-semibold ${s.txt} opacity-80 uppercase tracking-wide`}>{s.label}</p>
             </div>
           ))}
         </div>
+
+        {/* Call Next Button */}
+        <button onClick={callNext}
+          className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:opacity-90 transition-all shadow-md shrink-0">
+          <ChevronRight size={18} />
+          Call Next {waiting[0] ? `(#${waiting[0].token_number})` : ''}
+        </button>
+
+        {/* Queue List */}
+        <div className="bg-white border border-gray-100 rounded-2xl flex-1 flex flex-col overflow-hidden shadow-sm mt-1">
+          <div className="px-3 py-2 border-b border-gray-100 flex items-center justify-between shrink-0">
+            <p className="text-xs font-bold text-gray-700">Queue</p>
+            <span className="text-[10px] text-gray-400">{visits.length} today</span>
+          </div>
+          <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
+            {visits.length === 0 ? (
+              <div className="text-center py-8 text-gray-400 text-xs">No visits today</div>
+            ) : visitsQueueOrder.map(v => (
+              <div key={v.id} className="px-2.5 py-2 flex items-center gap-2">
+                <div className={`w-7 h-7 rounded-lg font-bold text-xs flex items-center justify-center shrink-0 ${
+                  (v.status === 'in_progress' || v.status === 'in_consultation') ? 'bg-blue-600 text-white' :
+                  v.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                }`}>{v.token_number}</div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[11px] font-semibold text-gray-800 truncate">{v.patient_name || `#${v.token_number}`}</p>
+                  <p className="text-[9px] text-gray-400 truncate">
+                    {v.patient_address ? <span className="font-medium text-gray-500">📍 {v.patient_address} · </span> : ''}
+                    {v.chief_complaint || 'General'}
+                  </p>
+                </div>
+                <span className={`text-[8px] px-1.5 py-0.5 rounded-full font-bold shrink-0 ${statusBadge[v.status] || 'bg-gray-100 text-gray-600'}`}>
+                  {v.status === 'in_progress' || v.status === 'in_consultation' ? 'In' :
+                   v.status === 'completed' ? '✓' : 'Wait'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
+
+        {/* CENTER: Active patient(s) */}
+        <div className="flex-1 min-w-0 overflow-y-auto relative">
+          {inProgress.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-400 bg-white rounded-2xl border border-dashed border-gray-200 relative overflow-hidden">
+              <div className="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mb-3">
+                <Users size={26} className="opacity-30" />
+              </div>
+              <p className="font-semibold text-sm">No patient in room</p>
+              <p className="text-xs mt-1 text-gray-400">Call next token to begin consultation</p>
+
+              <div className="absolute bottom-4 right-4">
+                <button onClick={callNext}
+                  className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all">
+                  Call Next {waiting[0] ? `(#${waiting[0].token_number})` : ''} <ChevronRight size={18} />
+                </button>
+              </div>
+            </div>
+          ) : inProgress.map(v => {
+            const { meds, followupDays } = extractMedAndFollowup(v.chief_complaint)
+            return (
+              <div key={v.id} data-no-copy="true" className="bg-white rounded-2xl border border-blue-100 shadow-sm overflow-hidden flex flex-col h-full">
+                {/* Patient header strip */}
+                <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-3 flex items-center gap-3 shrink-0">
+                  <div className="w-11 h-11 bg-white/20 backdrop-blur rounded-xl text-white font-black text-xl flex items-center justify-center border border-white/30">
+                    {v.token_number}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-white font-bold text-base leading-tight truncate">{v.patient_name || 'Patient'}</p>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5">
+                      {v.patient_age && <span className="text-blue-100 text-[11px]">Age: <strong className="text-white">{v.patient_age}</strong></span>}
+                      {v.patient_gender && <span className="text-blue-100 text-[11px]">Gender: <strong className="text-white capitalize">{v.patient_gender}</strong></span>}
+                      {v.patient_phone && <span className="text-blue-100 text-[11px]">📞 <strong className="text-white">{v.patient_phone}</strong></span>}
+                      {v.patient_address && <span className="text-blue-100 text-[11px]">📍 <strong className="text-white truncate max-w-[120px] inline-block align-bottom">{v.patient_address}</strong></span>}
+                      {v.visit_time && <span className="text-blue-100 text-[11px]">⏰ <strong className="text-white">{v.visit_time}</strong></span>}
+                      {v.uhid && <span className="text-blue-100 text-[11px]">UHID: <strong className="text-white">{v.uhid}</strong></span>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* OPD slip detail row */}
+                {(v.patient_address || v.visit_type || v.referred_by || v.department) && (
+                  <div className="px-4 py-2 bg-slate-50 border-b border-slate-100 flex flex-wrap gap-x-4 gap-y-1">
+                    {v.patient_address && (
+                      <span className="text-[11px] text-slate-600">
+                        📍 <span className="font-medium">{v.patient_address}</span>
+                      </span>
+                    )}
+                    {v.visit_type && (
+                      <span className="text-[11px] text-slate-600">
+                        Type: <span className="font-semibold text-slate-800 capitalize">{v.visit_type}</span>
+                      </span>
+                    )}
+                    {v.referred_by && (
+                      <span className="text-[11px] text-slate-600">
+                        Ref: <span className="font-semibold text-slate-800">{v.referred_by}</span>
+                      </span>
+                    )}
+                    {v.department && (
+                      <span className="text-[11px] text-slate-600">
+                        Dept: <span className="font-semibold text-slate-800">{v.department}</span>
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Body: notes + follow-up + prescription */}
+                <div className="p-3 space-y-2.5 flex-1 flex flex-col">
+                  {/* Notes */}
+                  <div className={`relative border rounded-xl overflow-hidden transition-colors ${
+                    aiMode ? 'border-purple-300 bg-gradient-to-br from-indigo-50/50 to-purple-50/50 focus-within:border-purple-500'
+                           : 'border-gray-200 bg-gray-50/50 focus-within:border-blue-400'
+                  }`}>
+                    <textarea
+                      value={v.chief_complaint || ''}
+                      onChange={e => updateVisitNotes(v.id, e.target.value)}
+                      onFocus={() => { noteStartRef.current[v.id] = v.chief_complaint || '' }}
+                      onBlur={e => commitVisitNoteHistory(v, e.target.value)}
+                      placeholder={aiMode ? '🎙️ Dictate — symptoms, medicines, follow-up days...' : 'Chief complaint, symptoms, observations...'}
+                      rows={3}
+                      className="w-full text-sm text-gray-700 bg-transparent p-2.5 outline-none resize-none"
+                      style={{ paddingBottom: aiMode ? '40px' : undefined }}
+                    />
+                    {aiMode && (
+                      <div className="absolute bottom-2 right-2 flex gap-2 items-center bg-white shadow-sm border border-purple-100 rounded-full pl-3 pr-1 py-0.5">
+                        <span className="text-[9px] text-purple-500 font-black tracking-widest uppercase">Dictate</span>
+                        <MicrophoneInput autoStart={true} onTranscript={text => appendVisitNotes(v.id, v.chief_complaint, text)} />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* AI/manual follow-up */}
+                  {aiMode ? (
+                    <div className="rounded-xl border border-purple-200 bg-gradient-to-br from-indigo-50 to-purple-50 p-2.5 space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm">🤖</span>
+                        <span className="text-[10px] font-extrabold uppercase tracking-widest text-purple-700">AI Follow-up</span>
+                        <span className="ml-auto text-[9px] bg-purple-100 text-purple-600 px-1.5 py-0.5 rounded-full font-bold">AUTO</span>
+                      </div>
+                      {followupDays ? (
+                        <div className="flex items-center gap-2 bg-green-50 border border-green-300 rounded-lg px-3 py-1.5">
+                          <span className="text-xs text-green-700 font-semibold flex-1">
+                            ✅ {followupDays} days — {format(addDays(new Date(), followupDays), 'dd MMM yyyy')}
+                          </span>
+                          <button onClick={() => {
+                            const d = format(addDays(new Date(), followupDays), 'yyyy-MM-dd')
+                            api.patch(`/opd-visits/${v.id}/`, { revisit_advice: `Follow up after ${followupDays} days`, follow_up_date: d })
+                              .then(() => {
+                                setVisits(prev => prev.map(x => x.id === v.id ? { ...x, follow_up_date: d } : x))
+                                pushHistoryEvent({ visitId: v.id, category: 'Appointment', text: `Follow-up: ${format(addDays(new Date(), followupDays), 'dd MMM yyyy')}` })
+                                toast.success('Follow-up saved!')
+                              }).catch(() => {})
+                          }} className="text-[10px] font-bold bg-green-600 text-white px-2 py-1 rounded-lg hover:bg-green-700 shrink-0">
+                            Save
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-purple-400 italic">Say "follow up in 7 days" to auto-detect...</p>
+                      )}
+                      {meds.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-1 border-t border-purple-100">
+                          {meds.map((med, i) => (
+                            <span key={i} className="text-[10px] bg-purple-100 text-purple-800 rounded-full px-2 py-0.5 border border-purple-200 font-semibold">{med}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-gray-200 bg-white p-2.5 space-y-2">
+                      <div className="flex items-center gap-1.5">
+                        <Clock size={12} className="text-gray-500" />
+                        <span className="text-[10px] font-extrabold uppercase tracking-widest text-gray-600">Follow-up Date</span>
+                      </div>
+                      <ManualFollowUp visitId={v.id} existingDate={v.follow_up_date} />
+                    </div>
+                  )}
+
+                  <div className="mt-auto pt-3 flex justify-end">
+                    <button onClick={() => completeVisit(v)}
+                      className="bg-emerald-500 hover:bg-emerald-400 text-white text-sm px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
+                      <CheckCircle size={16} /> Mark Done
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* RIGHT: Prescription & History panel */}
+        {inProgress.length > 0 && (
+          <div className="w-[40%] shrink-0 flex flex-col gap-3 overflow-y-auto pb-4 pr-1">
+            {inProgress.map(v => (
+              <React.Fragment key={v.id}>
+                <InlineRxPanel visit={v} />
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex-1">
+                  <PatientHistoryTimeline
+                    events={historyByVisit[v.id] || []}
+                    filter={historyFilters[v.id] || 'all'}
+                    onFilterChange={nextFilter => setHistoryFilters(prev => ({ ...prev, [v.id]: nextFilter }))}
+                    maxHeightClass="max-h-[500px]"
+                  />
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+        )}
+
       {aiMode && autoSavePrompt && (
-        <AutoSavePopup 
-          key={autoSavePrompt.token} 
-          prompt={autoSavePrompt} 
-          onAccept={acceptFollowUp} 
-          onReject={() => setAutoSavePrompt(null)} 
-        />
+        <AutoSavePopup key={autoSavePrompt.token} prompt={autoSavePrompt} onAccept={acceptFollowUp} onReject={() => setAutoSavePrompt(null)} />
       )}
     </div>
   )
 }
+
 
 // ─── Treatment Plan Builder (Drag & Drop) ─────────────────────────────────
 function TPBuilder({ preSelectedAdmission, patientChip, onBack }) {
@@ -2327,8 +2614,8 @@ export default function DoctorPortal() {
   return (
     <>
       {showAiTransition && <AITransitionOverlay onDone={() => { setShowAiTransition(false); setAiMode(true); }} />}
-      <div ref={doctorPortalRef} className={copyRestrictionsEnabled ? 'doctor-portal-security-scope' : ''}>
-        <Layout title="Doctor Portal" subtitle={user.email || 'Doctor'} color="blue" tabs={TABS} activeTab={tab} onTab={setTab} headerExtra={AIToggleBtn}>
+      <div ref={doctorPortalRef} className={`h-full flex flex-col ${copyRestrictionsEnabled ? 'doctor-portal-security-scope' : ''}`}>
+        <Layout title="Doctor Portal" subtitle={user.email || 'Doctor'} color="blue" tabs={TABS} activeTab={tab} onTab={setTab} headerExtra={AIToggleBtn} noScroll={tab === 'opd'}>
           {tab === 'opd' && <OPDTab aiMode={aiMode} />}
           {tab === 'tp' && <TreatmentPlansModule TPBuilderComponent={TPBuilder} />}
           {tab === 'analytics' && <DoctorAnalytics />}

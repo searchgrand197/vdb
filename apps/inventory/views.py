@@ -73,21 +73,26 @@ def _expiry_status(expiry_date):
     return "ok", days
 
 
-class HospitalScopedMixin:
+class PharmacyScopedMixin:
     def get_queryset(self):
         qs = super().get_queryset()
-        user = self.request.user
-        # If the user has a hospital (including superusers), scope to that tenant so lists match
-        # pharmacy purchase, billing, and stock rules.
-        hid = getattr(user, "hospital_id", None)
-        if hid:
-            return qs.filter(hospital_id=hid)
-        if user.is_superuser:
+        # Check if a pharmacy branch is explicitly requested via headers (e.g. Doctor prescribing from a branch)
+        pharmacy = getattr(self.request, "pharmacy", None)
+        if not pharmacy:
+            # Fallback to the first pharmacy of the user's hospital
+            hospital = getattr(self.request.user, "hospital", None)
+            if hospital:
+                pharmacy = hospital.pharmacies.first()
+        
+        pid = getattr(pharmacy, "id", None)
+        if pid:
+            return qs.filter(pharmacy_id=pid)
+        if self.request.user.is_superuser:
             return qs
-        return qs.filter(hospital_id=user.hospital_id)
+        return qs.none()
 
 
-class UnitViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
+class UnitViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = Unit.objects.all()
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("code", "name")
@@ -116,10 +121,15 @@ class UnitViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        unit = serializer.save(hospital_id=self.request.user.hospital_id)
+        pharmacy = getattr(self.request, "pharmacy", None)
+        if not pharmacy:
+            hospital = getattr(self.request.user, "hospital", None)
+            pharmacy = hospital.pharmacies.first() if hospital else None
+        
+        unit = serializer.save(pharmacy_id=pharmacy.id)
         create_audit_log(
             request=self.request,
-            hospital=unit.hospital,
+            pharmacy=unit.pharmacy,
             module="inventory",
             action="create_unit",
             obj=unit,
@@ -127,7 +137,7 @@ class UnitViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         )
 
 
-class MedicineCategoryViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
+class MedicineCategoryViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = MedicineCategory.objects.all().order_by("name")
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("name",)
@@ -154,10 +164,14 @@ class MedicineCategoryViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        serializer.save(hospital_id=self.request.user.hospital_id)
+        pharmacy = getattr(self.request, "pharmacy", None)
+        if not pharmacy:
+            hospital = getattr(self.request.user, "hospital", None)
+            pharmacy = hospital.pharmacies.first() if hospital else None
+        serializer.save(pharmacy_id=pharmacy.id)
 
 
-class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
+class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = Medicine.objects.all().select_related("unit")
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("sku", "name")
@@ -187,17 +201,22 @@ class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        hospital_id = self.request.user.hospital_id
+        pharmacy = getattr(self.request, "pharmacy", None)
+        if not pharmacy:
+            hospital = getattr(self.request.user, "hospital", None)
+            pharmacy = hospital.pharmacies.first() if hospital else None
+            
+        pharmacy_id = pharmacy.id
         unit = serializer.validated_data.get("unit")
         if unit is None:
             unit, _ = Unit.objects.get_or_create(
-                hospital_id=hospital_id,
+                pharmacy_id=pharmacy_id,
                 code="TAB",
                 defaults={"name": "Tablet", "is_active": True},
             )
-            medicine = serializer.save(hospital_id=hospital_id, unit=unit)
+            medicine = serializer.save(pharmacy_id=pharmacy_id, unit=unit)
         else:
-            medicine = serializer.save(hospital_id=hospital_id)
+            medicine = serializer.save(pharmacy_id=pharmacy_id)
 
         per_strip = _tablets_per_strip_from_pack_info(medicine.pack_info or "")
         conv = medicine.unit_conversions or {}
@@ -208,7 +227,7 @@ class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
         create_audit_log(
             request=self.request,
-            hospital=medicine.hospital,
+            pharmacy=medicine.pharmacy,
             module="inventory",
             action="create_medicine",
             obj=medicine,
@@ -224,12 +243,18 @@ class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         q = (request.query_params.get("q") or "").strip()
         if len(q) < 2:
             return success_response([])
-        hid = getattr(request.user, "hospital_id", None)
-        if not hid:
-            return Response({"success": False, "detail": "Hospital context required."}, status=400)
+        # Allow cross-branch search if pharmacy branch header is set
+        pharmacy = getattr(request, "pharmacy", None)
+        if not pharmacy:
+            hospital = getattr(request.user, "hospital", None)
+            pharmacy = hospital.pharmacies.first() if hospital else None
+            
+        pid = getattr(pharmacy, "id", None)
+        if not pid:
+            return Response({"success": False, "detail": "Pharmacy context required."}, status=400)
 
         med_qs = (
-            Medicine.objects.filter(hospital_id=hid, is_active=True)
+            Medicine.objects.filter(pharmacy_id=pid, is_active=True)
             .filter(Q(name__icontains=q) | Q(sku__icontains=q))
             .select_related("unit")
             .order_by("name")[:25]
@@ -239,7 +264,7 @@ class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         for med in med_qs:
             pack_size = _medicine_pack_size(med)
             batches = (
-                MedicineBatch.objects.filter(medicine_id=med.id, hospital_id=hid)
+                MedicineBatch.objects.filter(medicine_id=med.id, pharmacy_id=pid)
                 .order_by("expiry_date", "batch_no")
             )
             for b in batches:
@@ -282,7 +307,7 @@ class MedicineViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         return success_response(out[:80])
 
 
-class MedicineBatchViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
+class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = MedicineBatch.objects.all().select_related("medicine", "medicine__unit")
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("batch_no", "medicine__name")
@@ -313,10 +338,15 @@ class MedicineBatchViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        batch = serializer.save(hospital_id=self.request.user.hospital_id)
+        pharmacy = getattr(self.request, "pharmacy", None)
+        if not pharmacy:
+            hospital = getattr(self.request.user, "hospital", None)
+            pharmacy = hospital.pharmacies.first() if hospital else None
+            
+        batch = serializer.save(pharmacy_id=pharmacy.id)
         create_audit_log(
             request=self.request,
-            hospital=batch.hospital,
+            pharmacy=batch.pharmacy,
             module="inventory",
             action="create_batch",
             obj=batch,
@@ -351,7 +381,7 @@ class MedicineBatchViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         )
         create_audit_log(
             request=request,
-            hospital=instance.hospital,
+            pharmacy=instance.pharmacy,
             module="inventory",
             action="delete_batch",
             obj=instance,
@@ -365,7 +395,7 @@ class MedicineBatchViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
-class StockLedgerViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
+class StockLedgerViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = StockLedger.objects.all().select_related("medicine", "batch", "hospital").order_by("-created_at")
     filter_backends = (DjangoFilterBackend, SearchFilter)
     filterset_fields = ("batch", "medicine")
@@ -396,8 +426,9 @@ class StockLedgerViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def perform_create(self, serializer):
         data = serializer.validated_data
-        medicine_batch = MedicineBatch.objects.select_related("medicine", "hospital").get(pk=data["batch"])
-        hospital = medicine_batch.hospital
+        medicine_batch = MedicineBatch.objects.select_related("medicine", "pharmacy__hospital").get(pk=data["batch"])
+        pharmacy = medicine_batch.pharmacy
+        hospital = pharmacy.hospital
 
         if not self.request.user.is_superuser and hospital.id != self.request.user.hospital_id:
             raise permissions.PermissionDenied("Not in your hospital.")
@@ -436,7 +467,7 @@ class StockLedgerViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
                 ref_type = "inventory_adjust"
 
         entry = StockLedger.objects.create(
-            hospital_id=hospital.id,
+            pharmacy_id=pharmacy.id,
             medicine_id=med_id,
             batch=medicine_batch,
             qty_change=qty_change,
@@ -448,7 +479,7 @@ class StockLedgerViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
         create_audit_log(
             request=self.request,
-            hospital=hospital,
+            pharmacy=hospital,
             module="inventory",
             action="create_stock_ledger",
             obj=entry,
