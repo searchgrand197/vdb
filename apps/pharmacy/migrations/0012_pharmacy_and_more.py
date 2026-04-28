@@ -7,6 +7,28 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+DEFAULT_PHARMACY_ID = "1f88d8fb-de32-4ee8-a937-a0e619a87818"
+
+
+def ensure_default_pharmacy(apps, schema_editor):
+    Pharmacy = apps.get_model("pharmacy", "Pharmacy")
+    Hospital = apps.get_model("shared", "Hospital")
+    hospital_id = Hospital.objects.order_by("id").values_list("id", flat=True).first()
+    if not hospital_id:
+        return
+
+    Pharmacy.objects.get_or_create(
+        id=DEFAULT_PHARMACY_ID,
+        defaults={
+            "hospital_id": hospital_id,
+            "name": "Main Pharmacy",
+            "slug": "main-pharmacy",
+            "is_active": True,
+            "display_name": "Main Pharmacy",
+        },
+    )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -68,6 +90,7 @@ class Migration(migrations.Migration):
             name='hospital',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='pharmacies', to='shared.hospital'),
         ),
+        migrations.RunPython(ensure_default_pharmacy, migrations.RunPython.noop),
         migrations.AddField(
             model_name='pharmacyinvoice',
             name='pharmacy',
