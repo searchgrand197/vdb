@@ -180,8 +180,10 @@ class PharmacySupplierSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context.get("request")
-        hospital = getattr(request, "pharmacy_hospital", None) or getattr(request.user, "hospital", None)
-        validated_data["pharmacy_id"] = hospital.id
+        pharmacy = getattr(request, "pharmacy", None) if request is not None else None
+        if pharmacy is None:
+            raise serializers.ValidationError({"detail": ["Pharmacy branch context required."]})
+        validated_data["pharmacy_id"] = pharmacy.id
         return super().create(validated_data)
 
 
@@ -237,10 +239,12 @@ class PurchaseChallanSerializer(serializers.Serializer):
         sid = attrs.get("supplier_id")
         if sid is not None:
             request = self.context["request"]
-            hospital = getattr(request, "pharmacy_hospital", None) or getattr(request.user, "hospital", None)
-            hid = getattr(hospital, "id", None)
-            if hid and not PharmacySupplier.objects.filter(pk=sid, pharmacy_id=hid, is_active=True).exists():
-                raise serializers.ValidationError({"supplier_id": ["Invalid supplier for this hospital."]})
+            pharmacy = getattr(request, "pharmacy", None)
+            pid = getattr(pharmacy, "id", None)
+            if not pid:
+                raise serializers.ValidationError({"detail": ["Pharmacy branch context required."]})
+            if not PharmacySupplier.objects.filter(pk=sid, pharmacy_id=pid, is_active=True).exists():
+                raise serializers.ValidationError({"supplier_id": ["Invalid supplier for selected pharmacy branch."]})
         return attrs
 
     def validate_lines(self, lines):

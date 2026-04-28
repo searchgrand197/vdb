@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
   FileText, Eye, User, Pill, RefreshCw, Trash2, Loader2,
-  AlertTriangle, X, CheckCircle2, Receipt, Clock,
+  AlertTriangle, X, CheckCircle2, Receipt, Clock, Printer,
 } from 'lucide-react'
 import api from '../api'
 import toast from 'react-hot-toast'
@@ -75,6 +75,99 @@ function dateLabel(dateStr) {
   } catch { return '—' }
 }
 
+function extractDraftTextParts(remarks = '') {
+  const raw = String(remarks || '')
+  if (!raw.trim()) return { prescriptionLines: [], notesLines: [] }
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean)
+  const notesIndex = lines.findIndex((l) => l.toLowerCase() === 'notes/advice:')
+  if (notesIndex === -1) {
+    return { prescriptionLines: lines, notesLines: [] }
+  }
+  return {
+    prescriptionLines: lines.slice(0, notesIndex),
+    notesLines: lines.slice(notesIndex + 1).map((l) => l.replace(/^-\s*/, '')).filter(Boolean),
+  }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function buildDraftPrintHtml(draft) {
+  const patientName = draft.patient_details?.first_name
+    ? `${draft.patient_details.first_name} ${draft.patient_details.last_name || ''}`.trim()
+    : draft.patient_name || 'Walk-in Patient'
+  const createdAt = draft.created_at ? format(new Date(draft.created_at), 'dd MMM yyyy, hh:mm a') : '—'
+  const { prescriptionLines, notesLines } = extractDraftTextParts(draft.remarks)
+  const fallbackItems = Array.isArray(draft.items) ? draft.items : []
+  const rxLines = prescriptionLines.length
+    ? prescriptionLines.filter((l) => !/^doctor prescription/i.test(l))
+    : fallbackItems.map((it) => `${it.medicine?.name || 'Medicine'} x${it.qty || 0}`)
+  const notes = notesLines
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Prescription Draft ${escapeHtml(draft.invoice_no || '')}</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #111; margin: 0; padding: 24px; }
+    .card { max-width: 760px; margin: 0 auto; border: 1px solid #d9d9d9; border-radius: 10px; overflow: hidden; }
+    .head { padding: 14px 16px; background: #f8fafc; border-bottom: 1px solid #e5e7eb; }
+    .title { margin: 0; font-size: 18px; }
+    .muted { color: #64748b; font-size: 12px; margin-top: 4px; }
+    .section { padding: 14px 16px; border-bottom: 1px solid #f1f5f9; }
+    .section:last-child { border-bottom: 0; }
+    .section h4 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; color: #334155; letter-spacing: .06em; }
+    ul { margin: 0; padding-left: 18px; }
+    li { margin-bottom: 6px; font-size: 14px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <h3 class="title">Prescription Draft</h3>
+      <div class="muted">Draft No: ${escapeHtml(draft.invoice_no || '—')} · Date: ${escapeHtml(createdAt)}</div>
+      <div class="muted">Patient: ${escapeHtml(patientName)}</div>
+    </div>
+    <div class="section">
+      <h4>Medicines</h4>
+      <ul>
+        ${rxLines.length ? rxLines.map((l) => `<li>${escapeHtml(l)}</li>`).join('') : '<li>—</li>'}
+      </ul>
+    </div>
+    <div class="section">
+      <h4>Notes / Advice</h4>
+      <ul>
+        ${notes.length ? notes.map((l) => `<li>${escapeHtml(l)}</li>`).join('') : '<li>No additional notes</li>'}
+      </ul>
+    </div>
+  </div>
+</body>
+</html>`
+}
+
+async function printDraftPrescription(draft) {
+  const iframe = document.createElement('iframe')
+  iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:210mm;height:297mm;border:none;'
+  document.body.appendChild(iframe)
+  const doc = iframe.contentDocument || iframe.contentWindow.document
+  doc.open()
+  doc.write(buildDraftPrintHtml(draft))
+  doc.close()
+  const win = iframe.contentWindow
+  setTimeout(() => {
+    try { win.focus(); win.print() } catch { /* noop */ }
+    setTimeout(() => {
+      try { document.body.removeChild(iframe) } catch { /* noop */ }
+    }, 1000)
+  }, 120)
+}
+
 // ── Completed Invoice Card ────────────────────────────────────────────────────
 function CompletedCard({ invoice, onView }) {
   const patientName = invoice.patient_details?.first_name
@@ -129,7 +222,7 @@ function CompletedCard({ invoice, onView }) {
 }
 
 // ── Draft Card ────────────────────────────────────────────────────────────────
-function DraftCard({ draft, onOpen, onDelete, isBeingDeleted }) {
+function DraftCard({ draft, onOpen, onDelete, onPrint, isBeingDeleted }) {
   const patientName = draft.patient_details?.first_name
     ? `${draft.patient_details.first_name} ${draft.patient_details.last_name || ''}`.trim()
     : draft.patient_name || 'Walk-in Patient'
@@ -177,14 +270,24 @@ function DraftCard({ draft, onOpen, onDelete, isBeingDeleted }) {
         </div>
       )}
 
-      <button
-        onClick={() => onOpen(draft)}
-        disabled={isBeingDeleted}
-        className="ml-2 mt-auto flex items-center justify-center gap-1.5 w-full py-1.5 rounded-lg text-[11px] font-bold bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
-      >
-        <Eye size={12} />
-        Open in Billing
-      </button>
+      <div className="ml-2 mt-auto grid grid-cols-2 gap-1.5 w-full">
+        <button
+          onClick={() => onPrint(draft)}
+          disabled={isBeingDeleted}
+          className="flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors disabled:opacity-50"
+        >
+          <Printer size={12} />
+          Print
+        </button>
+        <button
+          onClick={() => onOpen(draft)}
+          disabled={isBeingDeleted}
+          className="flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-bold bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-50"
+        >
+          <Eye size={12} />
+          Open in Billing
+        </button>
+      </div>
     </div>
   )
 }
@@ -233,6 +336,14 @@ export default function DraftsView({ onLoadDraft, completedInvoices = [], onView
       return
     }
     onLoadDraft(draft)
+  }
+
+  const handlePrintDraft = async (draft) => {
+    try {
+      await printDraftPrescription(draft)
+    } catch {
+      toast.error('Failed to open print preview')
+    }
   }
 
   const confirmDelete = async () => {
@@ -325,6 +436,7 @@ export default function DraftsView({ onLoadDraft, completedInvoices = [], onView
                     key={draft.id}
                     draft={draft}
                     onOpen={handleOpenInBilling}
+                    onPrint={handlePrintDraft}
                     onDelete={setConfirmTarget}
                     isBeingDeleted={deleting && confirmTarget?.id === draft.id}
                   />

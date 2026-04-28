@@ -31,30 +31,11 @@ from apps.inventory.serializers import (
 from apps.inventory.services.stock_service import get_batch_available_qty
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.shared.response import success_response
-from apps.shared.models import Hospital
-
-
 def _resolve_request_pharmacy(request):
-    """
-    Resolve active pharmacy context for the request.
-
-    Priority:
-    1) Explicit branch selected via middleware/header (`request.pharmacy`)
-    2) If user's hospital has exactly one active pharmacy, use it
-    3) Otherwise return None and force explicit branch selection
-    """
+    """Resolve active pharmacy branch strictly from middleware context."""
     pharmacy = getattr(request, "pharmacy", None)
     if pharmacy is not None:
         return pharmacy
-
-    hospital = getattr(getattr(request, "user", None), "hospital", None)
-    if not hospital:
-        return None
-
-    active_qs = hospital.pharmacies.filter(is_active=True).order_by("created_at")
-    pharmacies = list(active_qs[:2])
-    if len(pharmacies) == 1:
-        return pharmacies[0]
     return None
 
 
@@ -98,14 +79,17 @@ def _expiry_status(expiry_date):
 
 
 class PharmacyScopedMixin:
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if _resolve_request_pharmacy(request) is None:
+            raise ValidationError({"detail": ["Pharmacy branch context required."]})
+
     def get_queryset(self):
         qs = super().get_queryset()
         pharmacy = _resolve_request_pharmacy(self.request)
         pid = getattr(pharmacy, "id", None)
         if pid:
             return qs.filter(pharmacy_id=pid)
-        if self.request.user.is_superuser:
-            return qs
         return qs.none()
 
 
@@ -433,11 +417,12 @@ class StockLedgerViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         data = serializer.validated_data
         medicine_batch = MedicineBatch.objects.select_related("medicine", "pharmacy__hospital").get(pk=data["batch"])
+        request_pharmacy = _resolve_request_pharmacy(self.request)
+        if request_pharmacy is None:
+            raise ValidationError({"detail": ["Pharmacy branch context required."]})
+        if str(medicine_batch.pharmacy_id) != str(request_pharmacy.id):
+            raise ValidationError({"batch": ["Batch does not belong to selected pharmacy branch."]})
         pharmacy = medicine_batch.pharmacy
-        hospital = pharmacy.hospital
-
-        if not self.request.user.is_superuser and hospital.id != self.request.user.hospital_id:
-            raise permissions.PermissionDenied("Not in your hospital.")
 
         med_id = data["medicine"]
         if str(med_id) != str(medicine_batch.medicine_id):

@@ -266,3 +266,28 @@ class PatientTimeline(TimeStampedModel, UUIDPrimaryKeyModel):
 
     def __str__(self) -> str:
         return f"{self.patient_id} - {self.event_type} - {self.timestamp}"
+
+
+class TreatmentTemplateCatalog(TimeStampedModel, UUIDPrimaryKeyModel):
+    """Hospital-scoped doctor template/package catalog used by TP builder."""
+
+    hospital = models.OneToOneField(
+        Hospital,
+        on_delete=models.CASCADE,
+        related_name="treatment_template_catalog",
+    )
+    templates = models.JSONField(default=list, blank=True)
+    packages = models.JSONField(default=list, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_treatment_template_catalogs",
+    )
+
+    class Meta:
+        indexes = [models.Index(fields=["hospital"])]
+
+    def __str__(self) -> str:
+        return f"Treatment template catalog ({self.hospital_id})"

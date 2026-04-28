@@ -71,6 +71,7 @@ from apps.treatment.views import (
     TreatmentPlanItemViewSet,
     TreatmentPlanViewSet,
     TreatmentTaskViewSet,
+    TreatmentTemplateCatalogView,
 )
 from apps.beds.views import FloorViewSet, BedRoomViewSet, BedViewSet, BedCleaningTaskViewSet
 from apps.lab.views import LabTestCategoryViewSet, LabTestViewSet, LabReportViewSet, LabTestResultViewSet
@@ -188,5 +189,10 @@ urlpatterns = [
     path("purchase/history/<uuid:pk>/", PurchaseHistoryDetailView.as_view(), name="purchase-history-detail"),
     path("payments/quick-services/", payment_quick_services, name="payments-quick-services"),
     path("treatment/patient-overview/", PatientPlanOverviewView.as_view(), name="treatment-patient-overview"),
+    path(
+        "treatment/template-package-catalog/",
+        TreatmentTemplateCatalogView.as_view(),
+        name="treatment-template-package-catalog",
+    ),
     path("", include(router.urls)),
 ]

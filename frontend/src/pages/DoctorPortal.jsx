@@ -1271,6 +1271,7 @@ function OPDTab({ aiMode = false }) {
   const [autoSavePrompt, setAutoSavePrompt] = useState(null)
   const prevFollowupRef = useRef({})
   const noteStartRef = useRef({})
+  const [notesDraftByVisit, setNotesDraftByVisit] = useState({})
   const [historyByVisit, setHistoryByVisit] = useState({})
   const [historyFilters, setHistoryFilters] = useState({})
   const [historyPreviewVisit, setHistoryPreviewVisit] = useState(null)
@@ -1431,6 +1432,7 @@ function OPDTab({ aiMode = false }) {
   const latestDoneVisit = done[0] || null
 
   async function callNext() {
+    if (activeVisit) return toast('Finish current consultation with Mark Done or Skip first', { icon: 'ℹ️' })
     if (!waiting.length) return toast('No patients waiting', { icon: 'ℹ️' })
     const next = waiting[0]
     try {
@@ -1448,8 +1450,13 @@ function OPDTab({ aiMode = false }) {
     const branchId = draft?.branchId
     if (!branchId) throw new Error('Select pharmacy branch before marking done.')
     const bn = draft?.branchLabel || branchId
+    const notes = Array.isArray(visit?.patient_notes) ? visit.patient_notes : []
+    const notesBlock = notes.length
+      ? `\n\nNotes/Advice:\n${notes.map((n) => `- ${String(n).trim()}`).filter((x) => x !== '- ').join('\n')}`
+      : ''
     const remarks = `Doctor Prescription (Branch: ${bn}):\n` +
-      final.map(i => `${i.medicine.name} x${i.qty} (${i.pattern}) | ${timingOptions.find(t => t.v === i.timing)?.l || i.timing} | ${i.days} day${i.days > 1 ? 's' : ''}`).join('\n')
+      final.map(i => `${i.medicine.name} x${i.qty} (${i.pattern}) | ${timingOptions.find(t => t.v === i.timing)?.l || i.timing} | ${i.days} day${i.days > 1 ? 's' : ''}`).join('\n') +
+      notesBlock
     await api.post('/pharmacy/invoices/create-draft/', {
       patient: visit.patient,
       ipd_admission: visit.ipd_admission || null,
@@ -1477,11 +1484,85 @@ function OPDTab({ aiMode = false }) {
     } catch (e) { toast.error(e.response?.data?.detail || 'Error') }
   }
 
+  async function skipVisit(visit) {
+    try {
+      await api.patch(`/opd-visits/${visit.id}/`, { status: 'skipped' })
+      toast.success(`Token #${visit.token_number || visit.queue_number} skipped`)
+      fetchVisits()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Error')
+    }
+  }
+
+  async function recallVisit(visit) {
+    if (activeVisit) {
+      return toast('Finish current consultation with Mark Done or Skip first', { icon: 'ℹ️' })
+    }
+    try {
+      await api.patch(`/opd-visits/${visit.id}/`, { status: 'in_progress' })
+      toast.success(`Token #${visit.token_number || visit.queue_number} recalled`)
+      fetchVisits()
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Error')
+    }
+  }
+
   async function updateVisitNotes(id, text) {
     setVisits(prev => prev.map(v => v.id === id ? { ...v, chief_complaint: text } : v))
     try {
       await api.patch(`/opd-visits/${id}/`, { chief_complaint: text })
     } catch { } // quiet fail
+  }
+
+  function notesPointsToText(points) {
+    if (!Array.isArray(points)) return ''
+    return points
+      .filter((x) => x != null && String(x).trim() !== '')
+      .map((x) => String(x).trim())
+      .join('\n')
+  }
+
+  function normalizeNotesPoints(points) {
+    return (Array.isArray(points) ? points : [])
+      .map((s) => String(s ?? '').trim())
+      .map((s) => s.replace(/^[-•]\s+/, '').trim())
+      .filter(Boolean)
+  }
+
+  function textToNotesPoints(text) {
+    return String(text || '')
+      .split('\n')
+      .map((s) => s.replace(/^[-•]\s+/, '').trim())
+      .filter(Boolean)
+  }
+
+  async function updateVisitPatientNotes(id, points) {
+    const normalized = normalizeNotesPoints(points)
+    setVisits(prev => prev.map(v => v.id === id ? { ...v, patient_notes: normalized } : v))
+    try {
+      await api.patch(`/opd-visits/${id}/`, { patient_notes: normalized })
+    } catch { } // quiet fail
+  }
+
+  function handleNotesKeyDown(visitId, setDraftText) {
+    return (e) => {
+      if (e.key !== 'Enter') return
+      // Enter => start a new bullet point line
+      e.preventDefault()
+      const el = e.currentTarget
+      const start = el.selectionStart ?? 0
+      const end = el.selectionEnd ?? 0
+      const before = el.value.slice(0, start)
+      const after = el.value.slice(end)
+      const insert = '\n- '
+      const nextVal = before + insert + after
+      const nextPos = start + insert.length
+      setDraftText(nextVal)
+      setNotesDraftByVisit((prev) => ({ ...prev, [visitId]: nextVal }))
+      requestAnimationFrame(() => {
+        try { el.selectionStart = el.selectionEnd = nextPos } catch { /* ignore */ }
+      })
+    }
   }
 
   function commitVisitNoteHistory(visit, text) {
@@ -1529,7 +1610,9 @@ function OPDTab({ aiMode = false }) {
     in_progress: 'bg-blue-100 text-blue-700',
     in_consultation: 'bg-blue-100 text-blue-700',
     completed: 'bg-green-100 text-green-700',
+    skipped: 'bg-rose-100 text-rose-700',
   }
+  const canCallNext = !activeVisit && waiting.length > 0
 
   const visitsQueueOrder = useMemo(
     () =>
@@ -1562,7 +1645,9 @@ function OPDTab({ aiMode = false }) {
 
         {/* Call Next Button */}
         <button onClick={callNext}
-          className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:opacity-90 transition-all shadow-md shrink-0">
+          disabled={!canCallNext}
+          title={activeVisit ? 'Finish current consultation with Mark Done or Skip first' : ''}
+          className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:opacity-90 transition-all shadow-md shrink-0 disabled:opacity-50 disabled:cursor-not-allowed">
           <ChevronRight size={18} />
           Call Next {waiting[0] ? `(#${waiting[0].token_number})` : ''}
         </button>
@@ -1580,7 +1665,8 @@ function OPDTab({ aiMode = false }) {
               <div key={v.id} className="px-2.5 py-2 flex items-center gap-2">
                 <div className={`w-7 h-7 rounded-lg font-bold text-xs flex items-center justify-center shrink-0 ${
                   (v.status === 'in_progress' || v.status === 'in_consultation') ? 'bg-blue-600 text-white' :
-                  v.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                  v.status === 'completed' ? 'bg-green-100 text-green-700' :
+                  v.status === 'skipped' ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-700'
                 }`}>{v.token_number}</div>
                 <div className="flex-1 min-w-0">
                   <p className="text-[11px] font-semibold text-gray-800 truncate">{v.patient_name || `#${v.token_number}`}</p>
@@ -1591,8 +1677,35 @@ function OPDTab({ aiMode = false }) {
                 </div>
                 <span className={`text-[8px] px-1.5 py-0.5 rounded-full font-bold shrink-0 ${statusBadge[v.status] || 'bg-gray-100 text-gray-600'}`}>
                   {v.status === 'in_progress' || v.status === 'in_consultation' ? 'In' :
-                   v.status === 'completed' ? '✓' : 'Wait'}
+                   v.status === 'completed' ? '✓' :
+                   v.status === 'skipped' ? 'Skip' : 'Wait'}
                 </span>
+                {v.status === 'waiting' && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      skipVisit(v)
+                    }}
+                    className="text-[9px] font-bold px-2 py-1 rounded-md border border-rose-200 text-rose-700 bg-rose-50 hover:bg-rose-100"
+                    title="Skip this waiting patient"
+                  >
+                    Skip
+                  </button>
+                )}
+                {(v.status === 'skipped' || v.status === 'completed') && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      recallVisit(v)
+                    }}
+                    className="text-[9px] font-bold px-2 py-1 rounded-md border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100"
+                    title="Recall patient to consultation"
+                  >
+                    Recall
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -1631,7 +1744,9 @@ function OPDTab({ aiMode = false }) {
 
               <div className="absolute bottom-4 right-4">
                 <button onClick={callNext}
-                  className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all">
+                  disabled={!canCallNext}
+                  title={activeVisit ? 'Finish current consultation with Mark Done or Skip first' : ''}
+                  className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-3 rounded-xl font-bold text-sm flex items-center gap-2 shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0">
                   Call Next {waiting[0] ? `(#${waiting[0].token_number})` : ''} <ChevronRight size={18} />
                 </button>
               </div>
@@ -1710,6 +1825,36 @@ function OPDTab({ aiMode = false }) {
                     )}
                   </div>
 
+                  {/* Notes/Advice for patient */}
+                  <div className="rounded-xl border border-slate-200 bg-white p-2.5 space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-600">Notes / Advice</span>
+                      <span className="ml-auto text-[10px] text-slate-400">one point per line</span>
+                    </div>
+                    <textarea
+                      value={notesDraftByVisit[v.id] ?? notesPointsToText(v.patient_notes)}
+                      onChange={(e) => {
+                        const nextText = e.target.value
+                        setNotesDraftByVisit((prev) => ({ ...prev, [v.id]: nextText }))
+                      }}
+                      onKeyDown={handleNotesKeyDown(v.id, (nextText) => {
+                        setNotesDraftByVisit((prev) => ({ ...prev, [v.id]: nextText }))
+                      })}
+                      onBlur={(e) => {
+                        const points = textToNotesPoints(e.target.value)
+                        updateVisitPatientNotes(v.id, points)
+                        setNotesDraftByVisit((prev) => {
+                          const next = { ...prev }
+                          delete next[v.id]
+                          return next
+                        })
+                      }}
+                      placeholder={'Drink plenty of fluids\nTake rest\nAvoid spicy food'}
+                      rows={3}
+                      className="w-full text-[13px] text-slate-700 bg-slate-50/50 border border-slate-200 rounded-lg p-2 outline-none resize-none focus:border-blue-400"
+                    />
+                  </div>
+
                   {/* AI/manual follow-up */}
                   {aiMode ? (
                     <div className="rounded-xl border border-purple-200 bg-gradient-to-br from-indigo-50 to-purple-50 p-2.5 space-y-1.5">
@@ -1756,7 +1901,13 @@ function OPDTab({ aiMode = false }) {
                     </div>
                   )}
 
-                  <div className="mt-auto pt-3 flex justify-end">
+                  <div className="mt-auto pt-3 flex justify-end gap-2">
+                    <button
+                      onClick={() => skipVisit(v)}
+                      className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-sm px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-sm transition-all"
+                    >
+                      <X size={16} /> Skip
+                    </button>
                     <button onClick={() => completeVisit(v)}
                       className="bg-emerald-500 hover:bg-emerald-400 text-white text-sm px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
                       <CheckCircle size={16} /> Mark Done
@@ -1862,6 +2013,7 @@ function TPBuilder({ preSelectedAdmission, patientChip, onBack }) {
   const [expandedPkg, setExpandedPkg] = useState(null)
   const [templates, setTemplates] = useState(MEDICINE_TEMPLATES)
   const [packages, setPackages] = useState(DEFAULT_PACKAGES)
+  const [catalogHydrated, setCatalogHydrated] = useState(false)
   const [staffList, setStaffList] = useState([])
   const [staffDropdownOpen, setStaffDropdownOpen] = useState(false)
   const [selectedStaffIds, setSelectedStaffIds] = useState([])
@@ -1877,6 +2029,8 @@ function TPBuilder({ preSelectedAdmission, patientChip, onBack }) {
   const voiceStopTimerRef = useRef(null)
   const initialServerItemsRef = useRef([])
   const inlineBlurTimerRef = useRef(null)
+  const catalogSaveTimerRef = useRef(null)
+  const lastCatalogSaveErrorAtRef = useRef(0)
   const sensors = useSensors(useSensor(PointerSensor))
   let idCounter = useRef(0)
   const STOP_WORDS = useMemo(
@@ -1957,7 +2111,43 @@ function TPBuilder({ preSelectedAdmission, patientChip, onBack }) {
       const list = data?.results || data?.data || data || []
       setStaffList(Array.isArray(list) ? list : [])
     }).catch(() => {})
+    api
+      .get('/treatment/template-package-catalog/')
+      .then(({ data }) => {
+        const serverTemplates = Array.isArray(data?.templates) ? data.templates : null
+        const serverPackages = Array.isArray(data?.packages) ? data.packages : null
+        if (serverTemplates && serverTemplates.length > 0) setTemplates(serverTemplates)
+        if (serverPackages && serverPackages.length > 0) setPackages(serverPackages)
+      })
+      .catch(() => {})
+      .finally(() => setCatalogHydrated(true))
   }, [])
+
+  useEffect(() => {
+    if (!catalogHydrated) return
+    if (catalogSaveTimerRef.current) {
+      clearTimeout(catalogSaveTimerRef.current)
+    }
+    catalogSaveTimerRef.current = setTimeout(() => {
+      api
+        .put('/treatment/template-package-catalog/', {
+          templates,
+          packages,
+        })
+        .catch(() => {
+          const now = Date.now()
+          if (now - lastCatalogSaveErrorAtRef.current > 5000) {
+            lastCatalogSaveErrorAtRef.current = now
+            toast.error('Failed to save templates/packages to server')
+          }
+        })
+    }, 700)
+    return () => {
+      if (catalogSaveTimerRef.current) {
+        clearTimeout(catalogSaveTimerRef.current)
+      }
+    }
+  }, [templates, packages, catalogHydrated])
 
   useEffect(() => {
     if (!selectedAdm) {

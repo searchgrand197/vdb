@@ -32,17 +32,19 @@ api.interceptors.request.use(cfg => {
 
   // ── Pharmacy branch override ───────────────────────────────────────────
   // When role=pharmacy the user picks a branch on login. We send its ID as a
-  // custom header so the backend middleware can scope all DB queries to that
-  // specific pharmacy branch (Hospital row), regardless of which Hospital the
-  // user account is linked to in the DB.
+  // custom header so backend middleware scopes DB queries to that branch.
   const role = localStorage.getItem('role')
   const branchId = getPharmacyBranchId()
+  const requestUrl = String(cfg.url || '')
+  const isAuthRoute = requestUrl.startsWith('/auth/')
   if (role === 'pharmacy' && branchId) {
     cfg.headers['X-Pharmacy-Branch'] = branchId
+  } else if (role === 'pharmacy' && !branchId && !isAuthRoute) {
+    throw new Error('Pharmacy branch is required. Please re-login and select a branch.')
   }
 
   const hospitalId = getHospitalId()
-  if (hospitalId && ['post', 'put', 'patch'].includes((cfg.method || '').toLowerCase())) {
+  if (role !== 'pharmacy' && hospitalId && ['post', 'put', 'patch'].includes((cfg.method || '').toLowerCase())) {
     if (cfg.data && typeof cfg.data === 'object' && !(cfg.data instanceof FormData)) {
       if (!cfg.data.hospital_id) {
         cfg.data = { ...cfg.data, hospital_id: hospitalId }

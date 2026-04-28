@@ -27,26 +27,18 @@ from apps.shared.response import success_response
 
 
 def _get_pharmacy_branch(request):
-    """
-    Return the active pharmacy branch (Pharmacy model) for this request.
-
-    Priority:
-      1. ``request.pharmacy``  — set by PharmacyBranchMiddleware when
-         the frontend sends ``X-Pharmacy-Branch: <uuid>`` (i.e. pharmacy role).
-      2. single active branch under ``request.user.hospital`` (safe fallback)
-    """
+    """Return selected pharmacy branch from middleware context."""
     pharmacy = getattr(request, "pharmacy", None)
     if pharmacy is not None:
         return pharmacy
-
-    hospital = getattr(getattr(request, "user", None), "hospital", None)
-    if hospital is None:
-        return None
-
-    active = list(hospital.pharmacies.filter(is_active=True).order_by("created_at")[:2])
-    if len(active) == 1:
-        return active[0]
     return None
+
+
+def _require_pharmacy_branch(request):
+    pharmacy = _get_pharmacy_branch(request)
+    if pharmacy is None:
+        raise serializers.ValidationError({"detail": ["Pharmacy branch context required."]})
+    return pharmacy
 
 
 class PharmacyOutletSettingsView(generics.RetrieveUpdateAPIView):
@@ -56,13 +48,10 @@ class PharmacyOutletSettingsView(generics.RetrieveUpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
-        hospital = _get_pharmacy_branch(self.request)
-        if hospital is None:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Hospital context required.")
+        pharmacy = _require_pharmacy_branch(self.request)
         obj, _ = PharmacyOutletSettings.objects.get_or_create(
-            pharmacy=hospital,
-            defaults={"business_name": hospital.name or ""},
+            pharmacy=pharmacy,
+            defaults={"business_name": pharmacy.name or ""},
         )
         return obj
 
@@ -74,14 +63,12 @@ class PharmacyPurchaseChallanView(APIView):
         ser = PurchaseChallanSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
             return Response({"success": False, "errors": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
-        hospital = _get_pharmacy_branch(request)
-        if hospital is None:
-            return Response({"success": False, "detail": "Hospital context required."}, status=status.HTTP_400_BAD_REQUEST)
+        pharmacy = _require_pharmacy_branch(request)
         try:
             vd = ser.validated_data
             lines = process_purchase_challan(
                 request=request,
-                pharmacy=hospital,
+                pharmacy=pharmacy,
                 lines=vd["lines"],
                 supplier_id=vd.get("supplier_id"),
                 invoice_no=(vd.get("invoice_no") or "").strip(),
@@ -103,10 +90,10 @@ class PharmacySupplierViewSet(viewsets.ModelViewSet):
     search_fields = ("name", "phone", "gst_number")
 
     def get_queryset(self):
-        hospital = _get_pharmacy_branch(self.request)
-        if not hospital:
+        pharmacy = _get_pharmacy_branch(self.request)
+        if not pharmacy:
             return PharmacySupplier.objects.none()
-        return PharmacySupplier.objects.filter(pharmacy=hospital, is_active=True).order_by("name")
+        return PharmacySupplier.objects.filter(pharmacy=pharmacy, is_active=True).order_by("name")
 
 
 class PharmacyNextInvoiceNumberView(APIView):
@@ -115,10 +102,8 @@ class PharmacyNextInvoiceNumberView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        hospital = _get_pharmacy_branch(request)
-        if hospital is None:
-            return Response({"success": False, "detail": "Hospital context required."}, status=status.HTTP_400_BAD_REQUEST)
-        return success_response({"invoice_no": next_pharmacy_invoice_number(hospital.id)})
+        pharmacy = _require_pharmacy_branch(request)
+        return success_response({"invoice_no": next_pharmacy_invoice_number(pharmacy.id)})
 
 
 class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
@@ -129,10 +114,10 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
     search_fields = ["invoice_no", "patient__first_name", "patient__last_name", "patient__uhid"]
 
     def get_queryset(self):
-        hospital = _get_pharmacy_branch(self.request)
-        if hospital is None:
+        pharmacy = _get_pharmacy_branch(self.request)
+        if pharmacy is None:
             return PharmacyInvoice.objects.none()
-        qs = super().get_queryset().filter(pharmacy=hospital)
+        qs = super().get_queryset().filter(pharmacy=pharmacy)
         patient_id = self.request.query_params.get("patient")
         ipd_admission = self.request.query_params.get("ipd_admission")
         status_filter = (self.request.query_params.get("status") or "").strip().lower()
@@ -146,14 +131,16 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        hospital = _get_pharmacy_branch(self.request)
+        pharmacy = _get_pharmacy_branch(self.request)
+        if pharmacy is None:
+            raise serializers.ValidationError({"detail": ["Pharmacy branch context required."]})
         raw = (serializer.validated_data.get("invoice_no") or "").strip()
         if raw and not PharmacyInvoice.objects.filter(invoice_no=raw).exists():
             invoice_no = raw
         else:
-            invoice_no = next_pharmacy_invoice_number(hospital.id)
+            invoice_no = next_pharmacy_invoice_number(pharmacy.id)
             while PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
-                invoice_no = next_pharmacy_invoice_number(hospital.id)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id)
         payment_method = (serializer.validated_data.get("payment_method") or "cash").lower()
         grand_total = serializer.validated_data.get("grand_total") or Decimal("0.00")
         paid_amount = serializer.validated_data.get("paid_amount")
@@ -164,7 +151,7 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         for _ in range(3):
             try:
                 serializer.save(
-                    pharmacy=hospital,
+                    pharmacy=pharmacy,
                     created_by=self.request.user,
                     invoice_no=invoice_no,
                     payment_method=payment_method,
@@ -172,12 +159,12 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 )
                 return
             except IntegrityError:
-                invoice_no = next_pharmacy_invoice_number(hospital.id)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id)
                 while PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
-                    invoice_no = next_pharmacy_invoice_number(hospital.id)
+                    invoice_no = next_pharmacy_invoice_number(pharmacy.id)
         # If all retries fail, bubble up the final DB integrity error.
         serializer.save(
-            pharmacy=hospital,
+            pharmacy=pharmacy,
             created_by=self.request.user,
             invoice_no=invoice_no,
             payment_method=payment_method,
@@ -198,8 +185,8 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
 
         log = logging.getLogger(__name__)
 
-        hospital = _get_pharmacy_branch(request)
-        if hospital is None:
+        pharmacy = _get_pharmacy_branch(request)
+        if pharmacy is None:
             return Response({"detail": "Pharmacy branch not set."}, status=status.HTTP_400_BAD_REQUEST)
 
         patient_id = request.data.get("patient")
@@ -213,17 +200,17 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 # Generate a collision-safe invoice number (max 10 retries then UUID suffix)
-                invoice_no = next_pharmacy_invoice_number(hospital.id)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id)
                 for _ in range(10):
                     if not PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
                         break
-                    invoice_no = next_pharmacy_invoice_number(hospital.id)
+                    invoice_no = next_pharmacy_invoice_number(pharmacy.id)
                 else:
                     # Absolute fallback — extremely unlikely to collide
                     invoice_no = f"INV-DRAFT-{str(_uuid.uuid4())[:8].upper()}"
 
                 invoice = PharmacyInvoice.objects.create(
-                    pharmacy=hospital,
+                    pharmacy=pharmacy,
                     patient_id=patient_id,
                     ipd_admission_id=request.data.get("ipd_admission") or None,
                     invoice_no=invoice_no,
@@ -258,7 +245,7 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 return Response({"success": True, "data": serializer.data}, status=status.HTTP_201_CREATED)
 
         except Exception as exc:
-            log.exception("create_draft failed for patient=%s pharmacy=%s", patient_id, hospital.id)
+            log.exception("create_draft failed for patient=%s pharmacy=%s", patient_id, pharmacy.id)
             return Response(
                 {"detail": f"Failed to create draft: {exc}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -270,11 +257,10 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
     def all_drafts(self, request, *args, **kwargs):
         """
         GET /api/v1/pharmacy/invoices/all-drafts/
-        Returns ALL draft invoices across every hospital — so pharmacists can see
-        doctor-created drafts even if the doctor was scoped to a different hospital.
+        Returns draft invoices in the selected pharmacy branch.
         """
         qs = (
-            PharmacyInvoice.objects.filter(status="draft")
+            self.get_queryset().filter(status="draft")
             .select_related("patient", "created_by")
             .prefetch_related("items")
             .order_by("-created_at")
@@ -286,12 +272,10 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
     def delete_draft(self, request, pk=None, *args, **kwargs):
         """
         DELETE /api/v1/pharmacy/invoices/{id}/delete-draft/
-        Deletes a draft invoice by UUID without hospital scoping —
-        so pharmacists can delete doctor-created drafts across hospitals.
-        Only allows deletion of DRAFT status invoices.
+        Deletes draft invoice by UUID in selected branch only.
         """
         try:
-            invoice = PharmacyInvoice.objects.get(pk=pk, status="draft")
+            invoice = self.get_queryset().get(pk=pk, status="draft")
         except PharmacyInvoice.DoesNotExist:
             return Response({"detail": "Draft not found."}, status=status.HTTP_404_NOT_FOUND)
         invoice.delete()
@@ -375,16 +359,16 @@ class PharmacyInvoiceItemViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        hospital = _get_pharmacy_branch(self.request)
-        if hospital is None:
+        pharmacy = _get_pharmacy_branch(self.request)
+        if pharmacy is None:
             return PharmacyInvoiceItem.objects.none()
-        return super().get_queryset().filter(invoice__pharmacy=hospital)
+        return super().get_queryset().filter(invoice__pharmacy=pharmacy)
 
     @transaction.atomic
     def perform_create(self, serializer):
         item = serializer.save()
         inv = item.invoice
-        hospital = inv.pharmacy
+        pharmacy = inv.pharmacy
         batch = item.batch
         allow_expired = str(self.request.query_params.get("allow_expired", "")).lower() in ("1", "true", "yes")
         if (
@@ -402,7 +386,7 @@ class PharmacyInvoiceItemViewSet(viewsets.ModelViewSet):
             try:
                 deduct_stock_fifo(
                     request=self.request,
-                    pharmacy=hospital,
+                    pharmacy=pharmacy,
                     medicine_batch_pairs=[(batch, item.qty)],
                     reference_id=str(inv.id),
                 )
@@ -416,9 +400,9 @@ class PurchaseHistoryListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        hospital = _get_pharmacy_branch(request)
-        if hospital is None:
-            return Response({"success": False, "detail": "Hospital context required."}, status=status.HTTP_400_BAD_REQUEST)
+        pharmacy = _get_pharmacy_branch(request)
+        if pharmacy is None:
+            return Response({"success": False, "detail": "Pharmacy branch context required."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             limit = max(1, min(int(request.query_params.get("limit", 20)), 100))
             offset = max(0, int(request.query_params.get("offset", 0)))
@@ -433,7 +417,7 @@ class PurchaseHistoryListView(APIView):
         date_to = parse_date(request.query_params.get("date_to", "") or "")
 
         rows, total = list_purchase_history(
-            pharmacy_id=hospital.id,
+            pharmacy_id=pharmacy.id,
             limit=limit,
             offset=offset,
             search=search,
@@ -454,10 +438,10 @@ class PurchaseHistoryDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk, *args, **kwargs):
-        hospital = _get_pharmacy_branch(request)
-        if hospital is None:
-            return Response({"success": False, "detail": "Hospital context required."}, status=status.HTTP_400_BAD_REQUEST)
-        data = detail_purchase_history(pharmacy_id=hospital.id, pk=pk)
+        pharmacy = _get_pharmacy_branch(request)
+        if pharmacy is None:
+            return Response({"success": False, "detail": "Pharmacy branch context required."}, status=status.HTTP_400_BAD_REQUEST)
+        data = detail_purchase_history(pharmacy_id=pharmacy.id, pk=pk)
         if not data:
             return Response({"success": False, "detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         return success_response(data)

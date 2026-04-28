@@ -22,6 +22,7 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         WAITING = "waiting"
         IN_PROGRESS = "in_progress"
         COMPLETED = "completed"
+        SKIPPED = "skipped"
         CANCELLED = "cancelled"
 
     class PaymentMode(models.TextChoices):
@@ -49,6 +50,7 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     vitals = models.JSONField(default=dict, blank=True)
 
     consultation_notes = models.TextField(blank=True, default="")
+    patient_notes = models.JSONField(default=list, blank=True)
     diagnosis = models.TextField(blank=True, default="")
     test_recommendations = models.TextField(blank=True, default="")
     revisit_advice = models.TextField(blank=True, default="")

@@ -6,11 +6,11 @@ from apps.inventory.models import Medicine, MedicineBatch, MedicineCategory, Med
 
 
 class UnitSerializer(serializers.ModelSerializer):
-    hospital_id = serializers.UUIDField(read_only=True)
+    pharmacy_id = serializers.UUIDField(read_only=True)
 
     class Meta:
         model = Unit
-        fields = ["id", "hospital_id", "code", "name", "is_active", "created_at", "updated_at"]
+        fields = ["id", "pharmacy_id", "code", "name", "is_active", "created_at", "updated_at"]
 
 
 class UnitCreateUpdateSerializer(serializers.ModelSerializer):
@@ -20,14 +20,14 @@ class UnitCreateUpdateSerializer(serializers.ModelSerializer):
 
 
 class MedicineSerializer(serializers.ModelSerializer):
-    hospital_id = serializers.UUIDField(read_only=True)
+    pharmacy_id = serializers.UUIDField(read_only=True)
     unit_name = serializers.CharField(source="unit.name", read_only=True)
 
     class Meta:
         model = Medicine
         fields = [
             "id",
-            "hospital_id",
+            "pharmacy_id",
             "sku",
             "name",
             "company_name",
@@ -74,14 +74,14 @@ class MedicineCreateUpdateSerializer(serializers.ModelSerializer):
 
 
 class MedicineCategorySerializer(serializers.ModelSerializer):
-    hospital_id = serializers.UUIDField(read_only=True)
+    pharmacy_id = serializers.UUIDField(read_only=True)
     parent_name = serializers.CharField(source="parent.name", read_only=True)
 
     class Meta:
         model = MedicineCategory
         fields = [
             "id",
-            "hospital_id",
+            "pharmacy_id",
             "name",
             "parent",
             "parent_name",
@@ -102,8 +102,10 @@ class MedicineCategoryCreateUpdateSerializer(serializers.ModelSerializer):
         if not parent:
             return attrs
         request = self.context.get("request")
-        if request and parent.hospital_id != request.user.hospital_id:
-            raise serializers.ValidationError({"parent": "Parent category must belong to your hospital."})
+        request_pharmacy = getattr(request, "pharmacy", None) if request is not None else None
+        request_pharmacy_id = getattr(request_pharmacy, "id", None)
+        if request_pharmacy_id and str(parent.pharmacy_id) != str(request_pharmacy_id):
+            raise serializers.ValidationError({"parent": "Parent category must belong to selected pharmacy branch."})
         if self.instance and str(parent.id) == str(self.instance.id):
             raise serializers.ValidationError({"parent": "A category cannot be its own parent."})
         return attrs
@@ -123,7 +125,7 @@ class MedicineCategoryCreateUpdateSerializer(serializers.ModelSerializer):
 
 
 class MedicineBatchSerializer(serializers.ModelSerializer):
-    hospital_id = serializers.UUIDField(read_only=True)
+    pharmacy_id = serializers.UUIDField(read_only=True)
     medicine_name = serializers.CharField(source="medicine.name", read_only=True)
     quantity = serializers.SerializerMethodField()
 
@@ -131,7 +133,7 @@ class MedicineBatchSerializer(serializers.ModelSerializer):
         model = MedicineBatch
         fields = [
             "id",
-            "hospital_id",
+            "pharmacy_id",
             "medicine",
             "medicine_name",
             "batch_no",
@@ -170,7 +172,7 @@ class MedicineBatchRatesUpdateSerializer(serializers.ModelSerializer):
 
 
 class StockLedgerSerializer(serializers.ModelSerializer):
-    hospital_id = serializers.UUIDField(read_only=True)
+    pharmacy_id = serializers.UUIDField(read_only=True)
     medicine_name = serializers.CharField(source="medicine.name", read_only=True)
     batch_no = serializers.CharField(source="batch.batch_no", read_only=True)
 
@@ -178,7 +180,7 @@ class StockLedgerSerializer(serializers.ModelSerializer):
         model = StockLedger
         fields = [
             "id",
-            "hospital_id",
+            "pharmacy_id",
             "medicine",
             "medicine_name",
             "batch",
