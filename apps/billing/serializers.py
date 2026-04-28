@@ -8,7 +8,17 @@ from apps.billing.models import BillingInvoice, InvoiceItem
 class InvoiceItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = InvoiceItem
-        fields = ["id", "description", "quantity", "unit_price", "line_total", "created_at", "updated_at"]
+        fields = [
+            "id",
+            "description",
+            "category",
+            "subcategory",
+            "quantity",
+            "unit_price",
+            "line_total",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class BillingInvoiceSerializer(serializers.ModelSerializer):
@@ -47,6 +57,8 @@ class BillingInvoiceSerializer(serializers.ModelSerializer):
 
 class BillingInvoiceItemInputSerializer(serializers.Serializer):
     description = serializers.CharField(max_length=300)
+    category = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+    subcategory = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
     quantity = serializers.DecimalField(max_digits=10, decimal_places=2, default=Decimal("1.00"))
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
 

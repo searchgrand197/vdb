@@ -84,6 +84,8 @@ class BillingInvoice(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 class InvoiceItem(TimeStampedModel, UUIDPrimaryKeyModel):
     invoice = models.ForeignKey(BillingInvoice, on_delete=models.CASCADE, related_name="items")
     description = models.CharField(max_length=300)
+    category = models.CharField(max_length=120, default="", blank=True)
+    subcategory = models.CharField(max_length=120, default="", blank=True)
 
     quantity = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("1.00"))
     unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))

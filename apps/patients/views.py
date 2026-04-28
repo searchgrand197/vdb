@@ -13,6 +13,7 @@ from apps.patients.serializers import PatientCreateUpdateSerializer, PatientSeri
 from apps.patients.services.uhid_service import generate_uhid
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
+from apps.opd.services import resolve_opd_doctor_name
 from apps.shared.response import success_response
 
 
@@ -166,7 +167,10 @@ class PatientViewSet(viewsets.ModelViewSet):
                     "revisit_advice": v.revisit_advice,
                     "amount": v.amount,
                     "payment_mode": v.payment_mode,
-                    "doctor_name": v.doctor_user.full_name if v.doctor_user_id else "",
+                    "doctor_name": resolve_opd_doctor_name(
+                        doctor_user=v.doctor_user,
+                        hospital_id=v.hospital_id,
+                    ),
                 }
                 for v in opd_rows
             ],

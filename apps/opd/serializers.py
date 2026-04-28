@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from apps.opd.models import OPDVisit
+from apps.opd.services import resolve_opd_doctor_name
 
 
 class OPDVisitSerializer(serializers.ModelSerializer):
@@ -117,12 +118,10 @@ class OPDVisitSerializer(serializers.ModelSerializer):
         return None
 
     def get_doctor_name(self, obj):
-        if not obj.doctor_user:
-            return ""
-        first = getattr(obj.doctor_user, "first_name", "") or ""
-        last = getattr(obj.doctor_user, "last_name", "") or ""
-        name = f"{first} {last}".strip()
-        return name or obj.doctor_user.email
+        return resolve_opd_doctor_name(
+            doctor_user=obj.doctor_user,
+            hospital_id=getattr(obj, "hospital_id", None),
+        )
 
     def get_created_by_name(self, obj):
         if not obj.created_by:

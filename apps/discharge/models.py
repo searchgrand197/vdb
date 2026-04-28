@@ -109,6 +109,22 @@ class DischargeSummary(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         return f"Summary for {self.admission.patient.uhid}"
 
 
+class DischargeSurgery(TimeStampedModel, UUIDPrimaryKeyModel):
+    summary = models.ForeignKey(DischargeSummary, on_delete=models.CASCADE, related_name="surgery_rows")
+    surgery_date = models.DateField(null=True, blank=True)
+    procedure_name = models.CharField(max_length=300)
+    surgeon_name = models.CharField(max_length=200, blank=True, default="")
+    assistant_name = models.CharField(max_length=200, blank=True, default="")
+    anaesthetist_name = models.CharField(max_length=200, blank=True, default="")
+    anaesthesia_type = models.CharField(max_length=120, blank=True, default="")
+    operative_findings = models.TextField(blank=True, default="")
+    intra_op_complications = models.TextField(blank=True, default="")
+    sort_order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ("sort_order", "created_at", "id")
+
+
 class DischargeMedication(TimeStampedModel, UUIDPrimaryKeyModel):
     summary = models.ForeignKey(DischargeSummary, on_delete=models.CASCADE, related_name="medication_rows")
     drug_name = models.CharField(max_length=200)

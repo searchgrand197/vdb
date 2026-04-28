@@ -11,6 +11,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.opd.models import OPDVisit, OPDVisitStatusHistory
 from apps.opd.serializers import OPDVisitCreateUpdateSerializer, OPDVisitSerializer
+from apps.opd.services import resolve_opd_doctor_name
 from apps.patients.models import Patient
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
@@ -220,7 +221,10 @@ def follow_up_alerts(request):
             'is_tomorrow': is_tomorrow,
             'visit_reason': v.visit_reason,
             'revisit_advice': v.revisit_advice,
-            'doctor_name': v.doctor_user.full_name if v.doctor_user else '',
+            'doctor_name': resolve_opd_doctor_name(
+                doctor_user=v.doctor_user,
+                hospital_id=v.hospital_id,
+            ),
         })
 
     return Response(results)

@@ -774,7 +774,11 @@ function OPDSection({ rooms }) {
           ...vis,
           room,
           display_token: buildDisplayToken(vis, room),
-          doc_name: findDoctorBySelectedId(doctorRows, vis.doctor_user)?.name || vis.doctor_user || '—',
+          doc_name:
+            findDoctorBySelectedId(doctorRows, vis.doctor_user)?.name ||
+            vis.doctor_name ||
+            vis.doc_name ||
+            '—',
         }
       }))
       // Keep shift collection totals in sync with newly created/updated visits.
@@ -3080,7 +3084,32 @@ function IPDSection({ mode, initialAdmissionDraft }) {
 
 function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved }) {
   const [submitting, setSubmitting] = useState(false)
+  const [patientSubmitting, setPatientSubmitting] = useState(false)
   const [showBedPicker, setShowBedPicker] = useState(false)
+  const [showPatientEditModal, setShowPatientEditModal] = useState(false)
+  const [patientPreview, setPatientPreview] = useState({
+    patient_name: admission.patient_name || '--',
+    patient_uhid: admission.patient_uhid || 'UHID unavailable',
+  })
+  const splitPatientName = (name) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+    return {
+      first_name: parts[0] || '',
+      last_name: parts.slice(1).join(' ') || '',
+    }
+  }
+  const initialName = splitPatientName(admission.patient_name)
+  const initialPatientForm = {
+    first_name: admission.first_name || initialName.first_name,
+    last_name: admission.last_name || initialName.last_name,
+    phone: admission.patient_phone || admission.phone || '',
+    age: admission.patient_age != null && admission.patient_age !== '' ? String(admission.patient_age) : '',
+    gender: admission.patient_gender || admission.gender || '',
+    guardian_name: admission.patient_guardian_name || admission.guardian_name || '',
+    address_line1: admission.patient_address || admission.address_line1 || '',
+    city: admission.patient_city || admission.city || '',
+    state: admission.patient_state || admission.state || '',
+  }
   const [form, setForm] = useState({
     assigned_doctor: admission.assigned_doctor || '',
     department: admission.department || '',
@@ -3092,6 +3121,7 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
     admission_diagnosis: admission.admission_diagnosis || '',
     admission_notes: admission.admission_notes || '',
   })
+  const [patientForm, setPatientForm] = useState(initialPatientForm)
 
   function handleBedSelect(bedInfo) {
     setForm(f => ({
@@ -3113,9 +3143,58 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
       toast.success('Admission details updated')
       onSaved()
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to update admission')
+      const apiErrors = err?.response?.data?.errors
+      const firstFieldError =
+        apiErrors && typeof apiErrors === 'object'
+          ? Object.values(apiErrors).flat().find(Boolean)
+          : null
+      toast.error(firstFieldError || err?.response?.data?.detail || 'Failed to update admission')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  async function savePatientDetails() {
+    if (!admission.patient) {
+      toast.error('Patient id not found for this admission')
+      return
+    }
+    setPatientSubmitting(true)
+    try {
+      const patientPayload = {}
+      const patientKeys = ["first_name", "last_name", "phone", "age", "gender", "guardian_name", "address_line1", "city", "state"]
+      patientKeys.forEach((key) => {
+        const nextVal = String(patientForm[key] ?? '').trim()
+        const prevVal = String(initialPatientForm[key] ?? '').trim()
+        if (nextVal !== prevVal) {
+          if (key === 'age') {
+            if (nextVal === '') return
+            const parsed = parseInt(nextVal, 10)
+            if (!Number.isNaN(parsed) && parsed >= 0) patientPayload.age = parsed
+            return
+          }
+          patientPayload[key] = nextVal
+        }
+      })
+      if (Object.keys(patientPayload).length === 0) {
+        setShowPatientEditModal(false)
+        return
+      }
+      await api.patch(`/patients/${admission.patient}/`, patientPayload)
+      const fullName = [patientForm.first_name, patientForm.last_name].filter(Boolean).join(' ').trim()
+      setPatientPreview((p) => ({ ...p, patient_name: fullName || p.patient_name }))
+      toast.success('Patient details updated')
+      setShowPatientEditModal(false)
+      onSaved()
+    } catch (err) {
+      const apiErrors = err?.response?.data?.errors
+      const firstFieldError =
+        apiErrors && typeof apiErrors === 'object'
+          ? Object.values(apiErrors).flat().find(Boolean)
+          : null
+      toast.error(firstFieldError || err?.response?.data?.detail || 'Failed to update patient')
+    } finally {
+      setPatientSubmitting(false)
     }
   }
 
@@ -3135,9 +3214,20 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
         <form onSubmit={handleSave} className="p-6 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2 bg-slate-50 border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-500 font-semibold">Patient</p>
-              <p className="text-sm font-bold text-slate-900">{admission.patient_name || '--'}</p>
-              <p className="text-xs text-slate-500">{admission.patient_uhid || 'UHID unavailable'}</p>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs text-slate-500 font-semibold">Patient</p>
+                  <p className="text-sm font-bold text-slate-900">{patientPreview.patient_name || '--'}</p>
+                  <p className="text-xs text-slate-500">{patientPreview.patient_uhid || 'UHID unavailable'}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPatientEditModal(true)}
+                  className="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg font-bold hover:bg-amber-200"
+                >
+                  Edit Patient
+                </button>
+              </div>
             </div>
 
             <div>
@@ -3222,6 +3312,80 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
 
       {showBedPicker && (
         <BedSelector onSelect={handleBedSelect} onClose={() => setShowBedPicker(false)} />
+      )}
+      {showPatientEditModal && (
+        <div className="fixed inset-0 z-[530] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden border border-gray-100">
+            <div className="bg-gradient-to-r from-blue-600 to-blue-500 px-5 py-3 flex items-center justify-between text-white">
+              <h4 className="font-black text-base">Edit Patient Details</h4>
+              <button onClick={() => setShowPatientEditModal(false)} className="text-white/80 hover:text-white">
+                <XCircle size={20} />
+              </button>
+            </div>
+            <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">First Name</label>
+                <input value={patientForm.first_name} onChange={e => setPatientForm(p => ({ ...p, first_name: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Last Name</label>
+                <input value={patientForm.last_name} onChange={e => setPatientForm(p => ({ ...p, last_name: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Phone</label>
+                <input value={patientForm.phone} onChange={e => setPatientForm(p => ({ ...p, phone: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Age</label>
+                <input type="number" min="0" value={patientForm.age} onChange={e => setPatientForm(p => ({ ...p, age: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Gender</label>
+                <select value={patientForm.gender} onChange={e => setPatientForm(p => ({ ...p, gender: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                  <option value="">-- Select gender --</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Guardian</label>
+                <input value={patientForm.guardian_name} onChange={e => setPatientForm(p => ({ ...p, guardian_name: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-xs text-gray-500 mb-1 block">Address</label>
+                <input value={patientForm.address_line1} onChange={e => setPatientForm(p => ({ ...p, address_line1: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">City</label>
+                <input value={patientForm.city} onChange={e => setPatientForm(p => ({ ...p, city: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">State</label>
+                <input value={patientForm.state} onChange={e => setPatientForm(p => ({ ...p, state: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
+            </div>
+            <div className="px-5 pb-5 flex items-center justify-end gap-3">
+              <button type="button" onClick={() => setShowPatientEditModal(false)}
+                className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200">
+                Cancel
+              </button>
+              <button type="button" disabled={patientSubmitting} onClick={savePatientDetails}
+                className="px-5 py-2.5 rounded-xl text-sm font-black text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed">
+                {patientSubmitting ? 'Saving...' : 'Save Patient'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -5265,6 +5429,22 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
   }, [onClose])
 
   const now = format(new Date(), 'd/M/yyyy (HH:mm)')
+  const surgeryRows = Array.isArray(rec.surgery_rows) && rec.surgery_rows.length > 0
+    ? rec.surgery_rows
+    : (
+      (rec.procedure_surgery || rec.surgery_date || rec.surgeon_name || rec.anaesthetist_name || rec.anaesthesia_type || rec.operative_findings || rec.intra_op_complications)
+        ? [{
+            surgery_date: rec.surgery_date || '',
+            procedure_name: rec.procedure_surgery || '',
+            surgeon_name: rec.surgeon_name || '',
+            assistant_name: rec.assistant_name || '',
+            anaesthetist_name: rec.anaesthetist_name || '',
+            anaesthesia_type: rec.anaesthesia_type || '',
+            operative_findings: rec.operative_findings || '',
+            intra_op_complications: rec.intra_op_complications || '',
+          }]
+        : []
+    )
 
   const clinicalSections = [
     { label: 'Chief complaints', val: rec.chief_complaints },
@@ -5277,7 +5457,10 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
     { label: 'Personal history', val: rec.personal_history },
     { label: 'Physical examination', val: rec.physical_examination },
     { label: 'Treatment given', val: rec.treatment_given },
-    { label: 'Procedure / surgery (summary)', val: rec.procedure_surgery },
+    {
+      label: 'Procedure / surgery (summary)',
+      val: rec.procedure_surgery || surgeryRows.map((r) => r.procedure_name || r.procedure_surgery || '').filter(Boolean).join('; ')
+    },
     { label: 'Investigations (notes)', val: rec.investigations },
     { label: 'Course in hospital', val: rec.course_in_hospital },
     { label: 'Complications during stay', val: rec.complications_during_stay },
@@ -5290,9 +5473,7 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
   const labRows = (rec.investigation_rows || []).filter(r => (r.category || 'lab') === 'lab')
   const imgRows = (rec.investigation_rows || []).filter(r => r.category === 'imaging')
   const medRows = rec.medication_rows || []
-  const showOperative = Boolean(
-    (rec.surgery_date || rec.surgeon_name || rec.anaesthetist_name || rec.operative_findings || rec.anaesthesia_type || '').toString().trim()
-  )
+  const showOperative = surgeryRows.length > 0
 
   const billingItems = ledger ? (() => {
     const raw = (ledger.charges || []).filter(c => c.type !== 'payment' && c.type !== 'pharmacy_payment')
@@ -5378,18 +5559,26 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
             {showOperative && (
               <div className="border border-gray-200 rounded-lg p-3 break-inside-avoid">
                 <h3 className="font-black uppercase text-xs mb-2">Operative details</h3>
-                <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
-                  {rec.surgery_date && <div><span className="font-bold">Date:</span> {format(new Date(`${rec.surgery_date}T12:00:00`), 'd/M/yyyy')}</div>}
-                  {rec.surgeon_name && <div><span className="font-bold">Surgeon:</span> {rec.surgeon_name}</div>}
-                  {rec.anaesthetist_name && <div><span className="font-bold">Anaesthetist:</span> {rec.anaesthetist_name}</div>}
-                  {rec.anaesthesia_type && <div><span className="font-bold">Anaesthesia:</span> {rec.anaesthesia_type}</div>}
+                <div className="space-y-3">
+                  {surgeryRows.map((row, idx) => (
+                    <div key={`print-surgery-${idx}`} className="border border-gray-100 rounded-md p-2">
+                      <p className="font-bold text-xs mb-1">Surgery #{idx + 1}: {row.procedure_name || row.procedure_surgery || 'Procedure'}</p>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                        {row.surgery_date && <div><span className="font-bold">Date:</span> {format(new Date(`${row.surgery_date}T12:00:00`), 'd/M/yyyy')}</div>}
+                        {row.surgeon_name && <div><span className="font-bold">Surgeon:</span> {row.surgeon_name}</div>}
+                        {row.assistant_name && <div><span className="font-bold">Assistant:</span> {row.assistant_name}</div>}
+                        {row.anaesthetist_name && <div><span className="font-bold">Anaesthetist:</span> {row.anaesthetist_name}</div>}
+                        {row.anaesthesia_type && <div><span className="font-bold">Anaesthesia:</span> {row.anaesthesia_type}</div>}
+                      </div>
+                      {(row.operative_findings || row.intra_op_complications) && (
+                        <div className="mt-2 space-y-1 text-xs whitespace-pre-wrap">
+                          {row.operative_findings && <p><span className="font-bold">Findings:</span> {row.operative_findings}</p>}
+                          {row.intra_op_complications && <p><span className="font-bold">Intra-op complications:</span> {row.intra_op_complications}</p>}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                {(rec.operative_findings || rec.intra_op_complications) && (
-                  <div className="mt-2 space-y-1 text-xs whitespace-pre-wrap">
-                    {rec.operative_findings && <p><span className="font-bold">Findings:</span> {rec.operative_findings}</p>}
-                    {rec.intra_op_complications && <p><span className="font-bold">Intra-op complications:</span> {rec.intra_op_complications}</p>}
-                  </div>
-                )}
               </div>
             )}
 
@@ -8840,6 +9029,16 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   // Discharge State
   const [journey, setJourney] = useState(null) // { admission, step: 'form'|'billing' }
   const emptyVitals = () => ({ bp: '', pulse: '', spo2: '', temp: '', weight: '', rbs: '' })
+  const emptySurgeryDraft = () => ({
+    surgery_date: '',
+    procedure_name: '',
+    surgeon_name: '',
+    assistant_name: '',
+    anaesthetist_name: '',
+    anaesthesia_type: '',
+    operative_findings: '',
+    intra_op_complications: '',
+  })
   const [summary, setSummary] = useState({
     summary_notes: '', treatment_given: '', condition_at_discharge: 'Stable',
     medications_on_discharge: '', follow_up_advice: '',
@@ -8862,7 +9061,10 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     abha_id: '', insurance_provider: '', tpa_name: '', policy_number: '', claim_number: '',
     patient_education_given: false, attendant_counselled_by: '',
     investigation_rows: [],
+    surgery_rows: [],
   })
+  const [surgeryDraft, setSurgeryDraft] = useState(emptySurgeryDraft())
+  const [editingSurgeryIndex, setEditingSurgeryIndex] = useState(-1)
   /** Doctor-style discharge meds (pharmacy search + manual); synced to API as medication_rows */
   const [dischargeRxItems, setDischargeRxItems] = useState([])
   const [billing, setBilling] = useState(null)
@@ -8911,6 +9113,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   const [chgPaidMode, setChgPaidMode] = useState('cash')
   const [chgPrint, setChgPrint]       = useState(false)
   const [selectedExistingCharge, setSelectedExistingCharge] = useState('')
+  const [isServiceMenuOpen, setIsServiceMenuOpen] = useState(false)
+  const [highlightedServiceIndex, setHighlightedServiceIndex] = useState(-1)
+  const serviceComboboxRef = useRef(null)
 
   // Apply Discount form state
   const [discReason, setDiscReason] = useState('')
@@ -8938,6 +9143,127 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     ...s,
     investigation_rows: (s.investigation_rows || []).filter((_, i) => i !== idx),
   }))
+  const updateSurgeryDraftField = (key, val) => {
+    setSurgeryDraft((s) => ({ ...s, [key]: val }))
+  }
+  const resetSurgeryDraft = () => {
+    setSurgeryDraft(emptySurgeryDraft())
+    setEditingSurgeryIndex(-1)
+  }
+
+  const autosaveSurgeryDraftLikeSave = () => {
+    const procedure = (surgeryDraft.procedure_name || '').trim()
+    if (!procedure) return
+    const row = {
+      surgery_date: surgeryDraft.surgery_date || '',
+      procedure_name: procedure,
+      surgeon_name: (surgeryDraft.surgeon_name || '').trim(),
+      assistant_name: (surgeryDraft.assistant_name || '').trim(),
+      anaesthetist_name: (surgeryDraft.anaesthetist_name || '').trim(),
+      anaesthesia_type: (surgeryDraft.anaesthesia_type || '').trim(),
+      operative_findings: (surgeryDraft.operative_findings || '').trim(),
+      intra_op_complications: (surgeryDraft.intra_op_complications || '').trim(),
+    }
+    setSummary((s) => {
+      const rows = [...(s.surgery_rows || [])]
+      if (editingSurgeryIndex >= 0 && rows[editingSurgeryIndex]) {
+        rows[editingSurgeryIndex] = row
+      } else {
+        rows.push(row)
+      }
+      return {
+        ...s,
+        surgery_rows: rows,
+        // Keep legacy single fields mirrored from first row for backward-compatible consumers.
+        procedure_surgery: rows[0]?.procedure_name || '',
+        surgery_date: rows[0]?.surgery_date || '',
+        surgeon_name: rows[0]?.surgeon_name || '',
+        assistant_name: rows[0]?.assistant_name || '',
+        anaesthetist_name: rows[0]?.anaesthetist_name || '',
+        anaesthesia_type: rows[0]?.anaesthesia_type || '',
+        operative_findings: rows[0]?.operative_findings || '',
+        intra_op_complications: rows[0]?.intra_op_complications || '',
+      }
+    })
+    resetSurgeryDraft()
+  }
+  const saveSurgeryRow = () => {
+    const procedure = (surgeryDraft.procedure_name || '').trim()
+    if (!procedure) {
+      toast.error('Procedure name is required before saving surgery')
+      return
+    }
+    const row = {
+      surgery_date: surgeryDraft.surgery_date || '',
+      procedure_name: procedure,
+      surgeon_name: (surgeryDraft.surgeon_name || '').trim(),
+      assistant_name: (surgeryDraft.assistant_name || '').trim(),
+      anaesthetist_name: (surgeryDraft.anaesthetist_name || '').trim(),
+      anaesthesia_type: (surgeryDraft.anaesthesia_type || '').trim(),
+      operative_findings: (surgeryDraft.operative_findings || '').trim(),
+      intra_op_complications: (surgeryDraft.intra_op_complications || '').trim(),
+    }
+    setSummary((s) => {
+      const rows = [...(s.surgery_rows || [])]
+      if (editingSurgeryIndex >= 0 && rows[editingSurgeryIndex]) {
+        rows[editingSurgeryIndex] = row
+      } else {
+        rows.push(row)
+      }
+      return {
+        ...s,
+        surgery_rows: rows,
+        // Keep legacy single fields mirrored from first row for backward-compatible consumers.
+        procedure_surgery: rows[0]?.procedure_name || '',
+        surgery_date: rows[0]?.surgery_date || '',
+        surgeon_name: rows[0]?.surgeon_name || '',
+        assistant_name: rows[0]?.assistant_name || '',
+        anaesthetist_name: rows[0]?.anaesthetist_name || '',
+        anaesthesia_type: rows[0]?.anaesthesia_type || '',
+        operative_findings: rows[0]?.operative_findings || '',
+        intra_op_complications: rows[0]?.intra_op_complications || '',
+      }
+    })
+    resetSurgeryDraft()
+  }
+  const editSurgeryRow = (idx) => {
+    const row = (summary.surgery_rows || [])[idx]
+    if (!row) return
+    const editDraft = {
+      surgery_date: row.surgery_date || '',
+      procedure_name: row.procedure_name || row.procedure_surgery || '',
+      surgeon_name: row.surgeon_name || '',
+      assistant_name: row.assistant_name || '',
+      anaesthetist_name: row.anaesthetist_name || '',
+      anaesthesia_type: row.anaesthesia_type || '',
+      operative_findings: row.operative_findings || '',
+      intra_op_complications: row.intra_op_complications || '',
+    }
+    setSurgeryDraft(editDraft)
+    setEditingSurgeryIndex(idx)
+  }
+  const removeSurgeryRow = (idx) => {
+    setSummary((s) => {
+      const rows = (s.surgery_rows || []).filter((_, i) => i !== idx)
+      return {
+        ...s,
+        surgery_rows: rows,
+        procedure_surgery: rows[0]?.procedure_name || '',
+        surgery_date: rows[0]?.surgery_date || '',
+        surgeon_name: rows[0]?.surgeon_name || '',
+        assistant_name: rows[0]?.assistant_name || '',
+        anaesthetist_name: rows[0]?.anaesthetist_name || '',
+        anaesthesia_type: rows[0]?.anaesthesia_type || '',
+        operative_findings: rows[0]?.operative_findings || '',
+        intra_op_complications: rows[0]?.intra_op_complications || '',
+      }
+    })
+    if (editingSurgeryIndex === idx) {
+      resetSurgeryDraft()
+    } else if (editingSurgeryIndex > idx) {
+      setEditingSurgeryIndex((i) => i - 1)
+    }
+  }
 
   useEffect(() => { fetchLedger() }, [admission.id])
 
@@ -9050,7 +9376,10 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       abha_id: '', insurance_provider: '', tpa_name: '', policy_number: '', claim_number: '',
       patient_education_given: false, attendant_counselled_by: '',
       investigation_rows: [],
+      surgery_rows: [],
     })
+    setSurgeryDraft(emptySurgeryDraft())
+    setEditingSurgeryIndex(-1)
     setDischargeRxItems([])
     loadDischargeDraft(admission.id).finally(() => setDischargeHydrated(true))
   }
@@ -9064,6 +9393,41 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       const v = existing.vitals_at_discharge && typeof existing.vitals_at_discharge === 'object'
         ? { ...emptyVitals(), ...existing.vitals_at_discharge }
         : emptyVitals()
+      const normalizedSurgeryRows = Array.isArray(existing.surgery_rows)
+        ? existing.surgery_rows
+          .map(r => ({
+            surgery_date: r.surgery_date || '',
+            procedure_name: r.procedure_name || r.procedure_surgery || '',
+            surgeon_name: r.surgeon_name || '',
+            assistant_name: r.assistant_name || '',
+            anaesthetist_name: r.anaesthetist_name || '',
+            anaesthesia_type: r.anaesthesia_type || '',
+            operative_findings: r.operative_findings || '',
+            intra_op_complications: r.intra_op_complications || '',
+          }))
+          .filter(r => (r.procedure_name || '').trim())
+        : []
+      const legacySurgeryFallback = (
+        existing.procedure_surgery
+        || existing.surgery_date
+        || existing.surgeon_name
+        || existing.assistant_name
+        || existing.anaesthetist_name
+        || existing.anaesthesia_type
+        || existing.operative_findings
+        || existing.intra_op_complications
+      )
+        ? [{
+            surgery_date: existing.surgery_date || '',
+            procedure_name: existing.procedure_surgery || '',
+            surgeon_name: existing.surgeon_name || '',
+            assistant_name: existing.assistant_name || '',
+            anaesthetist_name: existing.anaesthetist_name || '',
+            anaesthesia_type: existing.anaesthesia_type || '',
+            operative_findings: existing.operative_findings || '',
+            intra_op_complications: existing.intra_op_complications || '',
+          }]
+        : []
       setSummary({
         summary_notes: existing.summary_notes || admission.admission_notes || '',
         treatment_given: existing.treatment_given || '',
@@ -9129,23 +9493,80 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
           test_name: r.test_name || '', value: r.value || '',
           reference_range: r.reference_range || '', test_date: r.test_date || '',
         })) : [],
+        surgery_rows: normalizedSurgeryRows.length > 0 ? normalizedSurgeryRows : legacySurgeryFallback,
       })
+      setSurgeryDraft(emptySurgeryDraft())
+      setEditingSurgeryIndex(-1)
       setDischargeRxItems(medicationRowsToRxItems(existing.medication_rows))
     } catch {
       // Non-blocking: discharge flow can still continue without draft restore.
     }
   }
 
-  async function saveSummaryDraft() {
+  const _computeCommittedSurgeryRows = ({ baseRows, draft, editingIndex }) => {
+    const rows = Array.isArray(baseRows) ? [...baseRows] : []
+    const procedure = String(draft?.procedure_name || '').trim()
+    if (!procedure) return rows
+    const row = {
+      surgery_date: draft?.surgery_date || '',
+      procedure_name: procedure,
+      surgeon_name: String(draft?.surgeon_name || '').trim(),
+      assistant_name: String(draft?.assistant_name || '').trim(),
+      anaesthetist_name: String(draft?.anaesthetist_name || '').trim(),
+      anaesthesia_type: String(draft?.anaesthesia_type || '').trim(),
+      operative_findings: String(draft?.operative_findings || '').trim(),
+      intra_op_complications: String(draft?.intra_op_complications || '').trim(),
+    }
+    if (editingIndex >= 0 && rows[editingIndex]) {
+      rows[editingIndex] = row
+    } else {
+      rows.push(row)
+    }
+    return rows.filter((r) => String(r?.procedure_name || '').trim())
+  }
+
+  async function saveSummaryDraft(options = {}) {
     const admId = journey?.admission?.id || admission?.id
     if (!admId) return true
+    const commitSurgeryDraft = options?.commitSurgeryDraft === true
+    const clearSurgeryDraftAfter = options?.clearSurgeryDraftAfter === true
+
+    const committedSurgeryRows = commitSurgeryDraft
+      ? _computeCommittedSurgeryRows({
+          baseRows: summary.surgery_rows,
+          draft: surgeryDraft,
+          editingIndex: editingSurgeryIndex,
+        })
+      : (summary.surgery_rows || [])
+
     setDraftSaving(true)
     try {
-      await api.post('/summaries/', {
+      const payload = {
         admission: admId,
         ...summary,
+        surgery_rows: committedSurgeryRows,
         medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
-      })
+      }
+      await api.post('/summaries/', payload)
+
+      if (commitSurgeryDraft) {
+        setSummary((s) => ({
+          ...s,
+          surgery_rows: committedSurgeryRows,
+          procedure_surgery: committedSurgeryRows[0]?.procedure_name || '',
+          surgery_date: committedSurgeryRows[0]?.surgery_date || '',
+          surgeon_name: committedSurgeryRows[0]?.surgeon_name || '',
+          assistant_name: committedSurgeryRows[0]?.assistant_name || '',
+          anaesthetist_name: committedSurgeryRows[0]?.anaesthetist_name || '',
+          anaesthesia_type: committedSurgeryRows[0]?.anaesthesia_type || '',
+          operative_findings: committedSurgeryRows[0]?.operative_findings || '',
+          intra_op_complications: committedSurgeryRows[0]?.intra_op_complications || '',
+        }))
+        if (clearSurgeryDraftAfter) {
+          setSurgeryDraft(emptySurgeryDraft())
+          setEditingSurgeryIndex(-1)
+        }
+      }
       return true
     } catch {
       toast.error('Failed to save discharge summary draft')
@@ -9154,6 +9575,34 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       setDraftSaving(false)
     }
   }
+
+  useEffect(() => {
+    function persistOnUnload() {
+      if (journey?.step === 'form' || journey?.step === 'billing') {
+        // Best-effort autosave before tab/window close.
+        try {
+          const committed = _computeCommittedSurgeryRows({
+            baseRows: summary.surgery_rows,
+            draft: surgeryDraft,
+            editingIndex: editingSurgeryIndex,
+          })
+          const payload = JSON.stringify({
+            admission: journey?.admission?.id || admission?.id,
+            ...summary,
+            surgery_rows: committed,
+            medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
+          })
+          if (navigator?.sendBeacon) {
+            navigator.sendBeacon('/api/v1/summaries/', new Blob([payload], { type: 'application/json' }))
+          }
+        } catch {
+          // ignore unload failures
+        }
+      }
+    }
+    window.addEventListener('beforeunload', persistOnUnload)
+    return () => window.removeEventListener('beforeunload', persistOnUnload)
+  }, [journey, admission?.id, dischargeRxItems, summary, surgeryDraft, editingSurgeryIndex])
 
   function openDischargeEditorForDischarged() {
     setDischargeHydrated(false)
@@ -9177,7 +9626,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     if (String(journey?.admission?.status || '').toLowerCase() === 'discharged') return
     setSubmitting(true)
     try {
-      const saved = await saveSummaryDraft()
+      const saved = await saveSummaryDraft({ commitSurgeryDraft: true, clearSurgeryDraftAfter: true })
       if (!saved) return
       await refreshBillingSummary(journey.admission.id)
       setJourney(j => ({ ...j, step: 'billing' }))
@@ -9186,13 +9635,13 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   }
 
   async function handleExitDischargeJourney() {
-    await saveSummaryDraft()
+    await saveSummaryDraft({ commitSurgeryDraft: true, clearSurgeryDraftAfter: true })
     setJourney(null)
   }
 
   async function handleLedgerModalClose() {
     if (journey?.step === 'form' || journey?.step === 'billing') {
-      await saveSummaryDraft()
+      await saveSummaryDraft({ commitSurgeryDraft: true, clearSurgeryDraftAfter: true })
     }
     setJourney(null)
     onClose()
@@ -9361,7 +9810,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       toast.success(chgStatus === 'paid' ? 'Charge saved & paid' : 'Charge added to bill')
       fetchLedger()
       if (chgPrint) setReceipt({ type: 'charge', data: { amount: total, mode: paymentMode, invoice_no: data.invoice_no, slip_number: data?.payment?.slip_number || '', description: chgDesc } })
-      setChgDesc(''); setChgQty('1'); setChgUnitPrice(''); setChgStatus('due'); setChgPaidMode('cash'); setSelectedExistingCharge('')
+      setChgDesc(''); setChgQty('1'); setChgUnitPrice(''); setChgStatus('due'); setChgPaidMode('cash'); setSelectedExistingCharge(''); setIsServiceMenuOpen(false); setHighlightedServiceIndex(-1)
     } catch { toast.error('Failed to add charge') }
     finally { setSubmitting(false) }
   }
@@ -9396,21 +9845,60 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     setExpandedChargeRows(prev => ({ ...prev, [rowId]: !prev[rowId] }))
   }
 
+  const serviceOptions = useMemo(
+    () =>
+      (ledger?.grouped_charges || [])
+        .filter((g) => (g?.description || "").trim())
+        .map((g) => ({
+          id: g.id,
+          description: String(g.description || "").trim(),
+          quantity: parseInt(g.quantity || 0, 10) || 0,
+          events: g.events || [],
+        })),
+    [ledger?.grouped_charges]
+  )
+
+  const filteredServiceOptions = useMemo(() => {
+    const q = String(chgDesc || "").trim().toLowerCase()
+    if (!q) return serviceOptions
+    return serviceOptions.filter((opt) => opt.description.toLowerCase().includes(q))
+  }, [serviceOptions, chgDesc])
+
+  function getLatestUnitPrice(events) {
+    const lastEvent = [...(events || [])].sort((a, b) => new Date(b.date) - new Date(a.date))[0]
+    const last = Math.abs(parseFloat(lastEvent?.price) || 0)
+    return last || 0
+  }
+
   function handleSelectExistingCharge(value) {
     setSelectedExistingCharge(value)
-    if (!value) return
+    if (!value) {
+      setHighlightedServiceIndex(-1)
+      return
+    }
     const selected = (ledger?.grouped_charges || []).find(g => g.id === value)
     if (!selected) return
     // Only fill description; user can add new qty / unit price for the new entry.
     setChgDesc(selected.description || '')
-    const lastEvent = [...(selected.events || [])].sort((a, b) => new Date(b.date) - new Date(a.date))[0]
-    if (lastEvent?.price) {
-      const last = Math.abs(parseFloat(lastEvent.price) || 0)
-      if (last) setChgUnitPrice(String(last))
-    }
+    const last = getLatestUnitPrice(selected.events || [])
+    if (last) setChgUnitPrice(String(last))
+    setIsServiceMenuOpen(false)
+    setHighlightedServiceIndex(-1)
   }
 
   const inp = 'w-full border border-gray-200 rounded-xl p-2.5 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none bg-gray-50 hover:bg-white transition-colors'
+
+  useEffect(() => {
+    function handleOutsideClick(e) {
+      if (!serviceComboboxRef.current) return
+      if (!serviceComboboxRef.current.contains(e.target)) {
+        setIsServiceMenuOpen(false)
+        setHighlightedServiceIndex(-1)
+      }
+    }
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [])
 
 
   if (receipt) return <PrintMiniReceipt admission={admission} data={receipt.data} type={receipt.type} onClose={() => setReceipt(null)} />
@@ -9626,14 +10114,70 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                 <details id="discharge-section-operative" className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Operative / procedure</summary>
                   <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
-                    <div><span className={dsLbl}>Surgery date</span><input type="date" value={summary.surgery_date || ''} onChange={e => setSummary(s => ({ ...s, surgery_date: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={summary.procedure_surgery} onChange={e => setSummary(s => ({ ...s, procedure_surgery: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Surgeon</span><input value={summary.surgeon_name} onChange={e => setSummary(s => ({ ...s, surgeon_name: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Assistant</span><input value={summary.assistant_name} onChange={e => setSummary(s => ({ ...s, assistant_name: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Anaesthetist</span><input value={summary.anaesthetist_name} onChange={e => setSummary(s => ({ ...s, anaesthetist_name: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Anaesthesia</span><input value={summary.anaesthesia_type} onChange={e => setSummary(s => ({ ...s, anaesthesia_type: e.target.value }))} className={dsInp} /></div>
-                    <div className="md:col-span-2"><span className={dsLbl}>Operative findings</span><textarea rows={2} value={summary.operative_findings} onChange={e => setSummary(s => ({ ...s, operative_findings: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div className="md:col-span-2"><span className={dsLbl}>Intra-op complications</span><textarea rows={2} value={summary.intra_op_complications} onChange={e => setSummary(s => ({ ...s, intra_op_complications: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Surgery date</span><input type="date" value={surgeryDraft.surgery_date || ''} onChange={e => updateSurgeryDraftField('surgery_date', e.target.value)} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={surgeryDraft.procedure_name} onChange={e => updateSurgeryDraftField('procedure_name', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Surgeon</span><input value={surgeryDraft.surgeon_name} onChange={e => updateSurgeryDraftField('surgeon_name', e.target.value)} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Assistant</span><input value={surgeryDraft.assistant_name} onChange={e => updateSurgeryDraftField('assistant_name', e.target.value)} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Anaesthetist</span><input value={surgeryDraft.anaesthetist_name} onChange={e => updateSurgeryDraftField('anaesthetist_name', e.target.value)} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Anaesthesia</span><input value={surgeryDraft.anaesthesia_type} onChange={e => updateSurgeryDraftField('anaesthesia_type', e.target.value)} className={dsInp} /></div>
+                    <div className="md:col-span-2"><span className={dsLbl}>Operative findings</span><textarea rows={2} value={surgeryDraft.operative_findings} onChange={e => updateSurgeryDraftField('operative_findings', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div className="md:col-span-2"><span className={dsLbl}>Intra-op complications</span><textarea rows={2} value={surgeryDraft.intra_op_complications} onChange={e => updateSurgeryDraftField('intra_op_complications', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div className="md:col-span-2 flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={saveSurgeryRow}
+                        className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700"
+                      >
+                        {editingSurgeryIndex >= 0 ? 'Update Surgery' : 'Save Surgery'}
+                      </button>
+                      {editingSurgeryIndex >= 0 && (
+                        <button
+                          type="button"
+                          onClick={resetSurgeryDraft}
+                          className="px-3 py-2 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200"
+                        >
+                          Cancel Edit
+                        </button>
+                      )}
+                    </div>
+                    <div className="md:col-span-2">
+                      <span className={dsLbl}>Saved surgeries</span>
+                      <div className="rounded-lg border border-slate-200 overflow-x-auto bg-white">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 text-left">
+                              <th className="p-2">Date</th>
+                              <th className="p-2">Procedure</th>
+                              <th className="p-2">Surgeon</th>
+                              <th className="p-2">Anaesthesia</th>
+                              <th className="p-2 w-24">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(summary.surgery_rows || []).length === 0 ? (
+                              <tr>
+                                <td colSpan={5} className="p-3 text-slate-400">No surgery rows saved yet.</td>
+                              </tr>
+                            ) : (
+                              (summary.surgery_rows || []).map((row, idx) => (
+                                <tr key={`surgery-row-${idx}`} className="border-t border-slate-100">
+                                  <td className="p-2">{row.surgery_date || '—'}</td>
+                                  <td className="p-2">{row.procedure_name || row.procedure_surgery || '—'}</td>
+                                  <td className="p-2">{row.surgeon_name || '—'}</td>
+                                  <td className="p-2">{row.anaesthesia_type || '—'}</td>
+                                  <td className="p-2">
+                                    <div className="flex items-center gap-2">
+                                      <button type="button" onClick={() => editSurgeryRow(idx)} className="text-blue-600 font-bold">Edit</button>
+                                      <button type="button" onClick={() => removeSurgeryRow(idx)} className="text-red-600 font-bold">Delete</button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   </div>
                 </details>
 
@@ -10136,31 +10680,108 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   {/* ─── Add Charge ─── */}
                   {mode === 'charge' && (
                     <form onSubmit={handleCharge} className="space-y-3">
-                      <div>
+                      <div ref={serviceComboboxRef} className="relative">
                         <label className="text-[10px] font-bold text-gray-500 uppercase">Description *</label>
-                        <input value={chgDesc} onChange={e => setChgDesc(e.target.value)} required
+                        <input
+                          value={chgDesc}
+                          onChange={e => {
+                            const next = e.target.value
+                            setChgDesc(next)
+                            setIsServiceMenuOpen(true)
+                            const exact = serviceOptions.find(
+                              (opt) => opt.description.toLowerCase() === next.trim().toLowerCase()
+                            )
+                            if (exact) {
+                              setSelectedExistingCharge(exact.id)
+                            } else if (selectedExistingCharge) {
+                              setSelectedExistingCharge('')
+                            }
+                            setHighlightedServiceIndex(0)
+                          }}
+                          onFocus={() => {
+                            if (serviceOptions.length > 0) {
+                              setIsServiceMenuOpen(true)
+                              setHighlightedServiceIndex(0)
+                            }
+                          }}
+                          onClick={() => {
+                            if (serviceOptions.length > 0) {
+                              setIsServiceMenuOpen(true)
+                              setHighlightedServiceIndex(0)
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (!serviceOptions.length) return
+                            if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !isServiceMenuOpen) {
+                              e.preventDefault()
+                              setIsServiceMenuOpen(true)
+                              setHighlightedServiceIndex(0)
+                              return
+                            }
+                            if (!isServiceMenuOpen) return
+                            if (e.key === 'ArrowDown') {
+                              e.preventDefault()
+                              setHighlightedServiceIndex((prev) =>
+                                Math.min((prev < 0 ? 0 : prev + 1), Math.max(filteredServiceOptions.length - 1, 0))
+                              )
+                            } else if (e.key === 'ArrowUp') {
+                              e.preventDefault()
+                              setHighlightedServiceIndex((prev) => Math.max((prev < 0 ? 0 : prev - 1), 0))
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault()
+                              setIsServiceMenuOpen(false)
+                              setHighlightedServiceIndex(-1)
+                            } else if (e.key === 'Enter') {
+                              if (isServiceMenuOpen) {
+                                e.preventDefault()
+                                if (highlightedServiceIndex >= 0 && filteredServiceOptions.length > 0) {
+                                  handleSelectExistingCharge(filteredServiceOptions[highlightedServiceIndex].id)
+                                } else {
+                                  setIsServiceMenuOpen(false)
+                                  setHighlightedServiceIndex(-1)
+                                }
+                              }
+                            }
+                          }}
+                          required
                           placeholder="e.g. Doctor Visit, Surgery, Medicine"
-                          className={`mt-1 ${inp}`} />
+                          className={`mt-1 ${inp}`}
+                        />
+                        {isServiceMenuOpen && serviceOptions.length > 0 && (
+                          <div className="absolute z-20 mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-lg max-h-52 overflow-auto">
+                            {filteredServiceOptions.length > 0 ? (
+                              filteredServiceOptions.map((opt, idx) => (
+                                <button
+                                  key={opt.id}
+                                  type="button"
+                                  onMouseDown={(e) => {
+                                    e.preventDefault()
+                                    handleSelectExistingCharge(opt.id)
+                                  }}
+                                  className={`w-full text-left px-3 py-2.5 border-b last:border-b-0 border-gray-100 ${
+                                    idx === highlightedServiceIndex ? 'bg-blue-50' : 'hover:bg-gray-50'
+                                  }`}
+                                >
+                                  <p className="text-sm font-semibold text-gray-800 truncate">{opt.description}</p>
+                                  <p className="text-[11px] text-gray-500">
+                                    Qty so far: {opt.quantity}
+                                    {getLatestUnitPrice(opt.events)
+                                      ? ` · Last price: ₹${getLatestUnitPrice(opt.events).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                                      : ''}
+                                  </p>
+                                </button>
+                              ))
+                            ) : (
+                              <div className="px-3 py-2.5 text-xs text-gray-500">
+                                No matching service - press Enter to use typed description
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <p className="text-[10px] text-gray-400 mt-1 italic">
+                          Click or type to search existing services. You can also enter a new custom service.
+                        </p>
                       </div>
-
-                      {(ledger?.grouped_charges || []).length > 0 && (
-                        <div>
-                          <label className="text-[10px] font-bold text-gray-500 uppercase">Or use existing service</label>
-                          <select
-                            value={selectedExistingCharge}
-                            onChange={e => handleSelectExistingCharge(e.target.value)}
-                            className={`mt-1 ${inp}`}
-                          >
-                            <option value="">-- Add new service --</option>
-                            {(ledger?.grouped_charges || []).map(g => (
-                              <option key={g.id} value={g.id}>
-                                {g.description} (Qty so far: {parseInt(g.quantity || 0, 10) || 0})
-                              </option>
-                            ))}
-                          </select>
-                          <p className="text-[10px] text-gray-400 mt-1 italic">Picking an item only fills the description and last unit price.</p>
-                        </div>
-                      )}
 
                       <div className="grid grid-cols-2 gap-3">
                         <div>
