@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
@@ -10,10 +10,14 @@ import {
   ChevronDown, ChevronRight, ChevronLeft, ClipboardList, Activity,
   XCircle, CheckCircle, Clock, RefreshCw, Eye, PlusCircle, Edit2,
   Wind, IndianRupee, Receipt, Trash2, CreditCard, Bell, Phone, X, Tag, User,
+  HeartPulse, Skull, ScrollText, Syringe, FlaskConical, Pill, MessageSquare,
 } from 'lucide-react'
 import { getRoomsConfig, saveRoomsConfig, getTvGroupsConfig, saveTvGroupsConfig } from '../utils/rooms'
 import BedSelector from '../components/BedSelector'
 import OpdGeneratorTab from '../components/OpdTemplateEditor/OpdGeneratorTab'
+import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel'
+import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
+import { DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS } from '../pharmacy/rxConstants'
 
 const DEFAULT_PAYMENT_SLIP_PROFILE = {
   hospital_name: 'Vardraan Hospital',
@@ -4817,7 +4821,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                     <CheckCircle size={12} className="text-teal-600 shrink-0" />
                                     <span className="font-black text-teal-700 text-xs flex-1">Discharge Summary</span>
                                     {isDischarged && (
-                                      <button type="button" onClick={e=>{e.stopPropagation();setPrintTarget({type:'discharge',rec:{...a.discharge_summary,admission:a.id},ledger})}}
+                                      <button type="button" onClick={e=>{e.stopPropagation();setPrintTarget({type:'discharge',rec:{...a.discharge_summary},admission:a,ledger})}}
                                         className="text-[10px] bg-teal-600 text-white px-2 py-0.5 rounded-md font-bold hover:bg-teal-700 flex items-center gap-1 mr-1">
                                         <Printer size={9} /> Print
                                       </button>
@@ -4859,7 +4863,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
     {printTarget?.type==='opd_receipt' && <PrintOpdReceipt visit={printTarget.visit} patient={printTarget.visit} onClose={()=>setPrintTarget(null)} />}
     {printTarget?.type==='opd_slip' && <PrintSlip visit={printTarget.visit} onClose={()=>setPrintTarget(null)} />}
     {printTarget?.type==='full_bill' && <PrintIpdLedger admission={printTarget.admission} ledger={printTarget.ledger} onClose={()=>setPrintTarget(null)} />}
-    {printTarget?.type==='discharge' && <PrintDischargeSummary rec={printTarget.rec} ledger={printTarget.ledger} onClose={()=>setPrintTarget(null)} />}
+    {printTarget?.type==='discharge' && <PrintDischargeSummary rec={printTarget.rec} admission={printTarget.admission} ledger={printTarget.ledger} onClose={()=>setPrintTarget(null)} />}
     {printTarget?.type==='ipd_receipt' && <PrintMiniReceipt admission={printTarget.admission} data={printTarget.receiptData} type={printTarget.receiptType} onClose={()=>setPrintTarget(null)} />}
     </>
   )
@@ -5223,7 +5227,7 @@ function RegisterPatientSection() {
   )
 }
 
-function PrintDischargeSummary({ rec, ledger, onClose }) {
+function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose }) {
   const printRef = useRef(null)
   const slipProfile = getPaymentSlipProfile()
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
@@ -5232,37 +5236,63 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
   const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
   const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
+  const adm = admissionProp || {}
+
+  const fmtDischargeWhen = () => {
+    if (rec.discharge_date) {
+      try {
+        let s = format(new Date(`${rec.discharge_date}T12:00:00`), 'd/M/yyyy')
+        if (rec.discharge_time) {
+          const t = String(rec.discharge_time)
+          s += ` ${t.slice(0, 5)}`
+        }
+        return s
+      } catch {
+        return '—'
+      }
+    }
+    return rec.created_at ? format(new Date(rec.created_at), 'd/M/yyyy HH:mm') : '—'
+  }
+
+  const vitals = rec.vitals_at_discharge && typeof rec.vitals_at_discharge === 'object' ? rec.vitals_at_discharge : {}
   
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (printRef.current) {
-        window.print()
-      }
-    }, 800)
-
     function handleAfterPrint() {
       onClose()
     }
     window.addEventListener('afterprint', handleAfterPrint)
-
-    return () => {
-      clearTimeout(timer)
-      window.removeEventListener('afterprint', handleAfterPrint)
-    }
-  }, [])
+    return () => window.removeEventListener('afterprint', handleAfterPrint)
+  }, [onClose])
 
   const now = format(new Date(), 'd/M/yyyy (HH:mm)')
 
   const clinicalSections = [
-    { label: 'Reason for admissions', val: rec.reason_for_admission },
-    { label: 'Diagnosis & Co-morbidities', val: rec.diagnosis },
+    { label: 'Chief complaints', val: rec.chief_complaints },
+    { label: 'Reason for admission', val: rec.reason_for_admission },
+    { label: 'Diagnosis', val: rec.diagnosis },
+    { label: 'Co-morbidities', val: rec.co_morbidities },
     { label: 'Allergies', val: rec.allergies },
-    { label: 'Procedure or Surgery', val: rec.procedure_surgery },
-    { label: 'Medical History & Presenting Complaints', val: rec.medical_history },
-    { label: 'Physical & Systemic Examination', val: rec.physical_examination },
-    { label: 'Investigations', val: rec.investigations },
-    { label: 'Course in Hospital', val: rec.course_in_hospital },
-  ].filter(s => s.val && s.val.trim() !== '')
+    { label: 'Medical history', val: rec.medical_history },
+    { label: 'Family history', val: rec.family_history },
+    { label: 'Personal history', val: rec.personal_history },
+    { label: 'Physical examination', val: rec.physical_examination },
+    { label: 'Treatment given', val: rec.treatment_given },
+    { label: 'Procedure / surgery (summary)', val: rec.procedure_surgery },
+    { label: 'Investigations (notes)', val: rec.investigations },
+    { label: 'Course in hospital', val: rec.course_in_hospital },
+    { label: 'Complications during stay', val: rec.complications_during_stay },
+    { label: 'Blood transfusion', val: rec.blood_transfusion_details },
+    { label: 'Implants', val: rec.implants_used },
+    { label: 'Indwelling devices', val: rec.indwelling_devices_on_discharge },
+    { label: 'Vaccination', val: rec.vaccination_given },
+  ].filter(s => s.val && String(s.val).trim() !== '')
+
+  const labRows = (rec.investigation_rows || []).filter(r => (r.category || 'lab') === 'lab')
+  const imgRows = (rec.investigation_rows || []).filter(r => r.category === 'imaging')
+  const medRows = rec.medication_rows || []
+  const showOperative = Boolean(
+    (rec.surgery_date || rec.surgeon_name || rec.anaesthetist_name || rec.operative_findings || rec.anaesthesia_type || '').toString().trim()
+  )
 
   const billingItems = ledger ? (() => {
     const raw = (ledger.charges || []).filter(c => c.type !== 'payment' && c.type !== 'pharmacy_payment')
@@ -5289,13 +5319,15 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
   const payments = ledger ? [...(ledger.payments || [])].sort((a, b) => new Date(a.date) - new Date(b.date)) : []
 
   const content = (
-    <div id="__discharge_doc_root" className="fixed inset-0 z-[600] bg-white overflow-y-auto print:p-0 p-4 sm:p-8 print:static print:h-auto print:overflow-visible print:bg-transparent">
-      <div className="absolute top-4 right-4 print:hidden flex gap-3">
-        <button onClick={() => window.print()} className="bg-emerald-600 text-white px-6 py-2 rounded-xl font-bold shadow-lg shadow-emerald-200">Print Document</button>
-        <button onClick={onClose} className="bg-gray-100 text-gray-600 px-6 py-2 rounded-xl font-bold">Cancel</button>
-      </div>
+    <div id="__discharge_doc_root" className="fixed inset-0 z-[600] bg-black/60 backdrop-blur-sm p-3 sm:p-5 flex items-center justify-center print:static print:p-0 print:block print:bg-transparent">
+      <div className="w-full max-w-[1120px] max-h-[94vh] bg-white rounded-2xl shadow-2xl overflow-hidden print:max-h-none print:rounded-none print:shadow-none">
+        <div className="print:hidden sticky top-0 z-20 px-4 py-3 border-b border-gray-200 bg-white/95 backdrop-blur flex items-center justify-end gap-2">
+          <button onClick={() => window.print()} className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-700">Print Document</button>
+          <button onClick={onClose} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-200">Close Preview</button>
+        </div>
 
-      <div ref={printRef} className="mx-auto w-full max-w-[210mm] text-black bg-white print:shadow-none shadow-2xl">
+        <div className="overflow-y-auto max-h-[calc(94vh-56px)] print:overflow-visible print:max-h-none p-3 sm:p-5 print:p-0">
+      <div ref={printRef} className="mx-auto w-full max-w-[210mm] text-black bg-white print:shadow-none shadow-sm">
         
         {/* ── PAGE 1: CLINICAL DISCHARGE SUMMARY (MEDANTA STYLE) ── */}
         <div className="p-4 sm:p-[15mm] print:p-0 min-h-screen print:min-h-[281mm] flex flex-col relative" style={{ pageBreakAfter: 'always' }}>
@@ -5310,64 +5342,157 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
             <div className="text-right text-xs text-gray-400 font-bold">Page 1 of 2</div>
           </div>
 
-          {/* Patient Info Box */}
-          <div className="border border-gray-800 p-4 mb-6 grid grid-cols-2 gap-x-8 gap-y-2 text-sm break-inside-avoid">
-            <div className="flex justify-between border-b border-gray-100 pb-1"><span className="font-bold">Patient Name</span> <span className="uppercase">{rec.patient_name}</span></div>
-            <div className="flex justify-between border-b border-gray-100 pb-1"><span className="font-bold">Patient UHID</span> <span className="font-mono">{rec.patient_uhid || '—'}</span></div>
-            <div className="flex justify-between border-b border-gray-100 pb-1"><span className="font-bold">Admission Date</span> <span>{rec.admission_date ? format(new Date(rec.admission_date), 'd/M/yyyy') : '—'}</span></div>
-            <div className="flex justify-between border-b border-gray-100 pb-1"><span className="font-bold">Discharge Date</span> <span>{format(new Date(rec.created_at || Date.now()), 'd/M/yyyy')}</span></div>
-            <div className="flex justify-between border-b border-gray-100 pb-1"><span className="font-bold">Encounter ID</span> <span>{rec.admission_ipd_no || '—'}</span></div>
-            <div className="flex justify-between border-b border-gray-100 pb-1"><span className="font-bold">Status</span> <span className="font-bold">{rec.condition_at_discharge || 'Stable'}</span></div>
+          {/* Patient & meta */}
+          <div className="border border-gray-800 p-3 mb-4 grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs break-inside-avoid">
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Patient</span> <span className="uppercase text-right">{rec.patient_name}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">UHID</span> <span className="font-mono">{rec.patient_uhid || '—'}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">ABHA / Insurance</span> <span className="text-right text-[10px]">{[rec.abha_id, rec.insurance_provider, rec.policy_number].filter(Boolean).join(' · ') || '—'}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">IPD / Ward / Bed</span> <span className="text-right">{rec.admission_ipd_no || '—'} / {adm.ward_name || '—'} / {adm.bed_code || '—'}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Department</span> <span>{adm.department || '—'}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Discharge type</span> <span className="font-bold uppercase">{(rec.discharge_type || 'routine').replace(/_/g, ' ')}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Admission</span> <span>{rec.admission_date ? format(new Date(rec.admission_date), 'd/M/yyyy') : '—'}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Discharge</span> <span>{fmtDischargeWhen()}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Treating consultant</span> <span className="text-right">{rec.treating_consultant || adm.assigned_doctor_name || '—'}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Reg. no. / RMO</span> <span className="text-right text-[10px]">{[rec.consultant_registration_no, rec.rmo_signed_by].filter(Boolean).join(' · ') || '—'}</span></div>
+            <div className="col-span-2 flex justify-between border-b border-gray-200 py-0.5"><span className="font-bold">Condition at discharge</span> <span className="font-bold text-right">{rec.condition_at_discharge || '—'}</span></div>
           </div>
 
-          {/* Clinical Sections */}
-          <div className="space-y-6 text-sm flex-1">
+          {(vitals.bp || vitals.pulse || vitals.spo2 || vitals.temp || vitals.weight || vitals.rbs) && (
+            <div className="mb-4 grid grid-cols-3 sm:grid-cols-6 gap-2 text-[11px] border border-gray-200 rounded-lg p-2 break-inside-avoid">
+              {[{ k: 'bp', l: 'BP' }, { k: 'pulse', l: 'Pulse' }, { k: 'spo2', l: 'SpO₂' }, { k: 'temp', l: 'Temp' }, { k: 'weight', l: 'Wt' }, { k: 'rbs', l: 'RBS' }].map(({ k, l }) => (
+                vitals[k] ? (
+                  <div key={k} className="text-center border border-gray-100 rounded px-1 py-1 bg-gray-50"><span className="font-black text-gray-500 block">{l}</span>{vitals[k]}</div>
+                ) : null
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-4 text-sm flex-1">
             {clinicalSections.map((sec, i) => (
-              <div key={i} className="flex flex-col gap-1">
-                <h3 className="font-black uppercase tracking-tight text-gray-800 underline decoration-gray-200 underline-offset-2">{sec.label} :</h3>
-                <div className="whitespace-pre-wrap break-words pl-2 border-l-2 border-gray-50 leading-relaxed text-gray-700">{sec.val}</div>
+              <div key={i} className="flex flex-col gap-0.5">
+                <h3 className="font-black uppercase tracking-tight text-gray-800 text-xs underline decoration-gray-200">{sec.label} :</h3>
+                <div className="whitespace-pre-wrap break-words pl-2 border-l-2 border-emerald-100 leading-relaxed text-gray-700 text-xs">{sec.val}</div>
               </div>
             ))}
 
-            {/* Advice on Discharge */}
-            <div className="mt-8 pt-6 border-t border-gray-100">
-               <h2 className="text-center font-black text-xl uppercase tracking-[0.2em] mb-4 italic">Advice on Discharge</h2>
-               
-               <div className="space-y-4">
-                 <div className="flex flex-col gap-1">
-                   <h3 className="font-black uppercase tracking-tight text-gray-800 text-sm">Discharge Medication :</h3>
-                   <div className="whitespace-pre-wrap break-words pl-4 font-mono text-sm bg-gray-50/50 p-3 rounded-lg border border-gray-100">{rec.medications_on_discharge || 'As per prescription.'}</div>
-                 </div>
-                 
-                 <div className="grid grid-cols-2 gap-6 mt-4 break-inside-avoid">
-                   <div className="flex flex-col gap-1">
-                     <h3 className="font-black uppercase tracking-tight text-gray-800 text-sm">Diet & Activity :</h3>
-                     <div className="text-sm text-gray-600 italic whitespace-pre-wrap break-words">
-                       {rec.diet_advice && <p>• {rec.diet_advice}</p>}
-                       {rec.activity_advice && <p>• {rec.activity_advice}</p>}
-                     </div>
-                   </div>
-                   <div className="flex flex-col gap-1">
-                     <h3 className="font-black uppercase tracking-tight text-gray-800 text-sm">Follow-up & Warning Signs :</h3>
-                     <div className="text-sm text-gray-600 italic whitespace-pre-wrap break-words">
-                       {rec.follow_up_advice && <p>• {rec.follow_up_advice}</p>}
-                       {rec.warning_signs && <p className="text-red-700 font-bold">!! {rec.warning_signs}</p>}
-                     </div>
-                   </div>
-                 </div>
-               </div>
+            {showOperative && (
+              <div className="border border-gray-200 rounded-lg p-3 break-inside-avoid">
+                <h3 className="font-black uppercase text-xs mb-2">Operative details</h3>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                  {rec.surgery_date && <div><span className="font-bold">Date:</span> {format(new Date(`${rec.surgery_date}T12:00:00`), 'd/M/yyyy')}</div>}
+                  {rec.surgeon_name && <div><span className="font-bold">Surgeon:</span> {rec.surgeon_name}</div>}
+                  {rec.anaesthetist_name && <div><span className="font-bold">Anaesthetist:</span> {rec.anaesthetist_name}</div>}
+                  {rec.anaesthesia_type && <div><span className="font-bold">Anaesthesia:</span> {rec.anaesthesia_type}</div>}
+                </div>
+                {(rec.operative_findings || rec.intra_op_complications) && (
+                  <div className="mt-2 space-y-1 text-xs whitespace-pre-wrap">
+                    {rec.operative_findings && <p><span className="font-bold">Findings:</span> {rec.operative_findings}</p>}
+                    {rec.intra_op_complications && <p><span className="font-bold">Intra-op complications:</span> {rec.intra_op_complications}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(labRows.length > 0 || imgRows.length > 0) && (
+              <div className="space-y-3 break-inside-avoid">
+                <h3 className="font-black uppercase text-xs">Investigations</h3>
+                {labRows.length > 0 && (
+                  <table className="w-full border-collapse border border-gray-800 text-[11px]">
+                    <thead><tr className="bg-gray-100"><th className="border border-gray-800 px-2 py-1 text-left">Lab test</th><th className="border border-gray-800 px-2 py-1">Value</th><th className="border border-gray-800 px-2 py-1">Ref.</th><th className="border border-gray-800 px-2 py-1">Date</th></tr></thead>
+                    <tbody>
+                      {labRows.map((r, i) => (
+                        <tr key={i}><td className="border border-gray-800 px-2 py-1">{r.test_name}</td><td className="border border-gray-800 px-2 py-1">{r.value || '—'}</td><td className="border border-gray-800 px-2 py-1">{r.reference_range || '—'}</td><td className="border border-gray-800 px-2 py-1">{r.test_date ? format(new Date(`${r.test_date}T12:00:00`), 'd/M/yy') : '—'}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {imgRows.length > 0 && (
+                  <table className="w-full border-collapse border border-gray-800 text-[11px]">
+                    <thead><tr className="bg-gray-100"><th className="border border-gray-800 px-2 py-1 text-left">Imaging</th><th className="border border-gray-800 px-2 py-1">Summary</th><th className="border border-gray-800 px-2 py-1">Date</th></tr></thead>
+                    <tbody>
+                      {imgRows.map((r, i) => (
+                        <tr key={i}><td className="border border-gray-800 px-2 py-1">{r.test_name}</td><td className="border border-gray-800 px-2 py-1">{r.value || '—'}</td><td className="border border-gray-800 px-2 py-1">{r.test_date ? format(new Date(`${r.test_date}T12:00:00`), 'd/M/yy') : '—'}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <h2 className="text-center font-black text-lg uppercase tracking-[0.15em] mb-3 italic">Advice on Discharge</h2>
+              <div className="space-y-3">
+                <div>
+                  <h3 className="font-black uppercase text-xs mb-1">Discharge medication</h3>
+                  {medRows.length > 0 ? (
+                    <table className="w-full border-collapse border border-gray-800 text-[10px]">
+                      <thead><tr className="bg-gray-100"><th className="border border-gray-800 px-1 py-1 text-left">Drug</th><th className="border border-gray-800 px-1 py-1">Dose</th><th className="border border-gray-800 px-1 py-1">Route</th><th className="border border-gray-800 px-1 py-1">Freq</th><th className="border border-gray-800 px-1 py-1">Dur</th><th className="border border-gray-800 px-1 py-1">Notes</th></tr></thead>
+                      <tbody>
+                        {medRows.map((r, i) => {
+                          const manual = r.rx_meta && r.rx_meta.type === 'manual'
+                          return (
+                            <tr key={i}>
+                              <td className="border border-gray-800 px-1 py-0.5">{r.drug_name}{manual ? <span className="text-amber-800 font-bold"> [not in pharmacy]</span> : null}</td>
+                              <td className="border border-gray-800 px-1 py-0.5">{r.dose || '—'}</td>
+                              <td className="border border-gray-800 px-1 py-0.5">{r.route || '—'}</td>
+                              <td className="border border-gray-800 px-1 py-0.5">{r.frequency || '—'}</td>
+                              <td className="border border-gray-800 px-1 py-0.5">{r.duration || '—'}</td>
+                              <td className="border border-gray-800 px-1 py-0.5">{r.instructions || '—'}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="whitespace-pre-wrap font-mono text-xs bg-gray-50 p-2 rounded border border-gray-100">{rec.medications_on_discharge || 'As per prescription.'}</div>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-4 text-xs break-inside-avoid">
+                  <div>
+                    <h3 className="font-black uppercase text-xs mb-1">Diet & activity</h3>
+                    <div className="text-gray-700 whitespace-pre-wrap">{rec.diet_advice || rec.activity_advice ? <>{rec.diet_advice && <p>{rec.diet_advice}</p>}{rec.activity_advice && <p>{rec.activity_advice}</p>}</> : <span className="text-gray-400">—</span>}</div>
+                    {rec.wound_care_instructions && <p className="mt-1"><span className="font-bold">Wound care:</span> {rec.wound_care_instructions}</p>}
+                    {rec.stitch_removal_date && <p className="mt-1"><span className="font-bold">Stitch removal:</span> {format(new Date(`${rec.stitch_removal_date}T12:00:00`), 'd/M/yyyy')}</p>}
+                  </div>
+                  <div>
+                    <h3 className="font-black uppercase text-xs mb-1">Follow-up & warnings</h3>
+                    <div className="text-gray-700 whitespace-pre-wrap">{rec.follow_up_advice || rec.warning_signs ? <>{rec.follow_up_advice && <p>{rec.follow_up_advice}</p>}{rec.warning_signs && <p className="text-red-700 font-bold">{rec.warning_signs}</p>}</> : <span className="text-gray-400">—</span>}</div>
+                    {(rec.next_follow_up_date || rec.follow_up_doctor) && (
+                      <p className="mt-1 text-[11px]"><span className="font-bold">Next visit:</span> {rec.next_follow_up_date ? format(new Date(`${rec.next_follow_up_date}T12:00:00`), 'd/M/yyyy') : '—'} {rec.follow_up_doctor ? `· ${rec.follow_up_doctor}` : ''} {rec.follow_up_department ? `(${rec.follow_up_department})` : ''}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Page Footer / Signatures */}
-          <div className="mt-auto pt-8 flex justify-between items-end border-t border-gray-100 break-inside-avoid">
-            <div className="text-[11px] text-gray-400 font-medium">
-               <p>Regd. Office: {address}</p>
-               <p>Contact: {phone} | Email: {email}</p>
+          {rec.discharge_type === 'death' && (rec.cause_of_death || rec.time_of_death) && (
+            <div className="mt-6 border-2 border-red-300 rounded-lg p-3 break-inside-avoid page-break-inside-avoid" style={{ pageBreakInside: 'avoid' }}>
+              <h3 className="font-black uppercase text-red-800 text-sm mb-2">Death summary</h3>
+              <div className="text-xs space-y-1 whitespace-pre-wrap">
+                {rec.cause_of_death && <p><span className="font-bold">Cause:</span> {rec.cause_of_death}</p>}
+                {rec.time_of_death && <p><span className="font-bold">Time:</span> {format(new Date(rec.time_of_death), 'd/M/yyyy HH:mm')}</p>}
+                {rec.notified_to && <p><span className="font-bold">Notified to:</span> {rec.notified_to}</p>}
+                {rec.autopsy_required && <p className="font-bold text-red-700">Autopsy required: Yes</p>}
+              </div>
             </div>
-            <div className="text-center w-56">
-              <div className="h-12 flex items-center justify-center italic text-gray-300">Signature</div>
-              <div className="border-t border-gray-800 pt-1 font-black text-xs uppercase tracking-wider">Consultant Incharge</div>
+          )}
+
+          <div className="mt-auto pt-6 flex justify-between items-end border-t border-gray-200 break-inside-avoid gap-8">
+            <div className="text-[10px] text-gray-400 font-medium flex-1">
+              <p>Regd. Office: {address}</p>
+              <p>Contact: {phone} | Email: {email}</p>
+              {(rec.patient_education_given || rec.attendant_counselled_by) && (
+                <p className="mt-1">Patient education: {rec.patient_education_given ? 'Yes' : 'No'}{rec.attendant_counselled_by ? ` · Counselled by: ${rec.attendant_counselled_by}` : ''}</p>
+              )}
+            </div>
+            <div className="text-center w-44">
+              <div className="h-10 flex items-center justify-center italic text-gray-300 text-[10px]">Signature</div>
+              <div className="border-t border-gray-800 pt-1 font-black text-[10px] uppercase tracking-wider">{rec.treating_consultant || 'Consultant'}</div>
+            </div>
+            <div className="text-center w-44">
+              <div className="h-10 flex items-center justify-center italic text-gray-300 text-[10px]">Signature</div>
+              <div className="border-t border-gray-800 pt-1 font-black text-[10px] uppercase tracking-wider">{rec.rmo_signed_by || 'RMO / Medical Officer'}</div>
             </div>
           </div>
         </div>
@@ -5389,17 +5514,17 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
             {/* Left Col */}
             <div className="space-y-1">
               <div className="flex"><span className="w-24 font-bold">Patient Name</span><span className="font-medium">: {rec.patient_name}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Guardian Name</span><span className="font-medium">: {rec.admission?.guardian_name || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Address</span><span className="font-medium">: {rec.admission?.address || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Mobile No</span><span className="font-medium">: {rec.admission?.mobile_number || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Consultant</span><span className="font-medium">: {rec.admission?.assigned_doctor_name || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Guardian Name</span><span className="font-medium">: {adm.guardian_name || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Address</span><span className="font-medium">: {adm.address || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Mobile No</span><span className="font-medium">: {adm.mobile_number || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Consultant</span><span className="font-medium">: {rec.treating_consultant || adm.assigned_doctor_name || '—'}</span></div>
             </div>
             {/* Right Col */}
             <div className="space-y-1">
-              <div className="flex"><span className="w-28 font-bold">Bill No</span><span className="font-medium">: BILL-{rec.id.slice(0,6).toUpperCase()}</span></div>
+              <div className="flex"><span className="w-28 font-bold">Bill No</span><span className="font-medium">: BILL-{String(rec?.id || 'PREVIEW').slice(0,6).toUpperCase()}</span></div>
               <div className="flex"><span className="w-28 font-bold">UHID No</span><span className="font-medium">: {rec.patient_uhid}</span></div>
               <div className="flex"><span className="w-28 font-bold">IPD No</span><span className="font-medium">: {rec.admission_ipd_no}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Room / Bed</span><span className="font-medium">: {rec.admission?.room_name} / {rec.admission?.bed_code}</span></div>
+              <div className="flex"><span className="w-28 font-bold">Room / Bed</span><span className="font-medium">: {adm.room_name || '—'} / {adm.bed_code || '—'}</span></div>
               <div className="flex"><span className="w-28 font-bold">Bill Date</span><span className="font-medium">: {now.split(' ')[0]}</span></div>
               <div className="flex"><span className="w-28 font-bold">Stay Period</span><span className="font-medium">: {rec.admission_date ? format(new Date(rec.admission_date), 'd/M/yy') : '—'} to {format(new Date(rec.created_at || Date.now()), 'd/M/yy')}</span></div>
             </div>
@@ -5475,7 +5600,9 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
           </div>
         </div>
       </div>
-      
+        </div>
+      </div>
+
       <style>{`
         @media print {
           @page { size: A4 portrait; margin: 8mm; }
@@ -5490,7 +5617,7 @@ function PrintDischargeSummary({ rec, ledger, onClose }) {
             margin: 0 !important;
             zoom: 1;
           }
-          #__discharge_doc_root > div:last-child { margin: 0 !important; box-shadow: none !important; border: none !important; }
+          #__discharge_doc_root > div:last-child { margin: 0 !important; box-shadow: none !important; border: none !important; max-height: none !important; overflow: visible !important; }
           .print\\:hidden, .print\\:hidden * { display: none !important; visibility: hidden !important; }
         }
       `}</style>
@@ -5506,6 +5633,8 @@ function DischargeSection() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const PAGE_SIZE = 10
+  const [editSummaryAdmission, setEditSummaryAdmission] = useState(null)
+  const [loadingEditAdmission, setLoadingEditAdmission] = useState(false)
 
   useEffect(() => {
     setPage(0)
@@ -5537,6 +5666,22 @@ function DischargeSection() {
     setPrintData({ rec, ledger });
   }
 
+  async function openDischargeSummaryEdit(rec) {
+    if (!rec?.admission) {
+      toast.error('Missing admission for this record')
+      return
+    }
+    setLoadingEditAdmission(true)
+    try {
+      const { data } = await api.get(`/ipd-admissions/${rec.admission}/`)
+      setEditSummaryAdmission(data)
+    } catch {
+      toast.error('Could not load admission to edit summary')
+    } finally {
+      setLoadingEditAdmission(false)
+    }
+  }
+
   const filteredHistory = records.filter(r => {
     const q = search.toLowerCase()
     return !q || (r.patient_name || '').toLowerCase().includes(q) || (r.patient_uhid || '').toLowerCase().includes(q)
@@ -5548,6 +5693,13 @@ function DischargeSection() {
 
   return (
     <div className="space-y-4">
+      {editSummaryAdmission && (
+        <AdmissionLedgerModal
+          admission={editSummaryAdmission}
+          onClose={() => setEditSummaryAdmission(null)}
+          autoOpenDischargeEdit
+        />
+      )}
       {printData && <PrintDischargeSummary rec={printData.rec} ledger={printData.ledger} onClose={() => setPrintData(null)} />}
       
       {/* ── Discharge History ── */}
@@ -5591,7 +5743,14 @@ function DischargeSection() {
                     Balance: ₹{Number(r.outstanding_balance).toLocaleString()}
                   </span>
                 </div>
-                <button onClick={() => handlePrintClick(r)}
+                <button
+                  type="button"
+                  onClick={() => openDischargeSummaryEdit(r)}
+                  disabled={loadingEditAdmission}
+                  className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg font-bold flex items-center gap-2 transition-colors disabled:opacity-50">
+                  <Edit2 size={15} /> Edit summary
+                </button>
+                <button type="button" onClick={() => handlePrintClick(r)}
                   className="text-xs bg-gray-100 hover:bg-blue-100 text-gray-700 hover:text-blue-700 px-3 py-1.5 rounded-lg font-bold flex items-center gap-2 transition-colors">
                   <Printer size={15} /> View Details & Slip
                 </button>
@@ -8670,41 +8829,115 @@ function PrintMiniReceipt({ admission, data, type, onClose }) {
 }
 
 // ─── IPD Ledger Modal ────────────────────────────────────────────────────────
-function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDischargeInitiated }) {
+function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDischargeInitiated, autoOpenDischargeEdit = false }) {
   const [ledger, setLedger]         = useState(null)
   const [loading, setLoading]       = useState(true)
-  const [tab, setTab]               = useState('advance')
+  const [mode, setMode]             = useState('charge') // 'charge' | 'receive' | 'discount'
   const [submitting, setSubmitting] = useState(false)
   const [showPrint, setShowPrint]   = useState(false)
   const [receipt, setReceipt]       = useState(null)
 
   // Discharge State
   const [journey, setJourney] = useState(null) // { admission, step: 'form'|'billing' }
+  const emptyVitals = () => ({ bp: '', pulse: '', spo2: '', temp: '', weight: '', rbs: '' })
   const [summary, setSummary] = useState({
     summary_notes: '', treatment_given: '', condition_at_discharge: 'Stable',
-    medications_on_discharge: '', follow_up_advice: ''
+    medications_on_discharge: '', follow_up_advice: '',
+    reason_for_admission: '', diagnosis: '', allergies: '', procedure_surgery: '',
+    medical_history: '', physical_examination: '', investigations: '', course_in_hospital: '',
+    diet_advice: '', activity_advice: '', warning_signs: '',
+    chief_complaints: '', co_morbidities: '', family_history: '', personal_history: '',
+    complications_during_stay: '', blood_transfusion_details: '', implants_used: '',
+    indwelling_devices_on_discharge: '', vaccination_given: '', wound_care_instructions: '',
+    stitch_removal_date: '',
+    vitals_at_discharge: emptyVitals(),
+    surgery_date: '', surgeon_name: '', assistant_name: '', anaesthetist_name: '', anaesthesia_type: '',
+    operative_findings: '', intra_op_complications: '',
+    discharge_date: '', discharge_time: '',
+    discharge_type: 'routine', discharge_status: 'improved', mode_of_admission: 'opd',
+    referred_to_facility: '', referral_reason: '',
+    treating_consultant: '', consultant_registration_no: '', rmo_signed_by: '',
+    next_follow_up_date: '', follow_up_doctor: '', follow_up_department: '',
+    cause_of_death: '', time_of_death: '', notified_to: '', autopsy_required: false,
+    abha_id: '', insurance_provider: '', tpa_name: '', policy_number: '', claim_number: '',
+    patient_education_given: false, attendant_counselled_by: '',
+    investigation_rows: [],
   })
+  /** Doctor-style discharge meds (pharmacy search + manual); synced to API as medication_rows */
+  const [dischargeRxItems, setDischargeRxItems] = useState([])
   const [billing, setBilling] = useState(null)
   const [draftSaving, setDraftSaving] = useState(false)
+  const [dischargeHydrated, setDischargeHydrated] = useState(false)
   const [settleMode, setSettleMode] = useState('cash')
   const [settleRef, setSettleRef] = useState('')
   const [settlePrint, setSettlePrint] = useState(true)
   const [settleSubmitting, setSettleSubmitting] = useState(false)
+  const autoOpenedDischargeEditRef = useRef(false)
+  const [dischargePreviewData, setDischargePreviewData] = useState(null)
+  const dischargeScrollRootRef = useRef(null)
+  const [activeDischargeSection, setActiveDischargeSection] = useState('')
 
-  // Advance form state
+  const dischargeSectionNavItems = useMemo(() => {
+    const head = [
+      { id: 'discharge-section-metadata', Icon: ClipboardList, label: 'Discharge metadata & identifiers' },
+      { id: 'discharge-section-vitals', Icon: HeartPulse, label: 'Vitals at discharge' },
+    ]
+    const death =
+      summary.discharge_type === 'death'
+        ? [{ id: 'discharge-section-death', Icon: Skull, label: 'Death summary' }]
+        : []
+    const tail = [
+      { id: 'discharge-section-narrative', Icon: ScrollText, label: 'Clinical narrative' },
+      { id: 'discharge-section-operative', Icon: Syringe, label: 'Operative / procedure' },
+      { id: 'discharge-section-investigations', Icon: FlaskConical, label: 'Investigations (structured)' },
+      { id: 'discharge-section-course', Icon: Hospital, label: 'Hospital course & complications' },
+      { id: 'discharge-section-prescriptions', Icon: Pill, label: 'Medications on discharge' },
+      { id: 'discharge-section-advice', Icon: MessageSquare, label: 'Advice on discharge' },
+    ]
+    return [...head, ...death, ...tail]
+  }, [summary.discharge_type])
+
+  // Receive Money form state (renamed from Capture Advance)
   const [advAmount, setAdvAmount] = useState('')
   const [advMode, setAdvMode]     = useState('cash')
   const [advRef, setAdvRef]       = useState('')
   const [advPrint, setAdvPrint]   = useState(true)
 
-  // Service charge form state
-  const [chgDesc, setChgDesc]     = useState('')
-  const [chgAmount, setChgAmount] = useState('')
-  const [chgMode, setChgMode]     = useState('credit')
-  const [chgPrint, setChgPrint]   = useState(false)
-  const [chgIsDiscount, setChgIsDiscount] = useState(false)
+  // Add Charge form state
+  const [chgDesc, setChgDesc]         = useState('')
+  const [chgQty, setChgQty]           = useState('1')
+  const [chgUnitPrice, setChgUnitPrice] = useState('')
+  const [chgStatus, setChgStatus]     = useState('due') // 'paid' | 'due'
+  const [chgPaidMode, setChgPaidMode] = useState('cash')
+  const [chgPrint, setChgPrint]       = useState(false)
   const [selectedExistingCharge, setSelectedExistingCharge] = useState('')
+
+  // Apply Discount form state
+  const [discReason, setDiscReason] = useState('')
+  const [discAmount, setDiscAmount] = useState('')
+
   const [expandedChargeRows, setExpandedChargeRows] = useState({})
+
+  const dsInp = 'w-full bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-2 py-1.5 text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500/15 focus:border-emerald-500 outline-none'
+  const dsLbl = 'text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5 block'
+  const setVital = (k, v) => setSummary(s => ({
+    ...s,
+    vitals_at_discharge: { ...emptyVitals(), ...(s.vitals_at_discharge || {}), [k]: v },
+  }))
+  const addInvRow = () => setSummary(s => ({
+    ...s,
+    investigation_rows: [...(s.investigation_rows || []), { category: 'lab', test_name: '', value: '', reference_range: '', test_date: '' }],
+  }))
+  const updateInvRow = (idx, key, val) => setSummary(s => {
+    const rows = [...(s.investigation_rows || [])]
+    if (!rows[idx]) return s
+    rows[idx] = { ...rows[idx], [key]: val }
+    return { ...s, investigation_rows: rows }
+  })
+  const removeInvRow = (idx) => setSummary(s => ({
+    ...s,
+    investigation_rows: (s.investigation_rows || []).filter((_, i) => i !== idx),
+  }))
 
   useEffect(() => { fetchLedger() }, [admission.id])
 
@@ -8717,17 +8950,58 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
   useEffect(() => {
     if (!journey || journey.step !== 'form') return
-    const hasSummaryInput = [
-      summary.summary_notes,
-      summary.treatment_given,
-      summary.condition_at_discharge,
-      summary.medications_on_discharge,
-      summary.follow_up_advice
-    ].some(v => String(v || '').trim().length > 0)
-    if (!hasSummaryInput) return
-    const timer = setTimeout(() => { saveSummaryDraft() }, 1200)
+    if (!dischargeHydrated) return
+    const timer = setTimeout(() => { saveSummaryDraft() }, 900)
     return () => clearTimeout(timer)
-  }, [journey, summary])
+  }, [journey, summary, dischargeRxItems, dischargeHydrated])
+
+  useEffect(() => {
+    if (!journey || journey.step !== 'form') {
+      setActiveDischargeSection('')
+      return
+    }
+    const root = dischargeScrollRootRef.current
+    if (!root) return
+
+    const ids = dischargeSectionNavItems.map((i) => i.id)
+    let raf = 0
+    const onObserve = (entries) => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const visible = entries.filter((e) => e.isIntersecting && e.target?.id)
+        if (!visible.length) return
+        const rootRect = root.getBoundingClientRect()
+        const anchorY = rootRect.top + Math.min(100, rootRect.height * 0.2)
+        let bestId = ''
+        let bestDist = Infinity
+        visible.forEach((e) => {
+          const t = e.target.getBoundingClientRect().top
+          const d = Math.abs(t - anchorY)
+          if (d < bestDist) {
+            bestDist = d
+            bestId = e.target.id
+          }
+        })
+        if (bestId) setActiveDischargeSection(bestId)
+      })
+    }
+
+    const observer = new IntersectionObserver(onObserve, {
+      root,
+      threshold: [0, 0.02, 0.06, 0.12, 0.25, 0.5, 1],
+      rootMargin: '-10% 0px -56% 0px',
+    })
+
+    ids.forEach((id) => {
+      const el = root.querySelector(`#${CSS.escape(id)}`)
+      if (el) observer.observe(el)
+    })
+
+    return () => {
+      cancelAnimationFrame(raf)
+      observer.disconnect()
+    }
+  }, [journey?.step, journey?.admission?.id, dischargeSectionNavItems])
 
   async function fetchLedger() {
     setLoading(true)
@@ -8739,6 +9013,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   }
 
   function handleInitiateDischarge() {
+    setDischargeHydrated(false)
     setJourney({ admission, step: 'form' })
     setSummary({
       summary_notes: admission.admission_notes || '',
@@ -8756,16 +9031,39 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       course_in_hospital: '',
       diet_advice: '',
       activity_advice: '',
-      warning_signs: ''
+      warning_signs: '',
+      chief_complaints: '', co_morbidities: '', family_history: '', personal_history: '',
+      complications_during_stay: '', blood_transfusion_details: '', implants_used: '',
+      indwelling_devices_on_discharge: '', vaccination_given: '', wound_care_instructions: '',
+      stitch_removal_date: '',
+      vitals_at_discharge: emptyVitals(),
+      surgery_date: '', surgeon_name: '', assistant_name: '', anaesthetist_name: '', anaesthesia_type: '',
+      operative_findings: '', intra_op_complications: '',
+      discharge_date: '', discharge_time: '',
+      discharge_type: 'routine', discharge_status: 'improved',
+      mode_of_admission: (admission.opd_visit_id || admission.opd_visit) ? 'opd' : 'emergency',
+      referred_to_facility: '', referral_reason: '',
+      treating_consultant: (admission.assigned_doctor_name || admission.doctor_name || '').trim(),
+      consultant_registration_no: '', rmo_signed_by: '',
+      next_follow_up_date: '', follow_up_doctor: '', follow_up_department: admission.department || '',
+      cause_of_death: '', time_of_death: '', notified_to: '', autopsy_required: false,
+      abha_id: '', insurance_provider: '', tpa_name: '', policy_number: '', claim_number: '',
+      patient_education_given: false, attendant_counselled_by: '',
+      investigation_rows: [],
     })
-    loadDischargeDraft(admission.id)
+    setDischargeRxItems([])
+    loadDischargeDraft(admission.id).finally(() => setDischargeHydrated(true))
   }
 
   async function loadDischargeDraft(admissionId) {
     try {
-      const { data } = await api.get(`/summaries/?admission_id=${admissionId}`)
-      const existing = Array.isArray(data) ? data[0] : data?.results?.[0]
+      const { data } = await api.get(`/summaries/?admission_id=${admissionId}&limit=20`)
+      const list = Array.isArray(data) ? data : (data?.results ?? data?.data ?? [])
+      const existing = list[0]
       if (!existing) return
+      const v = existing.vitals_at_discharge && typeof existing.vitals_at_discharge === 'object'
+        ? { ...emptyVitals(), ...existing.vitals_at_discharge }
+        : emptyVitals()
       setSummary({
         summary_notes: existing.summary_notes || admission.admission_notes || '',
         treatment_given: existing.treatment_given || '',
@@ -8782,20 +9080,71 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         course_in_hospital: existing.course_in_hospital || '',
         diet_advice: existing.diet_advice || '',
         activity_advice: existing.activity_advice || '',
-        warning_signs: existing.warning_signs || ''
+        warning_signs: existing.warning_signs || '',
+        chief_complaints: existing.chief_complaints || '',
+        co_morbidities: existing.co_morbidities || '',
+        family_history: existing.family_history || '',
+        personal_history: existing.personal_history || '',
+        complications_during_stay: existing.complications_during_stay || '',
+        blood_transfusion_details: existing.blood_transfusion_details || '',
+        implants_used: existing.implants_used || '',
+        indwelling_devices_on_discharge: existing.indwelling_devices_on_discharge || '',
+        vaccination_given: existing.vaccination_given || '',
+        wound_care_instructions: existing.wound_care_instructions || '',
+        stitch_removal_date: existing.stitch_removal_date || '',
+        vitals_at_discharge: v,
+        surgery_date: existing.surgery_date || '',
+        surgeon_name: existing.surgeon_name || '',
+        assistant_name: existing.assistant_name || '',
+        anaesthetist_name: existing.anaesthetist_name || '',
+        anaesthesia_type: existing.anaesthesia_type || '',
+        operative_findings: existing.operative_findings || '',
+        intra_op_complications: existing.intra_op_complications || '',
+        discharge_date: existing.discharge_date || '',
+        discharge_time: existing.discharge_time || '',
+        discharge_type: existing.discharge_type || 'routine',
+        discharge_status: existing.discharge_status || 'improved',
+        mode_of_admission: existing.mode_of_admission || ((admission.opd_visit_id || admission.opd_visit) ? 'opd' : 'emergency'),
+        referred_to_facility: existing.referred_to_facility || '',
+        referral_reason: existing.referral_reason || '',
+        treating_consultant: existing.treating_consultant || (admission.assigned_doctor_name || admission.doctor_name || '').trim(),
+        consultant_registration_no: existing.consultant_registration_no || '',
+        rmo_signed_by: existing.rmo_signed_by || '',
+        next_follow_up_date: existing.next_follow_up_date || '',
+        follow_up_doctor: existing.follow_up_doctor || '',
+        follow_up_department: existing.follow_up_department || admission.department || '',
+        cause_of_death: existing.cause_of_death || '',
+        time_of_death: existing.time_of_death || '',
+        notified_to: existing.notified_to || '',
+        autopsy_required: !!existing.autopsy_required,
+        abha_id: existing.abha_id || '',
+        insurance_provider: existing.insurance_provider || '',
+        tpa_name: existing.tpa_name || '',
+        policy_number: existing.policy_number || '',
+        claim_number: existing.claim_number || '',
+        patient_education_given: !!existing.patient_education_given,
+        attendant_counselled_by: existing.attendant_counselled_by || '',
+        investigation_rows: Array.isArray(existing.investigation_rows) ? existing.investigation_rows.map(r => ({
+          category: r.category || 'lab',
+          test_name: r.test_name || '', value: r.value || '',
+          reference_range: r.reference_range || '', test_date: r.test_date || '',
+        })) : [],
       })
+      setDischargeRxItems(medicationRowsToRxItems(existing.medication_rows))
     } catch {
       // Non-blocking: discharge flow can still continue without draft restore.
     }
   }
 
   async function saveSummaryDraft() {
-    if (!journey?.admission?.id) return true
+    const admId = journey?.admission?.id || admission?.id
+    if (!admId) return true
     setDraftSaving(true)
     try {
       await api.post('/summaries/', {
-        admission: journey.admission.id,
-        ...summary
+        admission: admId,
+        ...summary,
+        medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
       })
       return true
     } catch {
@@ -8806,7 +9155,26 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     }
   }
 
+  function openDischargeEditorForDischarged() {
+    setDischargeHydrated(false)
+    setJourney({ admission, step: 'form' })
+    setDischargeRxItems([])
+    loadDischargeDraft(admission.id).finally(() => setDischargeHydrated(true))
+  }
+
+  useEffect(() => {
+    if (!autoOpenDischargeEdit || loading || !ledger) return
+    if (String(admission?.status || '').toLowerCase() !== 'discharged') return
+    if (autoOpenedDischargeEditRef.current) return
+    autoOpenedDischargeEditRef.current = true
+    setDischargeHydrated(false)
+    setJourney({ admission, step: 'form' })
+    setDischargeRxItems([])
+    loadDischargeDraft(admission.id).finally(() => setDischargeHydrated(true))
+  }, [autoOpenDischargeEdit, loading, ledger, admission?.id, admission?.status])
+
   async function goToBilling() {
+    if (String(journey?.admission?.status || '').toLowerCase() === 'discharged') return
     setSubmitting(true)
     try {
       const saved = await saveSummaryDraft()
@@ -8815,6 +9183,51 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       setJourney(j => ({ ...j, step: 'billing' }))
     } catch { toast.error('Failed to fetch billing summary') }
     finally { setSubmitting(false) }
+  }
+
+  async function handleExitDischargeJourney() {
+    await saveSummaryDraft()
+    setJourney(null)
+  }
+
+  async function handleLedgerModalClose() {
+    if (journey?.step === 'form' || journey?.step === 'billing') {
+      await saveSummaryDraft()
+    }
+    setJourney(null)
+    onClose()
+  }
+
+  async function saveDischargedSummaryExplicit() {
+    const ok = await saveSummaryDraft()
+    if (ok) toast.success('Discharge summary saved')
+  }
+
+  function buildDischargePreviewRecord() {
+    const nowIso = new Date().toISOString()
+    return {
+      ...summary,
+      id: summary?.id || `preview-${Date.now()}`,
+      admission: admission?.id,
+      patient_name: admission?.patient_name || '',
+      patient_uhid: admission?.patient_uhid || '',
+      admission_date: admission?.admission_date || '',
+      admission_ipd_no: admission?.ipd_no || '',
+      created_at: nowIso,
+      total_billed: billing?.total_billed ?? summary.total_billed ?? 0,
+      total_paid: billing?.total_paid ?? summary.total_paid ?? 0,
+      outstanding_balance: billing?.outstanding ?? summary.outstanding_balance ?? 0,
+      medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
+      investigation_rows: Array.isArray(summary.investigation_rows) ? summary.investigation_rows : [],
+    }
+  }
+
+  function openDischargePrintPreview() {
+    setDischargePreviewData({
+      rec: buildDischargePreviewRecord(),
+      ledger: ledger || null,
+      admission: journey?.admission || admission,
+    })
   }
 
   async function refreshBillingSummary(admissionId = journey?.admission?.id) {
@@ -8877,7 +9290,8 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         ...summary,
         total_billed: billing.total_billed,
         total_paid: billing.total_paid,
-        outstanding_balance: billing.outstanding
+        outstanding_balance: billing.outstanding,
+        medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
       }
       await api.post('/summaries/', payload)
       toast.success('Discharge finalized successfully!')
@@ -8905,7 +9319,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       const { data } = await api.post(`/ipd-admissions/${admission.id}/capture-advance/`, {
         amount: advAmount, payment_mode: advMode, reference: advRef
       })
-      toast.success(advMode === 'credit' ? 'Credit entry added' : 'Advance captured!')
+      toast.success('Payment captured')
       fetchLedger()
       if (advPrint) {
         setReceipt({
@@ -8915,42 +9329,69 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
             mode: advMode,
             invoice_no: data.invoice_no,
             slip_number: data?.payment?.slip_number || '',
-            description: advMode === 'credit' ? 'Advance (Credit / Due)' : 'Advance Payment'
+            description: 'Advance Payment'
           }
         })
       }
       setAdvAmount(''); setAdvRef('')
-    } catch { toast.error('Failed to capture advance') }
+    } catch { toast.error('Failed to save payment') }
     finally { setSubmitting(false) }
   }
 
+  const chgLineTotal = (() => {
+    const q = parseFloat(chgQty || 0)
+    const u = parseFloat(chgUnitPrice || 0)
+    if (!isFinite(q) || !isFinite(u)) return 0
+    return q * u
+  })()
+
   async function handleCharge(e) {
     e.preventDefault()
-    if (!chgDesc || !chgAmount) return
+    const total = chgLineTotal
+    if (!chgDesc.trim() || !total || total <= 0) {
+      toast.error('Description, qty and price are required')
+      return
+    }
+    const paymentMode = chgStatus === 'paid' ? chgPaidMode : 'credit'
     setSubmitting(true)
     try {
-      // If discount is toggled, ensure amount is negative
-      const finalAmount = chgIsDiscount ? -Math.abs(parseFloat(chgAmount)) : chgAmount
       const { data } = await api.post(`/ipd-admissions/${admission.id}/add-charge/`, {
-        description: chgDesc, amount: finalAmount, payment_mode: chgMode
+        description: chgDesc, amount: total, payment_mode: paymentMode,
       })
-      toast.success(chgMode === 'credit' ? 'Charge added' : 'Charge added & paid!')
+      toast.success(chgStatus === 'paid' ? 'Charge saved & paid' : 'Charge added to bill')
       fetchLedger()
-      if (chgPrint) setReceipt({ type: 'charge', data: { amount: finalAmount, mode: chgMode, invoice_no: data.invoice_no, slip_number: data?.payment?.slip_number || '', description: chgDesc } })
-      setChgDesc(''); setChgAmount(''); setChgMode('credit'); setChgIsDiscount(false); setSelectedExistingCharge('')
+      if (chgPrint) setReceipt({ type: 'charge', data: { amount: total, mode: paymentMode, invoice_no: data.invoice_no, slip_number: data?.payment?.slip_number || '', description: chgDesc } })
+      setChgDesc(''); setChgQty('1'); setChgUnitPrice(''); setChgStatus('due'); setChgPaidMode('cash'); setSelectedExistingCharge('')
     } catch { toast.error('Failed to add charge') }
     finally { setSubmitting(false) }
   }
 
-  function applyRoomRentDiscount() {
-    setTab('charge')
-    setChgDesc('Room Rent Discount')
-    setChgAmount('')
-    setChgIsDiscount(true)
-    setChgMode('credit')
-    setTimeout(() => document.getElementById('chg-amount-input')?.focus(), 80)
+  async function handleDiscount(e) {
+    e.preventDefault()
+    const amt = parseFloat(discAmount || 0)
+    if (!discReason.trim() || !amt || amt <= 0) {
+      toast.error('Reason and discount amount are required')
+      return
+    }
+    setSubmitting(true)
+    try {
+      await api.post(`/ipd-admissions/${admission.id}/add-charge/`, {
+        description: discReason, amount: -Math.abs(amt), payment_mode: 'credit',
+      })
+      toast.success('Discount applied')
+      fetchLedger()
+      setDiscReason(''); setDiscAmount('')
+    } catch { toast.error('Failed to apply discount') }
+    finally { setSubmitting(false) }
   }
-  
+
+  function applyRoomRentDiscount() {
+    setMode('discount')
+    setDiscReason('Room Rent Discount')
+    setDiscAmount('')
+    setTimeout(() => document.getElementById('disc-amount-input')?.focus(), 80)
+  }
+
   function toggleChargeRowExpand(rowId) {
     setExpandedChargeRows(prev => ({ ...prev, [rowId]: !prev[rowId] }))
   }
@@ -8960,169 +9401,328 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     if (!value) return
     const selected = (ledger?.grouped_charges || []).find(g => g.id === value)
     if (!selected) return
+    // Only fill description; user can add new qty / unit price for the new entry.
     setChgDesc(selected.description || '')
     const lastEvent = [...(selected.events || [])].sort((a, b) => new Date(b.date) - new Date(a.date))[0]
-    if (lastEvent?.price) setChgAmount(String(Math.abs(parseFloat(lastEvent.price))))
-    setChgIsDiscount((parseFloat(lastEvent?.price || 0) < 0) || false)
+    if (lastEvent?.price) {
+      const last = Math.abs(parseFloat(lastEvent.price) || 0)
+      if (last) setChgUnitPrice(String(last))
+    }
   }
 
   const inp = 'w-full border border-gray-200 rounded-xl p-2.5 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none bg-gray-50 hover:bg-white transition-colors'
 
 
   if (receipt) return <PrintMiniReceipt admission={admission} data={receipt.data} type={receipt.type} onClose={() => setReceipt(null)} />
+  if (dischargePreviewData) {
+    return (
+      <PrintDischargeSummary
+        rec={dischargePreviewData.rec}
+        ledger={dischargePreviewData.ledger}
+        admission={dischargePreviewData.admission}
+        onClose={() => setDischargePreviewData(null)}
+      />
+    )
+  }
   if (showPrint && ledger) return <PrintIpdLedger admission={admission} ledger={ledger} onClose={() => setShowPrint(false)} />
 
   if (journey) {
     const isStep1 = journey.step === 'form'
-    
+    const dischargedEditing = String(journey.admission?.status || '').toLowerCase() === 'discharged'
+
     return (
-      <div className="fixed inset-0 z-[600] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md transition-opacity">
-        <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95vh] border border-white/20 transform transition-all duration-300">
+      <div className="fixed inset-0 z-[600] flex items-center justify-center p-3 bg-slate-900/60 backdrop-blur-md transition-opacity">
+        <div className="bg-white rounded-[1.5rem] shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[94vh] border border-white/20 transform transition-all duration-300">
           
           {/* Header */}
-          <div className="relative bg-gradient-to-br from-emerald-600 via-emerald-500 to-teal-500 px-8 py-6 text-white overflow-hidden shrink-0">
+          <div className="relative bg-gradient-to-br from-emerald-600 via-emerald-500 to-teal-500 px-5 py-2.5 text-white overflow-hidden shrink-0">
             {/* Background patterns */}
             <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 rounded-full bg-white opacity-10 mix-blend-overlay animate-pulse"></div>
             <div className="absolute bottom-0 right-32 -mb-20 w-48 h-48 rounded-full bg-white opacity-10 mix-blend-overlay"></div>
             
             <div className="relative flex items-center justify-between z-10">
-              <div className="flex items-center gap-4">
-                <div className="w-14 h-14 rounded-2xl bg-white/20 backdrop-blur-md flex items-center justify-center shadow-inner border border-white/30">
-                  <Activity size={28} className="text-white" strokeWidth={2} />
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-white/20 backdrop-blur-md flex items-center justify-center shadow-inner border border-white/30">
+                  <Activity size={18} className="text-white" strokeWidth={2} />
                 </div>
                 <div>
-                  <h3 className="font-black text-2xl tracking-tight leading-none drop-shadow-sm flex items-center gap-2">
-                    Discharge Process
+                  <h3 className="font-black text-lg tracking-tight leading-none drop-shadow-sm flex items-center gap-2 flex-wrap">
+                    {dischargedEditing ? 'Edit discharge summary' : 'Discharge Process'}
                     <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest ml-2">IPD: {journey.admission.ipd_no || 'N/A'}</span>
                     <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest ml-2">UHID: {journey.admission.patient_uhid || 'N/A'}</span>
                   </h3>
-                  <p className="text-emerald-50 mt-1.5 font-medium opacity-90 drop-shadow-sm">
+                  <p className="text-emerald-50 mt-0.5 text-xs font-medium opacity-90 drop-shadow-sm">
                     {journey.admission.patient_name}
                   </p>
                 </div>
               </div>
-              <button onClick={() => setJourney(null)} className="w-10 h-10 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/30 transition-all active:scale-95 text-emerald-50 hover:text-white backdrop-blur-md border border-white/10">
-                <XCircle size={24} strokeWidth={2} />
+              <button type="button" onClick={handleExitDischargeJourney} className="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/30 transition-all active:scale-95 text-emerald-50 hover:text-white backdrop-blur-md border border-white/10">
+                <XCircle size={20} strokeWidth={2} />
               </button>
             </div>
             
             {/* Modern Stepper */}
-            <div className="mt-8 relative z-10 flex items-center justify-center max-w-md mx-auto">
-              <div className="absolute top-1/2 left-0 w-full h-1 bg-white/20 rounded-full -translate-y-1/2"></div>
-              <div className={`absolute top-1/2 left-0 h-1 bg-white rounded-full -translate-y-1/2 transition-all duration-700 ease-out shadow-[0_0_10px_rgba(255,255,255,0.7)] ${isStep1 ? 'w-[15%]' : 'w-full'}`}></div>
-              
-              <div className="w-full flex justify-between relative">
-                <div className="flex flex-col items-center gap-2">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-black transition-all duration-500 bg-white text-emerald-600 shadow-lg ring-4 ring-emerald-600/30`}>
-                    1
-                  </div>
-                  <span className={`text-[10px] font-black uppercase tracking-widest text-white drop-shadow-sm transition-all duration-300`}>Clinical Summary</span>
-                </div>
-                <div className="flex flex-col items-center gap-2">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-black transition-all duration-500 delay-100 ${!isStep1 ? 'bg-white text-emerald-600 shadow-lg ring-4 ring-emerald-600/30' : 'bg-emerald-700/50 text-emerald-200 border border-emerald-400/50 backdrop-blur-sm'}`}>
-                    2
-                  </div>
-                  <span className={`text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${!isStep1 ? 'text-white drop-shadow-sm' : 'text-emerald-200 opacity-70'}`}>Billing Review</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-8 custom-scrollbar bg-slate-50">
-            {isStep1 ? (
-              <div className="space-y-6 max-w-3xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="flex flex-col mb-2">
-                  <h4 className="text-xl font-black text-slate-800 tracking-tight">Clinical Documentation</h4>
-                  <p className="text-sm text-slate-500 font-medium mt-0.5">Please provide a comprehensive summary of the patient's stay.</p>
-                </div>
+            {!dischargedEditing ? (
+              <div className="mt-2 relative z-10 flex items-center justify-center max-w-md mx-auto">
+                <div className="absolute top-1/2 left-0 w-full h-1 bg-white/20 rounded-full -translate-y-1/2"></div>
+                <div className={`absolute top-1/2 left-0 h-1 bg-white rounded-full -translate-y-1/2 transition-all duration-700 ease-out shadow-[0_0_10px_rgba(255,255,255,0.7)] ${isStep1 ? 'w-[15%]' : 'w-full'}`}></div>
                 
-                <div className="grid grid-cols-2 gap-5">
-                  <div className="col-span-2 relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Discharge Summary / Overview</label>
-                     <textarea rows={2} value={summary.summary_notes} onChange={e => setSummary(s => ({...s, summary_notes: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Brief overview of stay..." />
+                <div className="w-full flex justify-between relative">
+                  <div className="flex flex-col items-center gap-1">
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-black transition-all duration-500 bg-white text-emerald-600 shadow-lg ring-4 ring-emerald-600/30`}>
+                      1
+                    </div>
+                    <span className={`text-[9px] font-black uppercase tracking-widest text-white drop-shadow-sm transition-all duration-300`}>Clinical Summary</span>
                   </div>
-
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Reason for Admission</label>
-                     <textarea rows={2} value={summary.reason_for_admission} onChange={e => setSummary(s => ({...s, reason_for_admission: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Main complaint..." />
+                  <div className="flex flex-col items-center gap-1">
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-black transition-all duration-500 delay-100 ${!isStep1 ? 'bg-white text-emerald-600 shadow-lg ring-4 ring-emerald-600/30' : 'bg-emerald-700/50 text-emerald-200 border border-emerald-400/50 backdrop-blur-sm'}`}>
+                      2
+                    </div>
+                    <span className={`text-[9px] font-black uppercase tracking-widest transition-all duration-300 ${!isStep1 ? 'text-white drop-shadow-sm' : 'text-emerald-200 opacity-70'}`}>Billing Review</span>
                   </div>
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Diagnosis & Co-morbidities</label>
-                     <textarea rows={2} value={summary.diagnosis} onChange={e => setSummary(s => ({...s, diagnosis: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Final diagnosis..." />
-                  </div>
-
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Medical History</label>
-                     <textarea rows={2} value={summary.medical_history} onChange={e => setSummary(s => ({...s, medical_history: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Past illness, family history..." />
-                  </div>
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Physical Exam & Vitals</label>
-                     <textarea rows={2} value={summary.physical_examination} onChange={e => setSummary(s => ({...s, physical_examination: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Pulse, BP, Temp..." />
-                  </div>
-
-                  <div className="col-span-2 relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Investigations (Lab & Radiology)</label>
-                     <textarea rows={2} value={summary.investigations} onChange={e => setSummary(s => ({...s, investigations: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Key test results..." />
-                  </div>
-
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Procedure or Surgery Done</label>
-                     <textarea rows={2} value={summary.procedure_surgery} onChange={e => setSummary(s => ({...s, procedure_surgery: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Any surgery performed..." />
-                  </div>
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Allergies</label>
-                     <textarea rows={2} value={summary.allergies} onChange={e => setSummary(s => ({...s, allergies: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Drug allergies, food..." />
-                  </div>
-
-                  <div className="col-span-2 relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Course in Hospital</label>
-                     <textarea rows={2} value={summary.course_in_hospital} onChange={e => setSummary(s => ({...s, course_in_hospital: e.target.value}))}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Day-wise progression..." />
-                  </div>
-                  
-                  <div className="col-span-2 relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Discharge Medication</label>
-                     <textarea rows={3} value={summary.medications_on_discharge} onChange={e => setSummary(s => ({...s, medications_on_discharge: e.target.value}))}
-                      className="w-full bg-slate-100/50 border border-slate-200 hover:border-slate-300 hover:bg-white rounded-2xl p-4 text-sm font-mono text-slate-700 focus:bg-white focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all resize-none shadow-inner" placeholder="1. Tab X... 2. Syp Y..." />
-                  </div>
-                  
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Diet & Activity Advice</label>
-                     <textarea rows={2} value={`${summary.diet_advice}\n${summary.activity_advice}`} 
-                      onChange={e => {
-                        const lines = e.target.value.split('\n');
-                        setSummary(s => ({...s, diet_advice: lines[0] || '', activity_advice: lines.slice(1).join('\n') || ''}))
-                      }}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="Food restrictions, physical activity..." />
-                  </div>
-                  <div className="relative group">
-                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 block group-focus-within:text-emerald-600 transition-colors">Follow-up & Warning Signs</label>
-                     <textarea rows={2} value={`${summary.follow_up_advice}\n${summary.warning_signs}`}
-                      onChange={e => {
-                        const lines = e.target.value.split('\n');
-                        setSummary(s => ({...s, follow_up_advice: lines[0] || '', warning_signs: lines.slice(1).join('\n') || ''}))
-                      }}
-                      className="w-full bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all shadow-sm" placeholder="When to return, urgent care signs..." />
-                  </div>
-                </div>
-                
-                <div className="pt-6 mt-2 border-t border-slate-200/60 flex justify-end">
-                  <button onClick={goToBilling} disabled={submitting}
-                    className="bg-slate-800 text-white px-8 py-3.5 rounded-2xl text-sm font-bold hover:bg-black hover:shadow-lg hover:shadow-black/20 flex items-center gap-3 transition-all active:scale-95 group focus:ring-4 focus:ring-slate-300">
-                    {draftSaving ? 'Saving...' : 'Review Billing Summary'} <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
-                  </button>
                 </div>
               </div>
             ) : (
-              <div className="space-y-6 max-w-3xl mx-auto animate-in fade-in slide-in-from-right-8 duration-500">
+              <p className="mt-3 relative z-10 text-center text-xs font-semibold text-emerald-50/95 max-w-xl mx-auto">
+                Changes auto-save while you edit. Use Save summary for confirmation, or close to keep the latest draft on the server.
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-1 min-h-0 bg-slate-50">
+            {isStep1 && (
+              <aside className="shrink-0 w-12 sm:w-[52px] flex flex-col items-center gap-1.5 py-3 sm:py-4 px-0.5 sm:px-1 border-r border-slate-200/80 bg-gradient-to-b from-white via-slate-50/95 to-slate-100/90 shadow-[inset_-1px_0_0_rgba(15,23,42,0.05)] overflow-y-auto max-h-full">
+                <span className="text-[8px] sm:text-[9px] font-black uppercase tracking-widest text-slate-400 mb-0.5 sm:mb-1 select-none text-center leading-tight px-0.5">Jump</span>
+                {dischargeSectionNavItems.map(({ id, Icon, label }, idx) => (
+                  <React.Fragment key={id}>
+                    {idx > 0 && <div className="w-px h-1.5 sm:h-2 bg-gradient-to-b from-transparent via-slate-300/80 to-transparent" aria-hidden />}
+                    <button
+                      type="button"
+                      title={label}
+                      aria-label={label}
+                      aria-current={activeDischargeSection === id ? 'step' : undefined}
+                      onClick={() => {
+                        const scrollRoot = dischargeScrollRootRef.current
+                        const el = scrollRoot?.querySelector(`#${CSS.escape(id)}`)
+                        el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                      }}
+                      className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition-all duration-300 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1 focus-visible:ring-offset-slate-50 ${
+                        activeDischargeSection === id
+                          ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/35 scale-110 ring-2 ring-emerald-200 ring-offset-2 ring-offset-slate-50'
+                          : 'bg-white text-slate-500 shadow-sm border border-slate-200/90 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 hover:shadow-md hover:-translate-y-px active:scale-95'
+                      }`}
+                    >
+                      <Icon size={activeDischargeSection === id ? 17 : 16} strokeWidth={activeDischargeSection === id ? 2.25 : 2} className="transition-transform duration-300" />
+                      {activeDischargeSection === id && (
+                        <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-white/40 animate-pulse" aria-hidden />
+                      )}
+                    </button>
+                  </React.Fragment>
+                ))}
+              </aside>
+            )}
+            <div ref={dischargeScrollRootRef} className="flex-1 overflow-y-auto min-h-0 scroll-smooth p-4 sm:p-5 custom-scrollbar scroll-pt-3">
+            {isStep1 ? (
+              <div className="space-y-3 max-w-5xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                  <div>
+                    <h4 className="text-lg font-black text-slate-800 tracking-tight">Clinical Documentation</h4>
+                    <p className="text-xs text-slate-500 font-medium mt-0.5">Use sections below; structured meds & labs print as tables.</p>
+                  </div>
+                  <div className="text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 px-2.5 py-1 rounded-lg">
+                    Ward: {journey.admission.ward_name || 'N/A'} | Bed: {journey.admission.bed_code || 'N/A'} | Dept: {journey.admission.department || '—'}
+                  </div>
+                </div>
+
+                <details id="discharge-section-metadata" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Discharge metadata & identifiers</summary>
+                  <div className="p-3 space-y-3 border-t border-slate-100">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      <div><span className={dsLbl}>Discharge type</span>
+                        <select value={summary.discharge_type} onChange={e => setSummary(s => ({ ...s, discharge_type: e.target.value }))} className={dsInp}>
+                          {[{ v: 'routine', l: 'Routine' }, { v: 'lama', l: 'LAMA' }, { v: 'dama', l: 'DAMA' }, { v: 'referred', l: 'Referred' }, { v: 'transferred', l: 'Transferred' }, { v: 'death', l: 'Death' }, { v: 'absconded', l: 'Absconded' }].map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                        </select></div>
+                      <div><span className={dsLbl}>Condition / status</span>
+                        <select value={summary.discharge_status} onChange={e => setSummary(s => ({ ...s, discharge_status: e.target.value }))} className={dsInp}>
+                          {[{ v: 'cured', l: 'Cured' }, { v: 'improved', l: 'Improved' }, { v: 'unchanged', l: 'Unchanged' }, { v: 'worsened', l: 'Worsened' }, { v: 'deceased', l: 'Deceased' }].map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                        </select></div>
+                      <div><span className={dsLbl}>Mode of admission</span>
+                        <select value={summary.mode_of_admission} onChange={e => setSummary(s => ({ ...s, mode_of_admission: e.target.value }))} className={dsInp}>
+                          <option value="emergency">Emergency</option><option value="opd">OPD</option><option value="referral">Referral</option>
+                        </select></div>
+                      <div><span className={dsLbl}>Condition at discharge (text)</span>
+                        <input value={summary.condition_at_discharge} onChange={e => setSummary(s => ({ ...s, condition_at_discharge: e.target.value }))} className={dsInp} placeholder="e.g. Stable, afebrile" /></div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      <div><span className={dsLbl}>Discharge date</span><input type="date" value={summary.discharge_date || ''} onChange={e => setSummary(s => ({ ...s, discharge_date: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Discharge time</span><input type="time" value={summary.discharge_time || ''} onChange={e => setSummary(s => ({ ...s, discharge_time: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Next follow-up</span><input type="date" value={summary.next_follow_up_date || ''} onChange={e => setSummary(s => ({ ...s, next_follow_up_date: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Stitch removal</span><input type="date" value={summary.stitch_removal_date || ''} onChange={e => setSummary(s => ({ ...s, stitch_removal_date: e.target.value }))} className={dsInp} /></div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div><span className={dsLbl}>Treating consultant</span><input value={summary.treating_consultant} onChange={e => setSummary(s => ({ ...s, treating_consultant: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Consultant reg. no.</span><input value={summary.consultant_registration_no} onChange={e => setSummary(s => ({ ...s, consultant_registration_no: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>RMO / Signatory name</span><input value={summary.rmo_signed_by} onChange={e => setSummary(s => ({ ...s, rmo_signed_by: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Follow-up doctor / dept</span>
+                        <div className="flex gap-1"><input value={summary.follow_up_doctor} onChange={e => setSummary(s => ({ ...s, follow_up_doctor: e.target.value }))} className={dsInp} placeholder="Doctor" /><input value={summary.follow_up_department} onChange={e => setSummary(s => ({ ...s, follow_up_department: e.target.value }))} className={dsInp} placeholder="Dept" /></div></div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div><span className={dsLbl}>Referred to facility</span><input value={summary.referred_to_facility} onChange={e => setSummary(s => ({ ...s, referred_to_facility: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Referral reason</span><input value={summary.referral_reason} onChange={e => setSummary(s => ({ ...s, referral_reason: e.target.value }))} className={dsInp} /></div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-2 border-t border-slate-100">
+                      <div><span className={dsLbl}>ABHA ID</span><input value={summary.abha_id} onChange={e => setSummary(s => ({ ...s, abha_id: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Insurance</span><input value={summary.insurance_provider} onChange={e => setSummary(s => ({ ...s, insurance_provider: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>TPA</span><input value={summary.tpa_name} onChange={e => setSummary(s => ({ ...s, tpa_name: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Policy no.</span><input value={summary.policy_number} onChange={e => setSummary(s => ({ ...s, policy_number: e.target.value }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Claim no.</span><input value={summary.claim_number} onChange={e => setSummary(s => ({ ...s, claim_number: e.target.value }))} className={dsInp} /></div>
+                      <label className="flex items-center gap-2 text-sm text-slate-700 pt-5"><input type="checkbox" checked={summary.patient_education_given} onChange={e => setSummary(s => ({ ...s, patient_education_given: e.target.checked }))} /> Patient education given</label>
+                      <div className="sm:col-span-2"><span className={dsLbl}>Attendant counselled by</span><input value={summary.attendant_counselled_by} onChange={e => setSummary(s => ({ ...s, attendant_counselled_by: e.target.value }))} className={dsInp} /></div>
+                    </div>
+                  </div>
+                </details>
+
+                <details id="discharge-section-vitals" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Vitals at discharge</summary>
+                  <div className="p-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 border-t border-slate-100">
+                    {['bp', 'pulse', 'spo2', 'temp', 'weight', 'rbs'].map(k => (
+                      <div key={k}><span className={dsLbl}>{k === 'bp' ? 'BP' : k.toUpperCase()}</span>
+                        <input value={(summary.vitals_at_discharge || {})[k] || ''} onChange={e => setVital(k, e.target.value)} className={dsInp} /></div>
+                    ))}
+                  </div>
+                </details>
+
+                {summary.discharge_type === 'death' && (
+                  <details id="discharge-section-death" open className="scroll-mt-3 bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm">
+                    <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-red-800 bg-red-100">Death summary</summary>
+                    <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-red-100">
+                      <div className="sm:col-span-2"><span className={dsLbl}>Cause of death</span><textarea rows={2} value={summary.cause_of_death} onChange={e => setSummary(s => ({ ...s, cause_of_death: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Time of death</span><input type="datetime-local" value={summary.time_of_death ? summary.time_of_death.slice(0, 16) : ''} onChange={e => setSummary(s => ({ ...s, time_of_death: e.target.value ? `${e.target.value}:00` : '' }))} className={dsInp} /></div>
+                      <div><span className={dsLbl}>Notified to</span><input value={summary.notified_to} onChange={e => setSummary(s => ({ ...s, notified_to: e.target.value }))} className={dsInp} /></div>
+                      <label className="flex items-center gap-2 text-sm text-slate-800 pt-5"><input type="checkbox" checked={summary.autopsy_required} onChange={e => setSummary(s => ({ ...s, autopsy_required: e.target.checked }))} /> Autopsy required</label>
+                    </div>
+                  </details>
+                )}
+
+                <details id="discharge-section-narrative" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Clinical narrative</summary>
+                  <div className="p-3 space-y-3 border-t border-slate-100">
+                    <div><span className={dsLbl}>Discharge summary / overview</span><textarea rows={2} value={summary.summary_notes} onChange={e => setSummary(s => ({ ...s, summary_notes: e.target.value }))} className={`${dsInp} min-h-[52px]`} placeholder="Brief overview..." /></div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div><span className={dsLbl}>Chief complaints</span><textarea rows={2} value={summary.chief_complaints} onChange={e => setSummary(s => ({ ...s, chief_complaints: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Reason for admission</span><textarea rows={2} value={summary.reason_for_admission} onChange={e => setSummary(s => ({ ...s, reason_for_admission: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Diagnosis</span><textarea rows={2} value={summary.diagnosis} onChange={e => setSummary(s => ({ ...s, diagnosis: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Co-morbidities</span><textarea rows={2} value={summary.co_morbidities} onChange={e => setSummary(s => ({ ...s, co_morbidities: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Medical history</span><textarea rows={2} value={summary.medical_history} onChange={e => setSummary(s => ({ ...s, medical_history: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Family history</span><textarea rows={2} value={summary.family_history} onChange={e => setSummary(s => ({ ...s, family_history: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Personal history</span><textarea rows={2} value={summary.personal_history} onChange={e => setSummary(s => ({ ...s, personal_history: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Physical examination</span><textarea rows={2} value={summary.physical_examination} onChange={e => setSummary(s => ({ ...s, physical_examination: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Allergies</span><textarea rows={2} value={summary.allergies} onChange={e => setSummary(s => ({ ...s, allergies: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                      <div><span className={dsLbl}>Treatment given</span><textarea rows={2} value={summary.treatment_given} onChange={e => setSummary(s => ({ ...s, treatment_given: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    </div>
+                  </div>
+                </details>
+
+                <details id="discharge-section-operative" className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Operative / procedure</summary>
+                  <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
+                    <div><span className={dsLbl}>Surgery date</span><input type="date" value={summary.surgery_date || ''} onChange={e => setSummary(s => ({ ...s, surgery_date: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={summary.procedure_surgery} onChange={e => setSummary(s => ({ ...s, procedure_surgery: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Surgeon</span><input value={summary.surgeon_name} onChange={e => setSummary(s => ({ ...s, surgeon_name: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Assistant</span><input value={summary.assistant_name} onChange={e => setSummary(s => ({ ...s, assistant_name: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Anaesthetist</span><input value={summary.anaesthetist_name} onChange={e => setSummary(s => ({ ...s, anaesthetist_name: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Anaesthesia</span><input value={summary.anaesthesia_type} onChange={e => setSummary(s => ({ ...s, anaesthesia_type: e.target.value }))} className={dsInp} /></div>
+                    <div className="md:col-span-2"><span className={dsLbl}>Operative findings</span><textarea rows={2} value={summary.operative_findings} onChange={e => setSummary(s => ({ ...s, operative_findings: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div className="md:col-span-2"><span className={dsLbl}>Intra-op complications</span><textarea rows={2} value={summary.intra_op_complications} onChange={e => setSummary(s => ({ ...s, intra_op_complications: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  </div>
+                </details>
+
+                <details id="discharge-section-investigations" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Investigations (structured)</summary>
+                  <div className="p-3 border-t border-slate-100 space-y-2">
+                    <div className="overflow-x-auto rounded-lg border border-slate-200">
+                      <table className="w-full text-xs">
+                        <thead><tr className="bg-slate-50 text-left"><th className="p-2">Type</th><th className="p-2">Test</th><th className="p-2">Value</th><th className="p-2">Ref</th><th className="p-2">Date</th><th className="p-2 w-8" /></tr></thead>
+                        <tbody>
+                          {(summary.investigation_rows || []).map((row, idx) => (
+                            <tr key={idx} className="border-t border-slate-100">
+                              <td className="p-1"><select value={row.category || 'lab'} onChange={e => updateInvRow(idx, 'category', e.target.value)} className={dsInp}><option value="lab">Lab</option><option value="imaging">Imaging</option></select></td>
+                              <td className="p-1"><input value={row.test_name} onChange={e => updateInvRow(idx, 'test_name', e.target.value)} className={dsInp} placeholder="Test name" /></td>
+                              <td className="p-1"><input value={row.value} onChange={e => updateInvRow(idx, 'value', e.target.value)} className={dsInp} /></td>
+                              <td className="p-1"><input value={row.reference_range} onChange={e => updateInvRow(idx, 'reference_range', e.target.value)} className={dsInp} /></td>
+                              <td className="p-1"><input type="date" value={row.test_date || ''} onChange={e => updateInvRow(idx, 'test_date', e.target.value)} className={dsInp} /></td>
+                              <td className="p-1"><button type="button" onClick={() => removeInvRow(idx)} className="text-red-600 font-bold px-1">×</button></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <button type="button" onClick={addInvRow} className="text-xs font-bold text-emerald-700 hover:underline">+ Add investigation row</button>
+                    <div><span className={dsLbl}>Investigations — free text (extra notes)</span><textarea rows={2} value={summary.investigations} onChange={e => setSummary(s => ({ ...s, investigations: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  </div>
+                </details>
+
+                <details id="discharge-section-course" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Hospital course & complications</summary>
+                  <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
+                    <div className="md:col-span-2"><span className={dsLbl}>Course in hospital</span><textarea rows={2} value={summary.course_in_hospital} onChange={e => setSummary(s => ({ ...s, course_in_hospital: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Complications</span><textarea rows={2} value={summary.complications_during_stay} onChange={e => setSummary(s => ({ ...s, complications_during_stay: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Blood transfusion</span><textarea rows={2} value={summary.blood_transfusion_details} onChange={e => setSummary(s => ({ ...s, blood_transfusion_details: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Implants</span><textarea rows={2} value={summary.implants_used} onChange={e => setSummary(s => ({ ...s, implants_used: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Indwelling devices</span><textarea rows={2} value={summary.indwelling_devices_on_discharge} onChange={e => setSummary(s => ({ ...s, indwelling_devices_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Vaccination</span><textarea rows={2} value={summary.vaccination_given} onChange={e => setSummary(s => ({ ...s, vaccination_given: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  </div>
+                </details>
+
+                <div id="discharge-section-prescriptions" className="scroll-mt-3 space-y-2">
+                  <DischargePrescriptionPanel
+                    items={dischargeRxItems}
+                    onChange={setDischargeRxItems}
+                    dosagePatternOptions={DEFAULT_DOSAGE_PATTERNS}
+                    timingOptions={DEFAULT_TIMING_OPTIONS}
+                  />
+                  <details className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                    <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-50 hover:bg-slate-100">Extra medication notes (optional)</summary>
+                    <div className="p-3 border-t border-slate-100">
+                      <textarea rows={2} value={summary.medications_on_discharge} onChange={e => setSummary(s => ({ ...s, medications_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px] font-mono w-full`} placeholder="Additional instructions not covered above..." />
+                    </div>
+                  </details>
+                </div>
+
+                <details id="discharge-section-advice" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Advice on discharge</summary>
+                  <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
+                    <div><span className={dsLbl}>Diet</span><textarea rows={2} value={summary.diet_advice} onChange={e => setSummary(s => ({ ...s, diet_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Activity</span><textarea rows={2} value={summary.activity_advice} onChange={e => setSummary(s => ({ ...s, activity_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Wound care</span><textarea rows={2} value={summary.wound_care_instructions} onChange={e => setSummary(s => ({ ...s, wound_care_instructions: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Follow-up advice</span><textarea rows={2} value={summary.follow_up_advice} onChange={e => setSummary(s => ({ ...s, follow_up_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div className="md:col-span-2"><span className={dsLbl}>Warning signs</span><textarea rows={2} value={summary.warning_signs} onChange={e => setSummary(s => ({ ...s, warning_signs: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  </div>
+                </details>
+
+                <div className="pt-3 mt-1 border-t border-slate-200/60 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={openDischargePrintPreview}
+                    className="bg-white text-slate-700 border border-slate-300 px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-slate-50 flex items-center gap-2 transition-all active:scale-95 focus:ring-4 focus:ring-slate-200"
+                  >
+                    <Eye size={16} /> Preview print
+                  </button>
+                  {dischargedEditing ? (
+                    <button type="button" onClick={saveDischargedSummaryExplicit} disabled={submitting || draftSaving}
+                      className="bg-emerald-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-800 flex items-center gap-2 transition-all active:scale-95 focus:ring-4 focus:ring-emerald-300 disabled:opacity-60">
+                      {draftSaving ? 'Saving...' : 'Save summary'}
+                    </button>
+                  ) : (
+                    <button type="button" onClick={goToBilling} disabled={submitting}
+                      className="bg-slate-800 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-black hover:shadow-lg hover:shadow-black/20 flex items-center gap-2 transition-all active:scale-95 group focus:ring-4 focus:ring-slate-300">
+                      {draftSaving ? 'Saving...' : 'Review Billing Summary'} <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-6 max-w-3xl mx-auto animate-in fade-in slide-in-from-right-8 duration-500 py-1">
                 <div className="flex bg-emerald-50/50 p-5 rounded-2xl border border-emerald-100 items-start gap-4 shadow-sm">
                   <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0 shadow-sm">
                     <Receipt size={22} strokeWidth={2.5} />
@@ -9262,6 +9862,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                 </div>
               </div>
             )}
+            </div>
           </div>
         </div>
       </div>
@@ -9292,13 +9893,19 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={handleInitiateDischarge} className="flex items-center gap-2 bg-red-500 text-white rounded-xl px-4 py-2 text-sm font-bold shadow-md hover:bg-red-600 transition-all border border-red-400">
-              <LogOut size={16} /> Discharge Patient
-            </button>
-            <button onClick={() => setShowPrint(true)} className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white rounded-xl px-4 py-2 text-sm font-bold transition-colors">
+            {String(admission.status || '').toLowerCase() === 'discharged' ? (
+              <button type="button" onClick={openDischargeEditorForDischarged} className="flex items-center gap-2 bg-emerald-600 text-white rounded-xl px-4 py-2 text-sm font-bold shadow-md hover:bg-emerald-700 transition-all border border-emerald-500">
+                <Edit2 size={16} /> Edit discharge summary
+              </button>
+            ) : (
+              <button type="button" onClick={handleInitiateDischarge} className="flex items-center gap-2 bg-red-500 text-white rounded-xl px-4 py-2 text-sm font-bold shadow-md hover:bg-red-600 transition-all border border-red-400">
+                <LogOut size={16} /> Discharge Patient
+              </button>
+            )}
+            <button type="button" onClick={() => setShowPrint(true)} className="flex items-center gap-2 bg-white/20 hover:bg-white/30 text-white rounded-xl px-4 py-2 text-sm font-bold transition-colors">
               <Printer size={16} /> Print A4 Bill
             </button>
-            <button onClick={onClose} className="text-white/70 hover:text-white transition-colors">
+            <button type="button" onClick={handleLedgerModalClose} className="text-white/70 hover:text-white transition-colors">
               <XCircle size={24} strokeWidth={1.5} />
             </button>
           </div>
@@ -9313,22 +9920,51 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
             {/* ── Left: Account Statement (3 cols) ── */}
             <div className="lg:col-span-3 flex flex-col gap-4">
-              {/* Summary chips */}
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { label: 'Total Charges', val: ledger.total_charges, color: 'text-gray-800', bg: 'bg-white', border: 'border-gray-200' },
-                  { label: 'Total Paid',    val: ledger.total_paid,    color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-                  { label: 'Balance Due',   val: ledger.balance_due,
-                    color:  parseFloat(ledger.balance_due) > 0 ? 'text-red-500' : 'text-emerald-500',
-                    bg:     parseFloat(ledger.balance_due) > 0 ? 'bg-red-50'    : 'bg-emerald-50',
-                    border: parseFloat(ledger.balance_due) > 0 ? 'border-red-200' : 'border-emerald-200' },
-                ].map(s => (
-                  <div key={s.label} className={`${s.bg} border ${s.border} rounded-2xl p-3 shadow-sm`}>
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-0.5">{s.label}</p>
-                    <p className={`text-xl font-black ${s.color}`}>₹{parseFloat(s.val).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p>
+              {/* Summary cards */}
+              {(() => {
+                const chargesCount = (ledger.grouped_charges || []).length + (ledger.charges || []).filter(c => c.type === 'room_rent').length
+                const paidEvents = (ledger.grouped_charges || []).reduce((acc, g) => acc + (g.events || []).filter(ev => parseFloat(ev.paid_amount || 0) > 0).length, 0) + (ledger.payments?.length || 0)
+                const balance = parseFloat(ledger.balance_due || 0)
+                const isDue = balance > 0
+                const cards = [
+                  {
+                    label: 'Total Charges', val: ledger.total_charges, sub: `${chargesCount} item${chargesCount === 1 ? '' : 's'}`,
+                    Icon: Receipt, color: 'text-gray-800', iconColor: 'text-blue-500', bg: 'bg-white', border: 'border-gray-200',
+                  },
+                  {
+                    label: 'Total Paid', val: ledger.total_paid, sub: `${paidEvents} receipt${paidEvents === 1 ? '' : 's'}`,
+                    Icon: CheckCircle, color: 'text-emerald-700', iconColor: 'text-emerald-500', bg: 'bg-emerald-50', border: 'border-emerald-200',
+                  },
+                  {
+                    label: 'Balance Due', val: ledger.balance_due, sub: isDue ? 'Outstanding' : 'Settled',
+                    Icon: isDue ? AlertTriangle : CheckCircle,
+                    color: isDue ? 'text-red-600' : 'text-emerald-600',
+                    iconColor: isDue ? 'text-red-500' : 'text-emerald-500',
+                    bg: isDue ? 'bg-red-50' : 'bg-emerald-50',
+                    border: isDue ? 'border-red-200' : 'border-emerald-200',
+                    big: true,
+                  },
+                ]
+                return (
+                  <div className="grid grid-cols-3 gap-3">
+                    {cards.map(s => {
+                      const Icon = s.Icon
+                      return (
+                        <div key={s.label} className={`${s.bg} border ${s.border} rounded-2xl p-3 shadow-sm`}>
+                          <div className="flex items-center justify-between mb-1">
+                            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">{s.label}</p>
+                            <Icon size={14} className={s.iconColor} />
+                          </div>
+                          <p className={`${s.big ? 'text-2xl' : 'text-xl'} font-black ${s.color} text-right tabular-nums leading-tight`}>
+                            ₹{parseFloat(s.val || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          </p>
+                          <p className="text-[10px] font-medium text-gray-500 text-right mt-0.5">{s.sub}</p>
+                        </div>
+                      )
+                    })}
                   </div>
-                ))}
-              </div>
+                )
+              })()}
 
               {/* Table */}
               <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden flex flex-col flex-1">
@@ -9338,9 +9974,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   </span>
                   <button onClick={fetchLedger} className="text-gray-400 hover:text-blue-500 transition-colors"><RefreshCw size={13} /></button>
                 </div>
-                <div className="overflow-x-auto flex-1">
+                <div className="overflow-x-auto flex-1 max-h-[60vh]">
                   <table className="w-full text-sm text-left">
-                    <thead className="bg-gray-50 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+                    <thead className="bg-gray-50 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-b border-gray-200 sticky top-0 z-10 shadow-sm">
                       <tr>
                         <th className="px-2 py-2.5 w-8"></th>
                         <th className="px-4 py-2.5">Date</th>
@@ -9350,34 +9986,40 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                         <th className="px-4 py-2.5 text-right text-emerald-600">Paid (₹)</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-gray-50">
+                    <tbody className="divide-y divide-gray-100">
                       {(ledger.grouped_charges || []).map((row, idx) => {
                         const expanded = !!expandedChargeRows[row.id]
                         const events = row.events || []
                         const latest = events[events.length - 1]
                         const totalAmount = parseFloat(row.total_amount || 0)
+                        const totalPaid = parseFloat(row.total_paid || 0)
                         const isDiscount = totalAmount < 0
+                        const isPaymentRow = totalPaid > 0 && totalAmount === 0
+                        let badge = null
+                        if (isDiscount) badge = { label: 'DISCOUNT', cls: 'bg-amber-100 text-amber-700' }
+                        else if (isPaymentRow) badge = { label: 'PAYMENT', cls: 'bg-emerald-100 text-emerald-700' }
+                        else badge = { label: 'SERVICE', cls: 'bg-blue-100 text-blue-700' }
                         return (
                           <React.Fragment key={`grp-${row.id}-${idx}`}>
-                            <tr className={`hover:bg-gray-50/80 transition-colors ${isDiscount ? 'bg-amber-50/40' : ''}`}>
+                            <tr className={`hover:bg-blue-50/40 transition-colors ${isDiscount ? 'bg-amber-50/40' : ''}`}>
                               <td className="px-2 py-2.5 text-center">
-                                <button onClick={() => toggleChargeRowExpand(row.id)} className="text-gray-500 hover:text-blue-600">
+                                <button onClick={() => toggleChargeRowExpand(row.id)} className="text-gray-400 hover:text-blue-600 transition-colors">
                                   {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                                 </button>
                               </td>
-                              <td className="px-4 py-2.5 text-xs text-gray-400 whitespace-nowrap">{latest?.date ? format(new Date(latest.date), 'd/M/yy HH:mm') : '—'}</td>
+                              <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{latest?.date ? format(new Date(latest.date), 'd/M/yy HH:mm') : <span className="text-gray-300">—</span>}</td>
                               <td className="px-4 py-2.5">
                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                  {isDiscount && <span className="text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-bold">DISCOUNT</span>}
+                                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${badge.cls}`}>{badge.label}</span>
                                   <span className={`text-xs font-semibold ${isDiscount ? 'text-amber-700' : 'text-gray-800'}`}>{row.description}</span>
                                 </div>
                               </td>
-                              <td className="px-4 py-2.5 text-center text-xs font-bold text-slate-700">{parseInt(row.quantity || 0, 10) || 0}</td>
-                              <td className="px-4 py-2.5 text-right font-bold whitespace-nowrap text-gray-700">
-                                {parseFloat(row.total_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                              <td className="px-4 py-2.5 text-center text-xs font-bold text-slate-700 tabular-nums">{parseInt(row.quantity || 0, 10) || <span className="text-gray-300 font-normal">—</span>}</td>
+                              <td className="px-4 py-2.5 text-right font-bold whitespace-nowrap text-gray-700 tabular-nums">
+                                {totalAmount === 0 ? <span className="text-gray-300 font-normal">—</span> : parseFloat(totalAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                               </td>
-                              <td className="px-4 py-2.5 text-right font-bold text-emerald-600 whitespace-nowrap">
-                                {parseFloat(row.total_paid || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                              <td className="px-4 py-2.5 text-right font-bold text-emerald-600 whitespace-nowrap tabular-nums">
+                                {totalPaid === 0 ? <span className="text-gray-300 font-normal">—</span> : parseFloat(totalPaid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                               </td>
                             </tr>
                             {expanded && (
@@ -9390,7 +10032,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                       <div key={`${row.id}-event-${ev.id}-${evIdx}`} className="flex items-center justify-between gap-3 border-b border-slate-100 last:border-b-0 pb-2 last:pb-0">
                                         <div>
                                           <p className="text-xs font-bold text-slate-800">{ev.name || row.description}</p>
-                                          <p className="text-[11px] text-slate-500">
+                                          <p className="text-[11px] text-slate-500 tabular-nums">
                                             {format(new Date(ev.date), 'd/M/yy HH:mm')}
                                             {' · '}
                                             ₹{parseFloat(ev.price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
@@ -9417,26 +10059,40 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                         )
                       })}
                       {(ledger.charges || []).filter(c => c.type === 'room_rent').map((item, i) => (
-                        <tr key={`room-${i}`} className="hover:bg-gray-50/80 transition-colors">
+                        <tr key={`room-${i}`} className="hover:bg-blue-50/40 transition-colors">
                           <td className="px-2 py-2.5 text-center text-gray-300">—</td>
-                          <td className="px-4 py-2.5 text-xs text-gray-400 whitespace-nowrap">{format(new Date(item.date), 'd/M/yy HH:mm')}</td>
-                          <td className="px-4 py-2.5"><span className="text-[9px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-bold mr-1.5">RENT</span><span className="text-xs font-semibold text-gray-800">{item.description}</span></td>
-                          <td className="px-4 py-2.5 text-center text-xs font-bold text-slate-700">1</td>
-                          <td className="px-4 py-2.5 text-right font-bold whitespace-nowrap text-gray-700">{parseFloat(item.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{format(new Date(item.date), 'd/M/yy HH:mm')}</td>
+                          <td className="px-4 py-2.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold">RENT</span>
+                              <span className="text-xs font-semibold text-gray-800">{item.description}</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5 text-center text-xs font-bold text-slate-700 tabular-nums">1</td>
+                          <td className="px-4 py-2.5 text-right font-bold whitespace-nowrap text-gray-700 tabular-nums">{parseFloat(item.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                           <td className="px-4 py-2.5 text-right text-gray-300">—</td>
                         </tr>
                       ))}
-                      <tr className="bg-gray-50 border-t border-gray-200 text-xs font-bold text-gray-600 uppercase">
-                        <td colSpan={4} className="px-4 py-2.5 text-right">Total</td>
-                        <td className="px-4 py-2.5 text-right text-gray-800">₹{parseFloat(ledger.total_charges).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                        <td className="px-4 py-2.5 text-right text-emerald-600">₹{parseFloat(ledger.total_paid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                      </tr>
+                      {(ledger.grouped_charges || []).length === 0 && (ledger.charges || []).filter(c => c.type === 'room_rent').length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-12 text-center text-xs text-gray-400">
+                            No entries yet. Use the right panel to add charges, receive payments or apply a discount.
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
+                    <tfoot>
+                      <tr className="bg-gray-50 border-t border-gray-200 text-xs font-bold text-gray-600 uppercase sticky bottom-0">
+                        <td colSpan={4} className="px-4 py-2.5 text-right">Total</td>
+                        <td className="px-4 py-2.5 text-right text-gray-800 tabular-nums">₹{parseFloat(ledger.total_charges).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                        <td className="px-4 py-2.5 text-right text-emerald-600 tabular-nums">₹{parseFloat(ledger.total_paid).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                      </tr>
+                    </tfoot>
                   </table>
                 </div>
               </div>
 
-              {/* Room rent discount shortcut */}
+              {/* Room rent discount shortcut (jumps to Discount mode in right panel) */}
               {parseFloat(ledger.room_rent) > 0 && (
                 <button onClick={applyRoomRentDiscount}
                   className="self-start flex items-center gap-2 text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-4 py-2 rounded-xl font-bold border border-amber-200 transition-colors">
@@ -9448,23 +10104,129 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
             {/* ── Right: Action Panel (2 cols) ── */}
             <div className="lg:col-span-2 space-y-4">
 
-              {/* Tabs */}
+              {/* Mode Picker */}
               <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-                <div className="grid grid-cols-2">
+                <div className="p-2 grid grid-cols-3 gap-2 bg-gray-50/70 border-b border-gray-100">
                   {[
-                    { id: 'advance', label: 'Capture Advance', icon: <IndianRupee size={14} />, active: 'text-emerald-700 border-emerald-500 bg-emerald-50' },
-                    { id: 'charge',  label: 'Add Service',     icon: <Plus size={14} />,        active: 'text-blue-700 border-blue-500 bg-blue-50'       },
-                  ].map(t => (
-                    <button key={t.id} onClick={() => setTab(t.id)}
-                      className={`py-3 text-sm font-bold flex items-center justify-center gap-2 transition-colors border-b-2 ${tab === t.id ? t.active : 'text-gray-500 border-transparent hover:text-gray-700 hover:bg-gray-50'}`}>
-                      {t.icon} {t.label}
-                    </button>
-                  ))}
+                    { id: 'charge',   label: 'Add Charge',    icon: Plus,         theme: 'blue'    },
+                    { id: 'receive',  label: 'Receive Money', icon: IndianRupee,  theme: 'emerald' },
+                    { id: 'discount', label: 'Discount',      icon: Tag,          theme: 'amber'   },
+                  ].map(seg => {
+                    const active = mode === seg.id
+                    const Icon = seg.icon
+                    const themeMap = {
+                      blue:    'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-200',
+                      emerald: 'bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-200',
+                      amber:   'bg-amber-500 text-white border-amber-500 shadow-md shadow-amber-200',
+                    }
+                    return (
+                      <button
+                        key={seg.id}
+                        type="button"
+                        onClick={() => setMode(seg.id)}
+                        className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all border ${active ? themeMap[seg.theme] : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50 hover:text-gray-700'}`}
+                      >
+                        <Icon size={14} /> {seg.label}
+                      </button>
+                    )
+                  })}
                 </div>
 
                 <div className="p-4">
-                  {/* ─── Advance Tab ─── */}
-                  {tab === 'advance' && (
+                  {/* ─── Add Charge ─── */}
+                  {mode === 'charge' && (
+                    <form onSubmit={handleCharge} className="space-y-3">
+                      <div>
+                        <label className="text-[10px] font-bold text-gray-500 uppercase">Description *</label>
+                        <input value={chgDesc} onChange={e => setChgDesc(e.target.value)} required
+                          placeholder="e.g. Doctor Visit, Surgery, Medicine"
+                          className={`mt-1 ${inp}`} />
+                      </div>
+
+                      {(ledger?.grouped_charges || []).length > 0 && (
+                        <div>
+                          <label className="text-[10px] font-bold text-gray-500 uppercase">Or use existing service</label>
+                          <select
+                            value={selectedExistingCharge}
+                            onChange={e => handleSelectExistingCharge(e.target.value)}
+                            className={`mt-1 ${inp}`}
+                          >
+                            <option value="">-- Add new service --</option>
+                            {(ledger?.grouped_charges || []).map(g => (
+                              <option key={g.id} value={g.id}>
+                                {g.description} (Qty so far: {parseInt(g.quantity || 0, 10) || 0})
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-[10px] text-gray-400 mt-1 italic">Picking an item only fills the description and last unit price.</p>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] font-bold text-gray-500 uppercase">Qty *</label>
+                          <input id="chg-qty-input" type="number" step="1" min="1" value={chgQty}
+                            onChange={e => setChgQty(e.target.value)} required placeholder="1"
+                            className={`mt-1 ${inp}`} />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-bold text-gray-500 uppercase">Unit Price (₹) *</label>
+                          <input id="chg-unit-input" type="number" step="0.01" min="0" value={chgUnitPrice}
+                            onChange={e => setChgUnitPrice(e.target.value)} required placeholder="e.g. 500"
+                            className={`mt-1 ${inp}`} />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between bg-blue-50 border border-blue-100 rounded-xl px-3 py-2">
+                        <span className="text-[11px] font-bold text-blue-700 uppercase tracking-wider">Line Total</span>
+                        <span className="text-base font-black text-blue-800 tabular-nums">
+                          ₹{parseFloat(chgLineTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-bold text-gray-500 uppercase">Status *</label>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                          {[
+                            { val: 'due',  label: 'Add to Bill (Due)' },
+                            { val: 'paid', label: 'Paid Now' },
+                          ].map(s => (
+                            <button key={s.val} type="button" onClick={() => setChgStatus(s.val)}
+                              className={`py-2 rounded-xl text-xs font-bold border transition-colors ${chgStatus === s.val ? (s.val === 'paid' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-blue-600 text-white border-blue-600') : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-blue-400'}`}>
+                              {s.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {chgStatus === 'paid' && (
+                        <div>
+                          <label className="text-[10px] font-bold text-gray-500 uppercase">Payment Mode *</label>
+                          <div className="grid grid-cols-4 gap-2 mt-1">
+                            {['cash', 'upi', 'card', 'other'].map(m => (
+                              <button key={m} type="button" onClick={() => setChgPaidMode(m)}
+                                className={`py-2 rounded-xl text-xs font-bold border transition-colors capitalize ${chgPaidMode === m ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-emerald-400'}`}>
+                                {m}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-600 font-medium">
+                        <input type="checkbox" checked={chgPrint} onChange={e => setChgPrint(e.target.checked)}
+                          className="w-4 h-4 accent-blue-600 rounded" />
+                        Print receipt after save
+                      </label>
+                      <button type="submit" disabled={submitting}
+                        className="w-full py-3 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm text-sm disabled:opacity-60">
+                        {submitting ? 'Saving…' : <><Plus size={16} /> Save Charge</>}
+                      </button>
+                    </form>
+                  )}
+
+                  {/* ─── Receive Money ─── */}
+                  {mode === 'receive' && (
                     <form onSubmit={handleAdvance} className="space-y-3">
                       <div>
                         <label className="text-[10px] font-bold text-gray-500 uppercase">Amount (₹) *</label>
@@ -9475,7 +10237,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       <div>
                         <label className="text-[10px] font-bold text-gray-500 uppercase">Payment Mode *</label>
                         <div className="grid grid-cols-4 gap-2 mt-1">
-                          {['cash', 'upi', 'other', 'credit'].map(m => (
+                          {['cash', 'upi', 'card', 'other'].map(m => (
                             <button key={m} type="button" onClick={() => setAdvMode(m)}
                               className={`py-2 rounded-xl text-xs font-bold border transition-colors capitalize ${advMode === m ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-emerald-400'}`}>
                               {m}
@@ -9491,86 +10253,48 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-600 font-medium">
                         <input type="checkbox" checked={advPrint} onChange={e => setAdvPrint(e.target.checked)}
                           className="w-4 h-4 accent-emerald-600 rounded" />
-                        Print Receipt After Save
+                        Print receipt after save
                       </label>
                       <button type="submit" disabled={submitting}
-                        className="w-full py-3 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm text-sm">
-                        {submitting ? 'Processing…' : <><IndianRupee size={16} /> {advMode === 'credit' ? 'Add Credit Entry' : 'Capture Advance'}</>}
+                        className="w-full py-3 rounded-xl bg-emerald-600 text-white font-bold hover:bg-emerald-700 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm text-sm disabled:opacity-60">
+                        {submitting ? 'Saving…' : <><IndianRupee size={16} /> Save Payment</>}
                       </button>
                     </form>
                   )}
 
-                  {/* ─── Service Charge Tab ─── */}
-                  {tab === 'charge' && (
-                    <form onSubmit={handleCharge} className="space-y-3">
-                      <div>
-                        <label className="text-[10px] font-bold text-gray-500 uppercase">Select Existing Service</label>
-                        <select
-                          value={selectedExistingCharge}
-                          onChange={e => handleSelectExistingCharge(e.target.value)}
-                          className={`mt-1 ${inp}`}
-                        >
-                          <option value="">-- Manual New Service --</option>
-                          {(ledger?.grouped_charges || []).map(g => (
-                            <option key={g.id} value={g.id}>
-                              {g.description} (Qty: {parseInt(g.quantity || 0, 10) || 0})
-                            </option>
-                          ))}
-                        </select>
-                        <p className="text-[10px] text-gray-400 mt-1 italic">Pick an existing item to quickly add one more quantity, or keep manual mode.</p>
+                  {/* ─── Apply Discount ─── */}
+                  {mode === 'discount' && (
+                    <form onSubmit={handleDiscount} className="space-y-3">
+                      <div className="flex items-start gap-2 p-2.5 rounded-xl bg-amber-50 border border-amber-100">
+                        <Tag size={14} className="text-amber-600 mt-0.5" />
+                        <p className="text-[11px] text-amber-800 font-medium leading-snug">
+                          Discount is added as a negative line so it subtracts from the total bill.
+                        </p>
                       </div>
                       <div>
-                        <label className="text-[10px] font-bold text-gray-500 uppercase">Description *</label>
-                        <input value={chgDesc} onChange={e => setChgDesc(e.target.value)} required
-                          placeholder="e.g. Doctor Visit, Surgery, Medicine"
+                        <label className="text-[10px] font-bold text-gray-500 uppercase">Reason *</label>
+                        <input value={discReason} onChange={e => setDiscReason(e.target.value)} required
+                          placeholder="e.g. Senior Citizen Discount, Room Rent Concession"
                           className={`mt-1 ${inp}`} />
                       </div>
                       <div>
-                        <label className="text-[10px] font-bold text-gray-500 uppercase">Amount (₹) *</label>
-                        <input id="chg-amount-input" type="number" step="1" value={chgAmount}
-                          onChange={e => setChgAmount(e.target.value)} required
-                          placeholder="Negative value = discount"
+                        <label className="text-[10px] font-bold text-gray-500 uppercase">Discount Amount (₹) *</label>
+                        <input id="disc-amount-input" type="number" step="1" min="0" value={discAmount}
+                          onChange={e => setDiscAmount(e.target.value)} required placeholder="e.g. 500"
                           className={`mt-1 ${inp}`} />
-                        <p className="text-[10px] text-gray-400 mt-1 italic">Use a negative amount or toggle the discount switch below</p>
+                        <p className="text-[10px] text-gray-400 mt-1 italic">Enter a positive number; it will be saved as a discount.</p>
                       </div>
 
-                      <div className="flex items-center justify-between p-3 bg-amber-50 rounded-xl border border-amber-100">
-                        <div className="flex items-center gap-2">
-                          <Tag size={16} className="text-amber-600" />
-                          <div>
-                            <p className="text-xs font-bold text-amber-800">Apply as Discount</p>
-                            <p className="text-[10px] text-amber-600 font-medium">This will subtract from the total bill</p>
-                          </div>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input type="checkbox" checked={chgIsDiscount} onChange={e => setChgIsDiscount(e.target.checked)} className="sr-only peer" />
-                          <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
-                        </label>
-                      </div>
-                      <div>
-                        <label className="text-[10px] font-bold text-gray-500 uppercase">Payment Status</label>
-                        <div className="grid grid-cols-2 gap-2 mt-1">
-                          {[
-                            { val: 'credit', label: 'Credit (Due)' },
-                            { val: 'cash',   label: '💵 Cash Paid'  },
-                            { val: 'upi',    label: '📱 UPI Paid'   },
-                            { val: 'other',  label: 'Other Paid'   },
-                          ].map(m => (
-                            <button key={m.val} type="button" onClick={() => setChgMode(m.val)}
-                              className={`py-2 rounded-xl text-xs font-bold border transition-colors ${chgMode === m.val ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-50 text-gray-600 border-gray-200 hover:border-blue-400'}`}>
-                              {m.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm text-gray-600 font-medium">
-                        <input type="checkbox" checked={chgPrint} onChange={e => setChgPrint(e.target.checked)}
-                          className="w-4 h-4 accent-blue-600 rounded" />
-                        Print Receipt After Save
-                      </label>
+                      {parseFloat(ledger.room_rent) > 0 && (
+                        <button type="button" onClick={applyRoomRentDiscount}
+                          className="w-full flex items-center justify-center gap-2 text-xs bg-amber-100 hover:bg-amber-200 text-amber-800 px-3 py-2 rounded-xl font-bold border border-amber-200 transition-colors">
+                          <Tag size={13} /> Use “Room Rent Discount”
+                        </button>
+                      )}
+
                       <button type="submit" disabled={submitting}
-                        className="w-full py-3 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm text-sm">
-                        {submitting ? 'Processing…' : <><Plus size={16} /> {chgMode === 'credit' ? 'Add Charge (Credit)' : 'Add & Pay'}</>}
+                        className="w-full py-3 rounded-xl bg-amber-500 text-white font-bold hover:bg-amber-600 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm text-sm disabled:opacity-60">
+                        {submitting ? 'Saving…' : <><Tag size={16} /> Save Discount</>}
                       </button>
                     </form>
                   )}
