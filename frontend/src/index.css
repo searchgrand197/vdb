@@ -28,3 +28,14 @@
   -webkit-user-select: text;
   -ms-user-select: text;
 }
+
+/* Admin portal — ensure full height for MUI layout */
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}

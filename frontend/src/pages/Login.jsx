@@ -10,7 +10,7 @@ const ROLES = [
   { label: 'Receptionist', value: 'receptionist', path: '/receptionist', icon: ClipboardList, color: '#8b5cf6' },
   { label: 'Lab',          value: 'lab',          path: '/lab',          icon: FlaskConical,  color: '#06b6d4' },
   { label: 'Pharmacy',     value: 'pharmacy',     path: '/pharmacy',     icon: Store,         color: '#10b981' },
-  { label: 'Admin',        value: 'admin',        path: '/admin-dashboard', icon: Shield,      color: '#f59e0b' },
+  { label: 'Admin',        value: 'admin',        path: '/admin',        icon: Shield,        color: '#dc2626' },
 ]
 
 const STYLE = `
@@ -66,7 +66,7 @@ const STYLE = `
         text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px; }
 
   /* ── Role pills — all 5 in one row ── */
-  .rg { display:grid; grid-template-columns:repeat(6,1fr); gap:5px; margin-bottom:12px; }
+  .rg { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; margin-bottom:12px; }
   .rp {
     display:flex; flex-direction:column; align-items:center; gap:3px;
     padding:7px 2px 6px; border-radius:10px; border:2px solid transparent;
@@ -203,10 +203,6 @@ export default function Login() {
     try {
       const { data } = await api.post('/auth/login/', { email: normalizedEmail, password })
       const payload = data?.data || {}
-      if (role === 'admin' && !payload?.is_superuser) {
-        toast.error('Admin dashboard access is allowed for superusers only')
-        return
-      }
       localStorage.setItem('access',  payload.access)
       localStorage.setItem('refresh', payload.refresh)
       localStorage.setItem('role',    role)

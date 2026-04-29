@@ -194,7 +194,7 @@ const pkgColors = {
 
 const COPY_DISABLED_TOAST_MESSAGE = 'Copy disabled for security reasons'
 const COPY_DISABLED_TOAST_COOLDOWN_MS = 2000
-const ADMIN_ROLES = new Set(['admin', 'superadmin'])
+const COPY_EXEMPT_ROLES = new Set(['superadmin'])
 
 function useDoctorPortalCopyProtection(scopeRef, { enabled }) {
   const lastToastAtRef = useRef(0)
@@ -3168,7 +3168,7 @@ export default function DoctorPortal() {
   const doctorPortalRef = useRef(null)
   const user = JSON.parse(localStorage.getItem('user') || '{}')
   const role = String(localStorage.getItem('role') || user?.role || '').toLowerCase()
-  const copyRestrictionsEnabled = !ADMIN_ROLES.has(role)
+  const copyRestrictionsEnabled = !COPY_EXEMPT_ROLES.has(role)
 
   useDoctorPortalCopyProtection(doctorPortalRef, { enabled: copyRestrictionsEnabled })
 
