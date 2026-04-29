@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from apps.discharge.models import DischargeInvestigation, DischargeMedication, DischargeSummary
+from apps.discharge.models import DischargeInvestigation, DischargeMedication, DischargeSummary, DischargeSurgery
 
 
 class DischargeMedicationSerializer(serializers.ModelSerializer):
@@ -15,6 +15,23 @@ class DischargeInvestigationSerializer(serializers.ModelSerializer):
         fields = ["id", "category", "test_name", "value", "reference_range", "test_date", "sort_order"]
 
 
+class DischargeSurgerySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DischargeSurgery
+        fields = [
+            "id",
+            "surgery_date",
+            "procedure_name",
+            "surgeon_name",
+            "assistant_name",
+            "anaesthetist_name",
+            "anaesthesia_type",
+            "operative_findings",
+            "intra_op_complications",
+            "sort_order",
+        ]
+
+
 class DischargeSummarySerializer(serializers.ModelSerializer):
     patient_name = serializers.SerializerMethodField()
     patient_uhid = serializers.CharField(source="admission.patient.uhid", read_only=True)
@@ -22,6 +39,7 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
     admission_ipd_no = serializers.CharField(source="admission.ipd_no", read_only=True)
     medication_rows = DischargeMedicationSerializer(many=True, read_only=True)
     investigation_rows = DischargeInvestigationSerializer(many=True, read_only=True)
+    surgery_rows = DischargeSurgerySerializer(many=True, read_only=True)
 
     class Meta:
         model = DischargeSummary
@@ -97,6 +115,7 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
             "outstanding_balance",
             "medication_rows",
             "investigation_rows",
+            "surgery_rows",
             "created_at",
         ]
         read_only_fields = ["hospital"]

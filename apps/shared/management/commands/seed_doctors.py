@@ -50,8 +50,8 @@ DOCTORS = [
         "mobile": "9800000003",
     },
     {
-        "name": "Dr. Sunita Verma",
-        "email": "dr.sunita.verma@hms.local",
+        "name": "Dr. Sana Verma",
+        "email": "dr.sana.verma@hms.local",
         "specialty_code": "PEDIATRICS",
         "specialty_name": "Pediatrics",
         "dept_code": "PEDIATRICS",

@@ -108,6 +108,8 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
                 InvoiceItem.objects.create(
                     invoice=invoice,
                     description=item["description"],
+                    category=item.get("category", ""),
+                    subcategory=item.get("subcategory", ""),
                     quantity=qty,
                     unit_price=unit_price,
                     line_total=line_total,

@@ -6,7 +6,7 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.discharge.models import DischargeInvestigation, DischargeMedication, DischargeSummary
+from apps.discharge.models import DischargeInvestigation, DischargeMedication, DischargeSummary, DischargeSurgery
 from apps.discharge.serializers import DischargeSummarySerializer
 from apps.ipd.models import IPDAdmission
 from apps.billing.models import BillingInvoice
@@ -62,7 +62,7 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
     queryset = (
         DischargeSummary.objects.all()
         .select_related("admission", "admission__patient", "admission__assigned_doctor")
-        .prefetch_related("medication_rows", "investigation_rows")
+        .prefetch_related("medication_rows", "investigation_rows", "surgery_rows")
     )
     serializer_class = DischargeSummarySerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -338,6 +338,71 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
                         sort_order=i,
                     )
 
+        if "surgery_rows" in request.data:
+            summary.surgery_rows.all().delete()
+            rows = request.data.get("surgery_rows") or []
+            if isinstance(rows, list):
+                for i, row in enumerate(rows):
+                    if not isinstance(row, dict):
+                        continue
+                    procedure_name = (
+                        row.get("procedure_name")
+                        or row.get("procedure_surgery")
+                        or row.get("name")
+                        or ""
+                    ).strip()
+                    if not procedure_name:
+                        continue
+                    DischargeSurgery.objects.create(
+                        summary=summary,
+                        surgery_date=_parse_optional_date(row.get("surgery_date")),
+                        procedure_name=procedure_name[:300],
+                        surgeon_name=(row.get("surgeon_name") or "")[:200],
+                        assistant_name=(row.get("assistant_name") or "")[:200],
+                        anaesthetist_name=(row.get("anaesthetist_name") or "")[:200],
+                        anaesthesia_type=(row.get("anaesthesia_type") or "")[:120],
+                        operative_findings=(row.get("operative_findings") or ""),
+                        intra_op_complications=(row.get("intra_op_complications") or ""),
+                        sort_order=i,
+                    )
+
+                first_row = next(
+                    (
+                        r
+                        for r in rows
+                        if isinstance(r, dict)
+                        and (
+                            (r.get("procedure_name") or "").strip()
+                            or (r.get("procedure_surgery") or "").strip()
+                        )
+                    ),
+                    None,
+                )
+                if first_row:
+                    summary.procedure_surgery = (
+                        (first_row.get("procedure_name") or first_row.get("procedure_surgery") or "").strip()
+                    )
+                    summary.surgery_date = _parse_optional_date(first_row.get("surgery_date"))
+                    summary.surgeon_name = (first_row.get("surgeon_name") or "")[:200]
+                    summary.assistant_name = (first_row.get("assistant_name") or "")[:200]
+                    summary.anaesthetist_name = (first_row.get("anaesthetist_name") or "")[:200]
+                    summary.anaesthesia_type = (first_row.get("anaesthesia_type") or "")[:120]
+                    summary.operative_findings = first_row.get("operative_findings") or ""
+                    summary.intra_op_complications = first_row.get("intra_op_complications") or ""
+                    summary.save(
+                        update_fields=[
+                            "procedure_surgery",
+                            "surgery_date",
+                            "surgeon_name",
+                            "assistant_name",
+                            "anaesthetist_name",
+                            "anaesthesia_type",
+                            "operative_findings",
+                            "intra_op_complications",
+                            "updated_at",
+                        ]
+                    )
+
         if is_finalize_payload and admission.status != IPDAdmission.Status.DISCHARGED:
             self._finalize_admission(admission, hospital_id, summary=summary)
 
@@ -345,7 +410,7 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
             DischargeSummary.objects.select_related(
                 "admission", "admission__patient", "admission__assigned_doctor"
             )
-            .prefetch_related("medication_rows", "investigation_rows")
+            .prefetch_related("medication_rows", "investigation_rows", "surgery_rows")
             .get(pk=summary.pk)
         )
         out = self.get_serializer(summary)
