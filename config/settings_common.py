@@ -208,16 +208,16 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-# Email / SMTP (hard-coded for this project; consider moving to .env for security)
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "smtpout.secureserver.net"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True
-EMAIL_USE_TLS = False
-EMAIL_HOST_USER = "support@intvice.com"
-EMAIL_HOST_PASSWORD = "Nvn$aroy001"
-DEFAULT_FROM_EMAIL = "support@intvice.com"
-SERVER_EMAIL = "support@intvice.com"
+# Email / SMTP
+EMAIL_BACKEND = env.str("EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = env.str("EMAIL_HOST", default="smtpout.secureserver.net")
+EMAIL_PORT = env.int("EMAIL_PORT", default=465)
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=True)
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
+EMAIL_HOST_USER = env.str("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env.str("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", default=EMAIL_HOST_USER or "webmaster@localhost")
+SERVER_EMAIL = env.str("SERVER_EMAIL", default=DEFAULT_FROM_EMAIL)
 
 # Base URL used for building absolute links in emails (e.g. leave approval buttons).
 # Override this in production with your actual domain.

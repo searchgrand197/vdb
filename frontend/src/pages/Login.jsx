@@ -180,7 +180,7 @@ export default function Login() {
       .then(({ data }) => {
         const list = data?.data || []
         setBranches(list)
-        if (list.length > 0) setBranchId(list[0].id)
+        setBranchId('')
       })
       .catch(() => toast.error('Could not load pharmacy branches'))
       .finally(() => setBranchesLoading(false))

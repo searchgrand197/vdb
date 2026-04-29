@@ -101,6 +101,16 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;')
 }
 
+function extractNotesAdviceFromRemarks(remarks) {
+  const raw = String(remarks || '')
+  if (!raw.trim()) return ''
+  const lower = raw.toLowerCase()
+  const key = 'notes/advice:'
+  const idx = lower.indexOf(key)
+  if (idx < 0) return ''
+  return raw.slice(idx + key.length).trim()
+}
+
 /** Patient name from API / billing (PatientSerializer includes middle_name). */
 function patientDisplayName(pd) {
   if (!pd || typeof pd !== 'object') return ''
@@ -295,6 +305,8 @@ function buildInvoiceHtml({ invoice, outlet }) {
   const patientAddrHtml = escapeHtml(patientDisplayAddress(pd))
   const doctorNameHtml = escapeHtml(invoiceDoctorDisplayName(invoice))
   const invoiceDate = safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy')
+  const notesAdviceText = extractNotesAdviceFromRemarks(invoice.remarks)
+  const notesAdviceHtml = notesAdviceText ? escapeHtml(notesAdviceText).replace(/\n/g, '<br/>') : ''
 
   return `<!DOCTYPE html>
 <html>
@@ -381,7 +393,11 @@ function buildInvoiceHtml({ invoice, outlet }) {
         <div>Please consult the Doctor before using medicine.</div>
         <div>Medicine without batch and expiry date will not be taken back.</div>
         <div>All disputes subject to local Jurisdiction only.</div>
-        <div style="margin-top:8px"><strong>Remark :</strong> ___________________________</div>
+        ${
+          notesAdviceHtml
+            ? `<div style="margin-top:8px"><strong>Notes/Advice :</strong><div style="margin-top:3px;line-height:1.4">${notesAdviceHtml}</div></div>`
+            : `<div style="margin-top:8px"><strong>Remark :</strong> ___________________________</div>`
+        }
       </div>
       <div style="flex:1;padding:8px;text-align:center;border-right:1px solid #000;display:flex;flex-direction:column;justify-content:space-between">
         <div style="font-size:8px;margin-bottom:4px">For ${title}</div>
@@ -463,6 +479,7 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
   const patientNameLabel = patientDisplayName(pd) || '—'
   const patientAddrLabel = patientDisplayAddress(pd)
   const doctorLabel = invoiceDoctorDisplayName(invoice)
+  const notesAdvice = extractNotesAdviceFromRemarks(invoice.remarks)
 
   const biz = outlet || {}
   const title = (biz.business_name || 'Pharmacy').toUpperCase()
@@ -668,7 +685,14 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
             <div>Medicine without batch and expiry date will not be taken back.</div>
             <div>All disputes subject to local Jurisdiction only.</div>
             <div style={{ marginTop: '8px' }}>
-              <strong>Remark :</strong> ___________________________
+              {notesAdvice ? (
+                <>
+                  <strong>Notes/Advice :</strong>
+                  <div style={{ marginTop: '3px', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>{notesAdvice}</div>
+                </>
+              ) : (
+                <><strong>Remark :</strong> ___________________________</>
+              )}
             </div>
           </div>
 

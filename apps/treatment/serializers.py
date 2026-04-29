@@ -6,6 +6,7 @@ from apps.treatment.models import (
     TreatmentPlanItem,
     TreatmentPlanStaffAssignment,
     TreatmentTask,
+    TreatmentTemplateCatalog,
 )
 
 
@@ -262,3 +263,10 @@ class PatientTimelineSerializer(serializers.ModelSerializer):
             return _safe_patient_name(obj.patient)
         except Exception:
             return None
+
+
+class TreatmentTemplateCatalogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TreatmentTemplateCatalog
+        fields = ["id", "hospital", "templates", "packages", "updated_by", "updated_at"]
+        read_only_fields = ["id", "hospital", "updated_by", "updated_at"]

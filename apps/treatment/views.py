@@ -17,6 +17,7 @@ from apps.treatment.models import (
     TreatmentPlanItem,
     TreatmentPlanStaffAssignment,
     TreatmentTask,
+    TreatmentTemplateCatalog,
 )
 from apps.treatment.serializers import (
     PatientTimelineSerializer,
@@ -28,6 +29,7 @@ from apps.treatment.serializers import (
     TreatmentPlanStaffAssignmentSerializer,
     TreatmentTaskSerializer,
     TreatmentTaskStatusUpdateSerializer,
+    TreatmentTemplateCatalogSerializer,
 )
 from apps.treatment.services import (
     cancel_plan,
@@ -473,3 +475,41 @@ class PatientPlanOverviewView(APIView):
             })
 
         return Response(results)
+
+
+class TreatmentTemplateCatalogView(APIView):
+    """GET/PUT /api/v1/treatment/template-package-catalog/"""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        hid = getattr(request.user, "hospital_id", None)
+        if not hid and not request.user.is_superuser:
+            return Response({"templates": [], "packages": []})
+        catalog = TreatmentTemplateCatalog.objects.filter(hospital_id=hid).first()
+        if not catalog:
+            return Response({"templates": [], "packages": []})
+        return Response(TreatmentTemplateCatalogSerializer(catalog).data)
+
+    def put(self, request, *args, **kwargs):
+        hid = getattr(request.user, "hospital_id", None)
+        if not hid and not request.user.is_superuser:
+            return Response({"detail": "User hospital context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        templates = request.data.get("templates", [])
+        packages = request.data.get("packages", [])
+        if not isinstance(templates, list) or not isinstance(packages, list):
+            return Response(
+                {"detail": "Both 'templates' and 'packages' must be arrays."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        catalog, _ = TreatmentTemplateCatalog.objects.get_or_create(
+            hospital_id=hid,
+            defaults={"templates": templates, "packages": packages, "updated_by": request.user},
+        )
+        catalog.templates = templates
+        catalog.packages = packages
+        catalog.updated_by = request.user
+        catalog.save(update_fields=["templates", "packages", "updated_by", "updated_at"])
+        return Response(TreatmentTemplateCatalogSerializer(catalog).data)

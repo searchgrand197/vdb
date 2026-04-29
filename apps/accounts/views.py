@@ -186,8 +186,9 @@ class PharmacyBranchListView(APIView):
     def get(self, request, *args, **kwargs):
         from apps.pharmacy.models import Pharmacy
 
+        default_hospital_name = "Default Hospital"
         branches = (
-            Pharmacy.objects.filter(is_active=True)
+            Pharmacy.objects.filter(is_active=True, hospital__name__iexact=default_hospital_name)
             .order_by("display_name", "name")
             .values("id", "name", "display_name")
         )
