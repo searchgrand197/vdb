@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter
@@ -103,6 +104,23 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
 
         if not hospital_id:
             hospital_id = self.request.user.hospital_id
+
+        patient = serializer.validated_data.get("patient")
+        if patient:
+            existing = IPDAdmission.objects.filter(
+                hospital_id=hospital_id,
+                patient=patient,
+                is_deleted=False,
+            ).exclude(
+                status__in=[IPDAdmission.Status.DISCHARGED, IPDAdmission.Status.CANCELLED]
+            ).first()
+            if existing:
+                raise ValidationError({
+                    "patient": [
+                        f"Patient already has an active IPD admission ({existing.ipd_no or existing.id}) in "
+                        f"{existing.ward_name or 'ward'} / {existing.bed_code or 'bed'}."
+                    ]
+                })
 
         admission: IPDAdmission = serializer.save(hospital_id=hospital_id)
 
@@ -288,7 +306,7 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         
         record_charges = []
         grouped_charge_map = {}
-        invoice_to_group_key = {}
+        invoice_to_event_refs = {}
         invoices_total = Decimal("0.00")
         for inv in invoices:
             # Paid advance invoices are deposits, not billable charges.
@@ -296,56 +314,155 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 continue
             invoices_total += inv.total_amount
             items = list(inv.items.all())
-            desc = items[0].description if len(items) == 1 else f"{len(items)} items"
-            quantity = Decimal("1")
-            unit_price = inv.total_amount
-            charge_times = [inv.created_at.isoformat()]
-            if items:
-                quantity = sum((it.quantity or Decimal("0.00")) for it in items) or Decimal("1")
-                charge_times = [(it.created_at or inv.created_at).isoformat() for it in items]
-                if len(items) == 1:
-                    unit_price = items[0].unit_price if items[0].unit_price is not None else inv.total_amount
-                else:
-                    unit_price = (inv.total_amount / quantity) if quantity else inv.total_amount
+            invoice_event_refs = []
+            invoice_to_event_refs[str(inv.id)] = invoice_event_refs
+            invoice_payment_mode = "credit" if (inv.amount_paid or Decimal("0.00")) <= Decimal("0.00") else "cash"
+
             if inv.invoice_no.startswith("IPDADV-") and (inv.amount_paid or Decimal("0.00")) == Decimal("0.00"):
                 desc = "Advance (Credit / Due)"
-            record_charges.append({
-                "id": str(inv.id),
-                "type": "charge",
-                "date": inv.created_at.isoformat(),
-                "description": desc,
-                "amount": str(inv.total_amount),
-                "invoice_no": inv.invoice_no,
-                "quantity": str(quantity),
-                "unit_price": str(unit_price),
-                "charge_times": charge_times,
-                "payment_mode": "credit" if (inv.amount_paid or Decimal("0.00")) <= Decimal("0.00") else "cash",
-            })
-
-            group_key = (desc or "").strip().lower()
-            invoice_to_group_key[str(inv.id)] = group_key
-            if group_key not in grouped_charge_map:
-                grouped_charge_map[group_key] = {
-                    "id": f"grp-{str(inv.id)}",
+                quantity = Decimal("1")
+                unit_price = inv.total_amount
+                charge_date = inv.created_at.isoformat()
+                record_charges.append({
+                    "id": str(inv.id),
+                    "type": "charge",
+                    "date": charge_date,
                     "description": desc,
-                    "quantity": Decimal("0.00"),
-                    "total_amount": Decimal("0.00"),
-                    "total_paid": Decimal("0.00"),
-                    "events": [],
+                    "amount": str(inv.total_amount),
+                    "invoice_no": inv.invoice_no,
+                    "quantity": str(quantity),
+                    "unit_price": str(unit_price),
+                    "charge_times": [charge_date],
+                    "payment_mode": invoice_payment_mode,
+                })
+                group_key = (desc or "").strip().lower()
+                if group_key not in grouped_charge_map:
+                    grouped_charge_map[group_key] = {
+                        "id": f"grp-{str(inv.id)}",
+                        "description": desc,
+                        "quantity": Decimal("0.00"),
+                        "total_amount": Decimal("0.00"),
+                        "total_paid": Decimal("0.00"),
+                        "events": [],
+                    }
+                grouped_charge_map[group_key]["quantity"] += quantity
+                grouped_charge_map[group_key]["total_amount"] += inv.total_amount
+                event_ref = {
+                    "id": str(inv.id),
+                    "name": desc,
+                    "date": charge_date,
+                    "price": str(inv.total_amount),
+                    "quantity": str(quantity),
+                    "invoice_no": inv.invoice_no,
+                    "payment_mode": invoice_payment_mode,
+                    "paid_amount": "0.00",
+                    "slip_number": "",
                 }
-            grouped_charge_map[group_key]["quantity"] += quantity
-            grouped_charge_map[group_key]["total_amount"] += inv.total_amount
-            grouped_charge_map[group_key]["events"].append({
-                "id": str(inv.id),
-                "name": desc,
-                "date": inv.created_at.isoformat(),
-                "price": str(inv.total_amount),
-                "quantity": str(quantity),
-                "invoice_no": inv.invoice_no,
-                "payment_mode": "credit" if (inv.amount_paid or Decimal("0.00")) <= Decimal("0.00") else "cash",
-                "paid_amount": "0.00",
-                "slip_number": "",
-            })
+                grouped_charge_map[group_key]["events"].append(event_ref)
+                invoice_event_refs.append({
+                    "group_key": group_key,
+                    "event": event_ref,
+                    "amount": inv.total_amount,
+                })
+                continue
+
+            if not items:
+                desc = "Service"
+                quantity = Decimal("1")
+                unit_price = inv.total_amount
+                charge_date = inv.created_at.isoformat()
+                record_charges.append({
+                    "id": str(inv.id),
+                    "type": "charge",
+                    "date": charge_date,
+                    "description": desc,
+                    "amount": str(inv.total_amount),
+                    "invoice_no": inv.invoice_no,
+                    "quantity": str(quantity),
+                    "unit_price": str(unit_price),
+                    "charge_times": [charge_date],
+                    "payment_mode": invoice_payment_mode,
+                })
+                group_key = (desc or "").strip().lower()
+                if group_key not in grouped_charge_map:
+                    grouped_charge_map[group_key] = {
+                        "id": f"grp-{str(inv.id)}",
+                        "description": desc,
+                        "quantity": Decimal("0.00"),
+                        "total_amount": Decimal("0.00"),
+                        "total_paid": Decimal("0.00"),
+                        "events": [],
+                    }
+                grouped_charge_map[group_key]["quantity"] += quantity
+                grouped_charge_map[group_key]["total_amount"] += inv.total_amount
+                event_ref = {
+                    "id": str(inv.id),
+                    "name": desc,
+                    "date": charge_date,
+                    "price": str(inv.total_amount),
+                    "quantity": str(quantity),
+                    "invoice_no": inv.invoice_no,
+                    "payment_mode": invoice_payment_mode,
+                    "paid_amount": "0.00",
+                    "slip_number": "",
+                }
+                grouped_charge_map[group_key]["events"].append(event_ref)
+                invoice_event_refs.append({
+                    "group_key": group_key,
+                    "event": event_ref,
+                    "amount": inv.total_amount,
+                })
+                continue
+
+            for idx, item in enumerate(items):
+                desc = (item.description or "Service").strip() or "Service"
+                quantity = item.quantity or Decimal("1")
+                unit_price = item.unit_price if item.unit_price is not None else Decimal("0.00")
+                line_total = item.line_total if item.line_total is not None else (unit_price * quantity)
+                charge_date = (item.created_at or inv.created_at).isoformat()
+
+                record_charges.append({
+                    "id": f"{inv.id}:{idx + 1}",
+                    "type": "charge",
+                    "date": charge_date,
+                    "description": desc,
+                    "amount": str(line_total),
+                    "invoice_no": inv.invoice_no,
+                    "quantity": str(quantity),
+                    "unit_price": str(unit_price),
+                    "charge_times": [charge_date],
+                    "payment_mode": invoice_payment_mode,
+                })
+
+                group_key = (desc or "").strip().lower()
+                if group_key not in grouped_charge_map:
+                    grouped_charge_map[group_key] = {
+                        "id": f"grp-{str(inv.id)}-{idx + 1}",
+                        "description": desc,
+                        "quantity": Decimal("0.00"),
+                        "total_amount": Decimal("0.00"),
+                        "total_paid": Decimal("0.00"),
+                        "events": [],
+                    }
+                grouped_charge_map[group_key]["quantity"] += quantity
+                grouped_charge_map[group_key]["total_amount"] += line_total
+                event_ref = {
+                    "id": f"{inv.id}:{idx + 1}",
+                    "name": desc,
+                    "date": charge_date,
+                    "price": str(line_total),
+                    "quantity": str(quantity),
+                    "invoice_no": inv.invoice_no,
+                    "payment_mode": invoice_payment_mode,
+                    "paid_amount": "0.00",
+                    "slip_number": "",
+                }
+                grouped_charge_map[group_key]["events"].append(event_ref)
+                invoice_event_refs.append({
+                    "group_key": group_key,
+                    "event": event_ref,
+                    "amount": line_total,
+                })
 
         pharmacy_invoices = PharmacyInvoice.objects.filter(
             ipd_admission=admission,
@@ -435,18 +552,26 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 "amount": str(p.amount),
                 "invoice_no": p.invoice.invoice_no
             })
-            group_key = invoice_to_group_key.get(str(p.invoice_id))
-            if group_key and group_key in grouped_charge_map:
-                grouped_charge_map[group_key]["total_paid"] += p.amount
-                # allocate payment to latest event for same invoice
-                group_events = grouped_charge_map[group_key]["events"]
-                for ev in reversed(group_events):
-                    if ev.get("id") == str(p.invoice_id):
-                        existing = Decimal(str(ev.get("paid_amount", "0.00")))
-                        ev["paid_amount"] = str(existing + p.amount)
-                        ev["payment_mode"] = p.payment_mode or ev.get("payment_mode") or "other"
-                        ev["slip_number"] = getattr(p, "slip_number", "") or ev.get("slip_number") or ""
-                        break
+            event_refs = invoice_to_event_refs.get(str(p.invoice_id), [])
+            if event_refs:
+                total_ref_amount = sum((ref["amount"] or Decimal("0.00")) for ref in event_refs) or Decimal("0.00")
+                remaining = p.amount
+                for idx, ref in enumerate(event_refs):
+                    group_key = ref.get("group_key")
+                    ev = ref.get("event")
+                    if not group_key or group_key not in grouped_charge_map or not ev:
+                        continue
+                    if idx == len(event_refs) - 1 or total_ref_amount <= Decimal("0.00"):
+                        allocation = remaining
+                    else:
+                        ratio = (ref["amount"] or Decimal("0.00")) / total_ref_amount if total_ref_amount > 0 else Decimal("0.00")
+                        allocation = (p.amount * ratio).quantize(Decimal("0.01"))
+                        remaining -= allocation
+                    grouped_charge_map[group_key]["total_paid"] += allocation
+                    existing = Decimal(str(ev.get("paid_amount", "0.00")))
+                    ev["paid_amount"] = str(existing + allocation)
+                    ev["payment_mode"] = p.payment_mode or ev.get("payment_mode") or "other"
+                    ev["slip_number"] = getattr(p, "slip_number", "") or ev.get("slip_number") or ""
         # Include pharmacy payments in totals so statement math stays consistent.
         total_paid += pharmacy_paid
         record_payments.extend(pharmacy_payment_rows)
@@ -561,6 +686,8 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         admission = self.get_object()
         description = request.data.get("description")
         amount_str = request.data.get("amount")
+        quantity_str = request.data.get("quantity")
+        unit_price_str = request.data.get("unit_price")
 
         if not description or not amount_str:
             return Response({"error": "Description and amount are required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -569,6 +696,23 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
             amount = Decimal(str(amount_str))
         except:
             return Response({"error": "Invalid amount format"}, status=status.HTTP_400_BAD_REQUEST)
+        if amount <= 0:
+            return Response({"error": "Amount must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            quantity = Decimal(str(quantity_str if quantity_str is not None else "1"))
+        except Exception:
+            return Response({"error": "Invalid quantity format"}, status=status.HTTP_400_BAD_REQUEST)
+        if quantity <= 0:
+            return Response({"error": "Quantity must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if unit_price_str is not None and str(unit_price_str).strip() != "":
+            try:
+                unit_price = Decimal(str(unit_price_str))
+            except Exception:
+                return Response({"error": "Invalid unit price format"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            unit_price = (amount / quantity) if quantity else amount
 
         # 1. Generate Invoice No (Prefix IPDSRV)
         hospital = admission.hospital
@@ -602,8 +746,8 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         InvoiceItem.objects.create(
             invoice=invoice,
             description=description,
-            quantity=Decimal("1"),
-            unit_price=amount,
+            quantity=quantity,
+            unit_price=unit_price,
             line_total=amount
         )
 
@@ -626,6 +770,8 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
             "invoice_no": invoice.invoice_no,
             "description": description,
             "amount": amount,
+            "quantity": str(quantity),
+            "unit_price": str(unit_price),
             "payment": payment_data
         })
 

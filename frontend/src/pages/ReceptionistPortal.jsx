@@ -122,6 +122,10 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;')
 }
 
+function sanitizePersonName(value) {
+  return String(value || '').replace(/[0-9]/g, '')
+}
+
 const PRINT_WINDOW_CLOSE_SCRIPT = `<script>
   (function () {
     let finalized = false
@@ -146,7 +150,8 @@ const PRINT_WINDOW_CLOSE_SCRIPT = `<script>
   })()
 </script>`
 
-function createSameTabPrintWindow() {
+function createSameTabPrintWindow(options = {}) {
+  const { onComplete } = options
   let html = ''
   return {
     document: {
@@ -167,10 +172,19 @@ function createSameTabPrintWindow() {
         document.body.appendChild(iframe)
 
         let cleaned = false
+        let completed = false
+        const notifyComplete = () => {
+          if (completed) return
+          completed = true
+          if (typeof onComplete === 'function') {
+            try { onComplete() } catch {}
+          }
+        }
         const cleanup = () => {
           if (cleaned) return
           cleaned = true
           try { iframe.remove() } catch {}
+          notifyComplete()
         }
 
         const onFrameLoad = () => {
@@ -613,6 +627,7 @@ function OPDSection({ rooms }) {
   const submitActionRef = useRef('thermal')
   const [layoutFields, setLayoutFields] = useState([])
   const [templateValues, setTemplateValues] = useState({})
+  const opdAmountManuallyEditedRef = useRef(false)
   const normalizeId = (value) => {
     if (value == null) return ''
     if (typeof value === 'object') {
@@ -725,7 +740,7 @@ function OPDSection({ rooms }) {
 
   useEffect(() => {
     // When a default doctor is preselected (from OPD settings), auto-fill fee after doctors load.
-    if (!form.doctor || form.amount) return
+    if (!form.doctor || form.amount || opdAmountManuallyEditedRef.current) return
     const selectedDoc = findDoctorBySelectedId(doctors, form.doctor)
     const fee = getDoctorFee(selectedDoc)
     if (fee == null) return
@@ -774,11 +789,7 @@ function OPDSection({ rooms }) {
           ...vis,
           room,
           display_token: buildDisplayToken(vis, room),
-          doc_name:
-            findDoctorBySelectedId(doctorRows, vis.doctor_user)?.name ||
-            vis.doctor_name ||
-            vis.doc_name ||
-            '—',
+          doc_name: findDoctorBySelectedId(doctorRows, vis.doctor_user)?.name || '—',
         }
       }))
       // Keep shift collection totals in sync with newly created/updated visits.
@@ -974,6 +985,18 @@ function OPDSection({ rooms }) {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    if (/\d/.test(form.patient_name || '')) {
+      toast.error('Patient name cannot contain numbers')
+      return
+    }
+    if (/\d/.test(form.guardian_name || '')) {
+      toast.error('Guardian name cannot contain numbers')
+      return
+    }
+    if (form.amount !== '' && Number(form.amount) < 0) {
+      toast.error('Amount cannot be negative')
+      return
+    }
     setSubmitting(true)
     try {
       let patientId = matchedPatient?.id
@@ -1355,15 +1378,15 @@ function OPDSection({ rooms }) {
 
           <div className="col-span-3">
             <label className={lblFilled}>Patient Name</label>
-            <input value={form.patient_name} onChange={e => setForm(f => ({ ...f, patient_name: capitalizePersonName(e.target.value) }))} placeholder="Full Name" className={inpFilled} />
+            <input value={form.patient_name} onChange={e => setForm(f => ({ ...f, patient_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))} placeholder="Full Name" className={inpFilled} />
           </div>
           <div className="col-span-3">
             <label className={lblFilled}>Guardian / Relative Name</label>
-            <input value={form.guardian_name} onChange={e => setForm(f => ({ ...f, guardian_name: capitalizePersonName(e.target.value) }))} placeholder="Guardian name" className={inpFilled} />
+            <input value={form.guardian_name} onChange={e => setForm(f => ({ ...f, guardian_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))} placeholder="Guardian name" className={inpFilled} />
           </div>
           <div className="col-span-3">
             <label className={lblFilled}>Age</label>
-            <input type="number" min="0" max="150" value={form.age} onChange={e => setForm(f => ({ ...f, age: e.target.value }))} placeholder="yrs" className={inpFilled} />
+            <input type="number" min="0" max="150" value={form.age} onChange={e => setForm(f => ({ ...f, age: e.target.value.replace(/\D/g, '').slice(0, 3) }))} placeholder="yrs" className={inpFilled} />
           </div>
 
           <div className="col-span-12">
@@ -1479,6 +1502,7 @@ function OPDSection({ rooms }) {
           <div className="col-span-3">
             <label className={lbl}>Doctor</label>
             <select value={form.doctor} onChange={e => {
+              opdAmountManuallyEditedRef.current = false
               const selectedDocId = e.target.value
               const selectedDoc = findDoctorBySelectedId(doctors, selectedDocId)
               const fee = getDoctorFee(selectedDoc)
@@ -1505,7 +1529,16 @@ function OPDSection({ rooms }) {
                 min="0"
                 step="1"
                 value={form.amount}
-                onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
+                onKeyDown={e => {
+                  if (['-', '+', 'e', 'E'].includes(e.key)) e.preventDefault()
+                }}
+                onChange={e => {
+                  opdAmountManuallyEditedRef.current = true
+                  const next = e.target.value
+                  if (next === '' || (/^\d+$/.test(next) && Number(next) >= 0)) {
+                    setForm(f => ({ ...f, amount: next }))
+                  }
+                }}
                 placeholder="0"
                 className={`${inp} pl-7`}
               />
@@ -2610,6 +2643,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
 
     if (isAddingNew) {
       if (!newPt.name.trim()) { toast.error('Patient name is required'); return }
+      if (/\d/.test(newPt.name || '')) { toast.error('Patient name cannot contain numbers'); return }
       if ((newPt.phone || '').replace(/\D/g, '').length >= 10) {
         try {
           const ten = (newPt.phone || '').replace(/\D/g, '').slice(-10)
@@ -2681,7 +2715,8 @@ function IPDSection({ mode, initialAdmissionDraft }) {
       setPickedBed(null)
       fetchAdmissions()
     } catch (err) {
-      toast.error(err.response?.data?.detail || JSON.stringify(err.response?.data) || 'Error admitting patient')
+      const patientErr = err?.response?.data?.patient?.[0] || err?.response?.data?.errors?.patient?.[0]
+      toast.error(patientErr || err?.response?.data?.detail || JSON.stringify(err?.response?.data) || 'Error admitting patient')
     } finally { setSubmitting(false) }
   }
 
@@ -4039,7 +4074,6 @@ function EmergencySection() {
         setAdmitting(false)
         return
       }
-
       const diagnosis = admitForm.admission_diagnosis?.trim() || admitCase.complaint || 'Emergency admission'
       const notes = [
         admitForm.admission_notes?.trim(),
@@ -4092,7 +4126,8 @@ function EmergencySection() {
       setAdmitCase(null)
       setPickedBed(null)
     } catch (err) {
-      toast.error(err?.response?.data?.detail || JSON.stringify(err?.response?.data) || 'Failed to admit patient')
+      const patientErr = err?.response?.data?.patient?.[0] || err?.response?.data?.errors?.patient?.[0]
+      toast.error(patientErr || err?.response?.data?.detail || JSON.stringify(err?.response?.data) || 'Failed to admit patient')
     } finally {
       setAdmitting(false)
     }
@@ -4806,7 +4841,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                           <p className="text-sm font-bold text-gray-800 group-hover:text-blue-700 transition-colors">
                             Admitted {fmt(a.admission_date)}{isDischarged && a.discharged_at ? ` → Discharged ${fmt(a.discharged_at)}` : ''}
                           </p>
-                          <p className="text-xs text-gray-500 truncate">{a.department||'—'} · {a.ward_name||'—'} · Bed {a.bed_code||'—'} · Dr. {a.doctor_name||'—'}</p>
+                          <p className="text-xs text-gray-500 truncate">{a.department||'—'} · {a.ward_name||'—'} · Bed {a.bed_code||'—'} · Dr. {a.assigned_doctor_name||'—'}</p>
                         </div>
                         <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold capitalize shrink-0 ${sBadge(a.status)}`}>{a.status}</span>
                         {isLL && <span className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin shrink-0" />}
@@ -4817,7 +4852,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                         <div className="px-4 pb-5 pt-2 space-y-4 bg-blue-50/20">
                           {/* Admission details grid */}
                           <div className="grid grid-cols-3 gap-2 text-xs">
-                            {[['Department',a.department||'—'],['Ward / Bed',`${a.ward_name||'—'} / ${a.bed_code||'—'}`],['Doctor',a.doctor_name||'—'],['Diagnosis',a.admission_diagnosis||'—'],['Admitted',fmt(a.admission_date)],['Discharged',isDischarged&&a.discharged_at?fmt(a.discharged_at):'Still Admitted']].map(([l,val])=>(
+                            {[['Department',a.department||'—'],['Ward / Bed',`${a.ward_name||'—'} / ${a.bed_code||'—'}`],['Doctor',a.assigned_doctor_name||'—'],['Diagnosis',a.admission_diagnosis||'—'],['Admitted',fmt(a.admission_date)],['Discharged',isDischarged&&a.discharged_at?fmt(a.discharged_at):'Still Admitted']].map(([l,val])=>(
                               <div key={l} className="bg-white rounded-lg px-3 py-2 border border-gray-100">
                                 <p className="text-gray-400 text-[10px] uppercase font-semibold tracking-wide">{l}</p>
                                 <p className="font-bold text-gray-800 truncate mt-0.5">{val}</p>
@@ -5043,15 +5078,28 @@ function PatientListSection() {
   const [timelineFor, setTimelineFor] = useState(null)
   const PAGE_SIZE = 10
   const debounceRef = useRef(null)
+  const isSearchFetchScheduledRef = useRef(false)
 
   useEffect(() => {
     setPage(0)
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    debounceRef.current = setTimeout(() => fetchPatients(0, search), 300)
-    return () => clearTimeout(debounceRef.current)
+    isSearchFetchScheduledRef.current = true
+    debounceRef.current = setTimeout(() => {
+      isSearchFetchScheduledRef.current = false
+      fetchPatients(0, search)
+    }, 300)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      isSearchFetchScheduledRef.current = false
+    }
   }, [search])
 
-  useEffect(() => { fetchPatients(page, search) }, [page])
+  useEffect(() => {
+    // When `search` changes, we reset `page` to 0 and schedule a debounced fetch.
+    // Prevent the `page` effect from firing the immediate second fetch for offset=0.
+    if (isSearchFetchScheduledRef.current && page === 0) return
+    fetchPatients(page, search)
+  }, [page])
 
   async function fetchPatients(pg = 0, q = '') {
     setLoading(true)
@@ -6012,6 +6060,8 @@ function PaymentSlipSection() {
   const [newQuickLabel, setNewQuickLabel] = useState('')
   const [newQuickPrice, setNewQuickPrice] = useState('')
   const [activeIpdByPatient, setActiveIpdByPatient] = useState({})
+  const autoPrintedInvoiceNoRef = useRef(null)
+  const autoResetPendingRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -6096,6 +6146,14 @@ function PaymentSlipSection() {
     setItems(prev => prev.filter((_, idx) => idx !== i))
   }
   function updateItem(i, field, val) {
+    if (field === 'unit_price' || field === 'quantity') {
+      if (val === '') {
+        setItems(prev => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it))
+        return
+      }
+      const numericVal = Number(val)
+      if (!Number.isFinite(numericVal) || numericVal < 0) return
+    }
     setItems(prev => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it))
   }
   function quickAdd(svc) {
@@ -6246,6 +6304,8 @@ function PaymentSlipSection() {
   }
 
   function resetForm() {
+    autoResetPendingRef.current = false
+    autoPrintedInvoiceNoRef.current = null
     setPatient(null)
     setIsAddingNew(false)
     setNewPt({ name: '', phone: '', address: '' })
@@ -6258,8 +6318,9 @@ function PaymentSlipSection() {
     setInvoice(null)
   }
 
-  function printInvoice() {
-    const w = createSameTabPrintWindow()
+  function printInvoice(options = {}) {
+    const { onComplete } = options
+    const w = createSameTabPrintWindow({ onComplete })
     const dateTimeStr = format(new Date(), 'd/M/yyyy HH:mm:ss')
     const patientName = [invoice.patient.first_name, invoice.patient.last_name].filter(Boolean).join(' ').toUpperCase() || 'PATIENT'
     const gender = invoice.patient.gender ? (invoice.patient.gender === 'male' ? 'Male' : invoice.patient.gender === 'female' ? 'Female' : 'Other') : ''
@@ -6509,6 +6570,26 @@ function PaymentSlipSection() {
     w.document.close()
   }
 
+  useEffect(() => {
+    if (!invoice?.invoice_no) return
+    if (autoPrintedInvoiceNoRef.current === invoice.invoice_no) return
+
+    autoPrintedInvoiceNoRef.current = invoice.invoice_no
+    autoResetPendingRef.current = true
+
+    const t = setTimeout(() => {
+      printInvoice({
+        onComplete: () => {
+          if (!autoResetPendingRef.current) return
+          autoResetPendingRef.current = false
+          resetForm()
+        },
+      })
+    }, 0)
+
+    return () => clearTimeout(t)
+  }, [invoice])
+
   const inp = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-emerald-500 focus:outline-none'
 
   return (
@@ -6659,7 +6740,7 @@ function PaymentSlipSection() {
                         </li>
                       ))}
                       <li className="bg-emerald-50/50">
-                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: ptSearch, phone: '', address: '' }); setPtSearch(''); setPtResults([]) }}
+                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: sanitizePersonName(ptSearch), phone: '', address: '' }); setPtSearch(''); setPtResults([]) }}
                           className="w-full text-left px-3 py-2.5 flex items-center gap-2 group transition-all">
                           <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center group-hover:scale-110 transition-transform">
                             <Plus size={14} strokeWidth={3} />
@@ -6762,7 +6843,10 @@ function PaymentSlipSection() {
                 </div>
                 <div>
                   <label className="text-[11px] font-medium text-gray-400 block mb-1">Discount (₹)</label>
-                  <input type="number" min="0" step="1" value={discount} onChange={e => setDiscount(e.target.value)}
+                  <input type="number" min="0" step="1" value={discount} onChange={e => {
+                    const next = e.target.value
+                    if (next === '' || Number(next) >= 0) setDiscount(next)
+                  }}
                     placeholder="0.00" className={`${inp} py-1.5 text-xs`} />
                 </div>
                 <div>
@@ -7309,7 +7393,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
   const getVisitDoctorName = (visitRow) => {
     const assignedDoctorUser = visitRow?.doctor_user == null ? '' : String(visitRow.doctor_user)
     const matchedDoctor = doctors.find((d) => getDoctorUserId(d) === assignedDoctorUser)
-    return matchedDoctor?.name || visitRow?.doctor_name || visitRow?.doc_name || '-'
+    return matchedDoctor?.name || '-'
   }
 
   useEffect(() => {
@@ -9025,6 +9109,36 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   const [submitting, setSubmitting] = useState(false)
   const [showPrint, setShowPrint]   = useState(false)
   const [receipt, setReceipt]       = useState(null)
+  const [showReceiptsModal, setShowReceiptsModal] = useState(false)
+
+  const paidReceipts = useMemo(() => {
+    if (!ledger) return []
+    return (ledger.payments || []).map(p => {
+      const desc = p?.description || ''
+      const upper = String(desc || '').toUpperCase()
+      const isAdvance = upper.includes('ADVANCE') || String(p?.invoice_no || '').toUpperCase().includes('IPDADV-')
+
+      let mode = 'cash'
+      if (upper.includes('UPI')) mode = 'upi'
+      else if (upper.includes('CREDIT')) mode = 'credit'
+      else if (upper.includes('CARD')) mode = 'card'
+
+      return {
+        id: `payment-${String(p?.id || '')}-${String(p?.date || '')}`,
+        date: p?.date,
+        description: desc || (isAdvance ? 'Advance' : 'Payment'),
+        amount: parseFloat(p?.amount || 0),
+        invoice_no: p?.invoice_no || '',
+        slip_number: p?.slip_number || '',
+        mode,
+        receiptKind: isAdvance ? 'advance' : 'charge',
+      }
+    }).sort((a, b) => {
+      const ta = a.date ? new Date(a.date).getTime() : 0
+      const tb = b.date ? new Date(b.date).getTime() : 0
+      return ta - tb
+    })
+  }, [ledger])
 
   // Discharge State
   const [journey, setJourney] = useState(null) // { admission, step: 'form'|'billing' }
@@ -9369,7 +9483,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       discharge_type: 'routine', discharge_status: 'improved',
       mode_of_admission: (admission.opd_visit_id || admission.opd_visit) ? 'opd' : 'emergency',
       referred_to_facility: '', referral_reason: '',
-      treating_consultant: (admission.assigned_doctor_name || admission.doctor_name || '').trim(),
+      treating_consultant: (admission.assigned_doctor_name || '').trim(),
       consultant_registration_no: '', rmo_signed_by: '',
       next_follow_up_date: '', follow_up_doctor: '', follow_up_department: admission.department || '',
       cause_of_death: '', time_of_death: '', notified_to: '', autopsy_required: false,
@@ -9471,7 +9585,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         mode_of_admission: existing.mode_of_admission || ((admission.opd_visit_id || admission.opd_visit) ? 'opd' : 'emergency'),
         referred_to_facility: existing.referred_to_facility || '',
         referral_reason: existing.referral_reason || '',
-        treating_consultant: existing.treating_consultant || (admission.assigned_doctor_name || admission.doctor_name || '').trim(),
+        treating_consultant: existing.treating_consultant || (admission.assigned_doctor_name || '').trim(),
         consultant_registration_no: existing.consultant_registration_no || '',
         rmo_signed_by: existing.rmo_signed_by || '',
         next_follow_up_date: existing.next_follow_up_date || '',
@@ -9805,7 +9919,11 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     setSubmitting(true)
     try {
       const { data } = await api.post(`/ipd-admissions/${admission.id}/add-charge/`, {
-        description: chgDesc, amount: total, payment_mode: paymentMode,
+        description: chgDesc,
+        amount: total,
+        quantity: parseFloat(chgQty || 0),
+        unit_price: parseFloat(chgUnitPrice || 0),
+        payment_mode: paymentMode,
       })
       toast.success(chgStatus === 'paid' ? 'Charge saved & paid' : 'Charge added to bill')
       fetchLedger()
@@ -9866,8 +9984,11 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
   function getLatestUnitPrice(events) {
     const lastEvent = [...(events || [])].sort((a, b) => new Date(b.date) - new Date(a.date))[0]
-    const last = Math.abs(parseFloat(lastEvent?.price) || 0)
-    return last || 0
+    const lineTotal = Math.abs(parseFloat(lastEvent?.price) || 0)
+    const qty = Math.abs(parseFloat(lastEvent?.quantity) || 0)
+    if (!lineTotal) return 0
+    if (qty > 0) return lineTotal / qty
+    return lineTotal
   }
 
   function handleSelectExistingCharge(value) {
@@ -10467,7 +10588,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
               {/* Summary cards */}
               {(() => {
                 const chargesCount = (ledger.grouped_charges || []).length + (ledger.charges || []).filter(c => c.type === 'room_rent').length
-                const paidEvents = (ledger.grouped_charges || []).reduce((acc, g) => acc + (g.events || []).filter(ev => parseFloat(ev.paid_amount || 0) > 0).length, 0) + (ledger.payments?.length || 0)
+                const paidEvents = ledger.payments?.length || 0
                 const balance = parseFloat(ledger.balance_due || 0)
                 const isDue = balance > 0
                 const cards = [
@@ -10493,8 +10614,19 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   <div className="grid grid-cols-3 gap-3">
                     {cards.map(s => {
                       const Icon = s.Icon
+                        const isTotalPaid = s.label === 'Total Paid'
                       return (
-                        <div key={s.label} className={`${s.bg} border ${s.border} rounded-2xl p-3 shadow-sm`}>
+                        <div
+                          key={s.label}
+                          role={isTotalPaid ? 'button' : undefined}
+                          tabIndex={isTotalPaid ? 0 : undefined}
+                          onClick={isTotalPaid ? () => setShowReceiptsModal(true) : undefined}
+                          onKeyDown={e => {
+                            if (!isTotalPaid) return
+                            if (e.key === 'Enter' || e.key === ' ') setShowReceiptsModal(true)
+                          }}
+                          className={`${s.bg} border ${s.border} rounded-2xl p-3 shadow-sm ${isTotalPaid ? 'cursor-pointer hover:shadow-md transition-shadow' : ''}`}
+                        >
                           <div className="flex items-center justify-between mb-1">
                             <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">{s.label}</p>
                             <Icon size={14} className={s.iconColor} />
@@ -10509,6 +10641,91 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   </div>
                 )
               })()}
+
+              {showReceiptsModal && (
+                <div
+                  className="fixed inset-0 z-[650] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                  onClick={() => setShowReceiptsModal(false)}
+                >
+                  <div
+                    className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden"
+                    onClick={e => e.stopPropagation()}
+                  >
+                    <div className="px-4 py-3 bg-emerald-600 text-white flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CreditCard size={16} />
+                        <div>
+                          <div className="font-bold text-sm leading-tight">Receipts</div>
+                          <div className="text-[11px] text-white/80">{paidReceipts.length} receipt{paidReceipts.length === 1 ? '' : 's'}</div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowReceiptsModal(false)}
+                        className="bg-white/15 hover:bg-white/25 px-3 py-1 rounded-lg font-bold text-sm"
+                      >
+                        Close
+                      </button>
+                    </div>
+
+                    <div className="p-4">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs border border-gray-200 rounded-lg overflow-hidden">
+                          <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold">
+                            <tr>
+                              <th className="px-3 py-2 text-left">Date</th>
+                              <th className="px-3 py-2 text-left">Description</th>
+                              <th className="px-3 py-2 text-right">Amount</th>
+                              <th className="px-3 py-2 text-left">Ref</th>
+                              <th className="px-3 py-2 text-center">Print</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {paidReceipts.length === 0 ? (
+                              <tr>
+                                <td colSpan={5} className="px-3 py-6 text-center text-gray-400">
+                                  No receipts found.
+                                </td>
+                              </tr>
+                            ) : (
+                              paidReceipts.map((r) => (
+                                <tr key={r.id} className="border-t border-gray-100 hover:bg-emerald-50/30">
+                                  <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
+                                    {r.date ? format(new Date(r.date), 'd/M/yy') : '—'}
+                                  </td>
+                                  <td className="px-3 py-2.5 text-gray-800 font-medium">{r.description || '—'}</td>
+                                  <td className="px-3 py-2.5 text-right text-emerald-700 font-bold whitespace-nowrap">₹{parseFloat(r.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                                  <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{r.invoice_no || '—'}</td>
+                                  <td className="px-3 py-2.5 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setReceipt({
+                                          type: r.receiptKind === 'advance' ? 'advance' : 'charge',
+                                          data: {
+                                            description: r.description,
+                                            amount: r.amount,
+                                            mode: r.mode,
+                                            invoice_no: r.invoice_no,
+                                            slip_number: r.slip_number || '',
+                                          },
+                                        })
+                                      }}
+                                      className="text-[10px] bg-blue-100 text-blue-700 px-2 py-1 rounded-lg font-bold hover:bg-blue-200"
+                                    >
+                                      Print
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Table */}
               <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden flex flex-col flex-1">

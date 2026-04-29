@@ -13,6 +13,7 @@ from apps.patients.serializers import PatientCreateUpdateSerializer, PatientSeri
 from apps.patients.services.uhid_service import generate_uhid
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
+from apps.ipd.services import resolve_ipd_doctor_name
 from apps.opd.services import resolve_opd_doctor_name
 from apps.shared.response import success_response
 
@@ -187,7 +188,10 @@ class PatientViewSet(viewsets.ModelViewSet):
                     "admission_diagnosis": a.admission_diagnosis,
                     "admission_notes": a.admission_notes,
                     "discharged_at": a.discharged_at,
-                    "doctor_name": a.assigned_doctor.full_name if a.assigned_doctor_id else "",
+                    "assigned_doctor_name": resolve_ipd_doctor_name(
+                        assigned_doctor=a.assigned_doctor,
+                        hospital_id=a.hospital_id,
+                    ),
                     "discharge_summary": (
                         {
                             "id": str(discharge_map[str(a.id)].id),
