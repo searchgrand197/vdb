@@ -43,7 +43,6 @@ class ApiConsoleView(TemplateView):
         ctx["schema_path"] = "/api/v1/schema/"
         ctx["schema_url"] = req.build_absolute_uri("/api/v1/schema/")
         ctx["login_path"] = "/api/v1/auth/login/"
-        ctx["admin_url"] = "/admin/"
         return ctx
 
 

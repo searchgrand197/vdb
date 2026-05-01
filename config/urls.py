@@ -14,7 +14,6 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
-from django.contrib import admin
 from django.urls import include, path, re_path
 from django.conf import settings
 from django.conf.urls.static import static
@@ -43,7 +42,6 @@ urlpatterns = [
         static_serve,
         {"document_root": settings.BASE_DIR / "frontend" / "dist" / "icons"},
     ),
-    path("admin/", admin.site.urls),
     # One-click leave approve/deny from email — no login required
     path("leave/action/<str:token>/", LeaveActionView.as_view(), name="leave-action"),
     # OpenAPI schema + branded Swagger UI (HTML/CSS in templates/api_console.html)
@@ -79,7 +77,7 @@ urlpatterns = [
     path("", include("apps.opd_templates.urls")),
     # SPA fallback: direct browser refresh/open for frontend routes should load index.html
     re_path(
-        r"^(?!api/|admin/|media/|static/|leave/|ui/|template/|icons/|sw\.js|manifest\.json|manifest-doctor\.json|manifest-staff\.json|manifest-pharmacy\.json|manifest-receptionist\.json|offline\.html).*$",
+        r"^(?!api/|media/|static/|leave/|ui/|template/|icons/|sw\.js|manifest\.json|manifest-doctor\.json|manifest-staff\.json|manifest-pharmacy\.json|manifest-receptionist\.json|offline\.html).*$",
         frontend_index,
         name="frontend-spa-fallback",
     ),

@@ -2,6 +2,10 @@ import React, { Suspense, lazy, useEffect } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Login from './pages/Login'
 import api from './api'
+import { useAuthStore } from './stores/authStore'
+import { resolvePortalFromPath } from './themes'
+import { AppRoutes as AdminRoutes } from './adminPortal/routes/AppRoutes'
+import { ToastProvider } from './adminPortal/context/ToastContext'
 
 const StaffPortal = lazy(() => import('./pages/StaffPortal'))
 const DoctorPortal = lazy(() => import('./pages/DoctorPortal'))
@@ -10,7 +14,6 @@ const TVDisplay = lazy(() => import('./pages/TVDisplay'))
 const LabPortal = lazy(() => import('./pages/LabPortal'))
 const PrintSlipPage = lazy(() => import('./pages/PrintSlipPage'))
 const PharmacyPortal = lazy(() => import('./pages/PharmacyPortal'))
-const AdminDashboard = lazy(() => import('./pages/AdminDashboard'))
 
 const ROLE_PATHS = {
   staff: '/staff',
@@ -18,33 +21,31 @@ const ROLE_PATHS = {
   receptionist: '/receptionist',
   lab: '/lab',
   pharmacy: '/pharmacy',
-  admin: '/admin-dashboard',
+  admin: '/admin',
 }
 
 function PrivateRoute({ children }) {
-  return localStorage.getItem('access') ? children : <Navigate to="/login" replace />
+  const isAuthenticated = useAuthStore((s) => Boolean(s.tokens.access))
+  return isAuthenticated ? children : <Navigate to="/login" replace />
 }
 
 function HomeRedirect() {
-  const token = localStorage.getItem('access')
-  if (token) {
-    const role = localStorage.getItem('role') || 'staff'
+  const hasAccess = useAuthStore((s) => Boolean(s.tokens.access))
+  const role = useAuthStore((s) => s.role) || 'staff'
+  if (hasAccess) {
     return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
   }
   return <Navigate to="/login" replace />
 }
 
-function SuperuserRoute({ children }) {
-  const token = localStorage.getItem('access')
-  if (!token) return <Navigate to="/login" replace />
-  try {
-    const user = JSON.parse(localStorage.getItem('user') || '{}')
-    if (user?.is_superuser) return children
-  } catch {
-    // fall through to redirect
+function LoginRoute() {
+  const hasAccess = useAuthStore((s) => Boolean(s.tokens.access))
+  const role = useAuthStore((s) => s.role) || 'staff'
+
+  if (hasAccess) {
+    return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
   }
-  const role = localStorage.getItem('role') || 'staff'
-  return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
+  return <Login />
 }
 
 function PageLoading() {
@@ -59,26 +60,8 @@ function AppHeadManager() {
   const location = useLocation()
 
   useEffect(() => {
-    const resolveRoleKey = () => {
-      const firstSegment = (location.pathname || '/')
-        .split('/')
-        .filter(Boolean)[0]
+    const roleKey = resolvePortalFromPath(location.pathname) || 'staff'
 
-      if (firstSegment === 'doctor') return 'doctor'
-      if (firstSegment === 'pharmacy') return 'pharmacy'
-      if (firstSegment === 'receptionist' || firstSegment === 'reception') return 'receptionist'
-      if (firstSegment === 'staff') return 'staff'
-      if (firstSegment === 'admin-dashboard') return 'admin'
-
-      const savedRole = localStorage.getItem('role')
-      if (savedRole === 'doctor') return 'doctor'
-      if (savedRole === 'pharmacy') return 'pharmacy'
-      if (savedRole === 'receptionist' || savedRole === 'reception') return 'receptionist'
-      if (savedRole === 'admin') return 'admin'
-      return 'staff'
-    }
-
-    const roleKey = resolveRoleKey()
     const roleMeta = {
       doctor: {
         title: 'Doctor Portal - Vardaan',
@@ -95,13 +78,18 @@ function AppHeadManager() {
         iconHref: '/icons/icon-reception-192.png?v=5',
         manifestHref: '/manifest-receptionist.json?v=5',
       },
+      admin: {
+        title: 'Admin Portal - Vardaan',
+        iconHref: '/icons/icon-staff-192.png?v=4',
+        manifestHref: '/manifest-staff.json?v=4',
+      },
       staff: {
         title: 'Staff Portal - Vardaan',
         iconHref: '/icons/icon-staff-192.png?v=4',
         manifestHref: '/manifest-staff.json?v=4',
       },
-      admin: {
-        title: 'Admin Portal - Vardaan',
+      lab: {
+        title: 'Lab Portal - Vardaan',
         iconHref: '/icons/icon-staff-192.png?v=4',
         manifestHref: '/manifest-staff.json?v=4',
       },
@@ -151,7 +139,7 @@ function PushNotificationBootstrap() {
   const location = useLocation()
 
   useEffect(() => {
-    const token = localStorage.getItem('access')
+    const token = useAuthStore.getState().tokens.access
     if (!token) return
     if (location.pathname.startsWith('/login')) return
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return
@@ -216,43 +204,37 @@ function PushNotificationBootstrap() {
 
 export default function App() {
   return (
-    <Suspense fallback={<PageLoading />}>
-      <AppHeadManager />
-      <PushNotificationBootstrap />
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/staff" element={<PrivateRoute><StaffPortal /></PrivateRoute>} />
-        <Route path="/doctor" element={<PrivateRoute><DoctorPortal /></PrivateRoute>} />
-        <Route path="/receptionist" element={<PrivateRoute><ReceptionistPortal /></PrivateRoute>} />
-        <Route path="/lab" element={<PrivateRoute><LabPortal /></PrivateRoute>} />
-        <Route
-          path="/pharmacy"
-          element={
-            <PrivateRoute>
-              <PharmacyPortal />
-            </PrivateRoute>
-          }
-        />
-        <Route
-          path="/admin-dashboard"
-          element={
-            <SuperuserRoute>
-              <AdminDashboard />
-            </SuperuserRoute>
-          }
-        />
-        <Route
-          path="/admin-dashboard/:moduleKey"
-          element={
-            <SuperuserRoute>
-              <AdminDashboard />
-            </SuperuserRoute>
-          }
-        />
-        <Route path="/tv/:roomCode" element={<TVDisplay />} />
-        <Route path="/print-slip" element={<PrintSlipPage />} />
-        <Route path="/" element={<HomeRedirect />} />
-      </Routes>
-    </Suspense>
+    <ToastProvider>
+      <Suspense fallback={<PageLoading />}>
+        <AppHeadManager />
+        <PushNotificationBootstrap />
+        <Routes>
+          <Route path="/login" element={<LoginRoute />} />
+          <Route path="/staff" element={<PrivateRoute><StaffPortal /></PrivateRoute>} />
+          <Route path="/doctor" element={<PrivateRoute><DoctorPortal /></PrivateRoute>} />
+          <Route path="/receptionist" element={<PrivateRoute><ReceptionistPortal /></PrivateRoute>} />
+          <Route path="/lab" element={<PrivateRoute><LabPortal /></PrivateRoute>} />
+          <Route
+            path="/pharmacy"
+            element={
+              <PrivateRoute>
+                <PharmacyPortal />
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/admin/*"
+            element={
+              <PrivateRoute>
+                <AdminRoutes />
+              </PrivateRoute>
+            }
+          />
+          <Route path="/tv/:roomCode" element={<TVDisplay />} />
+          <Route path="/print-slip" element={<PrintSlipPage />} />
+          <Route path="/" element={<HomeRedirect />} />
+        </Routes>
+      </Suspense>
+    </ToastProvider>
   )
 }

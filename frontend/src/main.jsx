@@ -1,10 +1,24 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
+import { BrowserRouter, useLocation } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { ThemeProvider, CssBaseline } from '@mui/material'
+import { getThemeForPortal, resolvePortalFromPath, baseTheme } from './themes'
 import App from './App'
 import InstallPrompt from './components/InstallPrompt'
 import './index.css'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 60 * 1000,
+      retry: 1,
+      refetchOnWindowFocus: 'always',
+      refetchOnReconnect: 'always',
+    },
+  },
+})
 
 class RootErrorBoundary extends React.Component {
   constructor(props) {
@@ -30,12 +44,30 @@ class RootErrorBoundary extends React.Component {
   }
 }
 
+/** Dynamically selects the MUI theme based on the current URL path. */
+function DynamicThemeProvider({ children }) {
+  const location = useLocation()
+  const portal = resolvePortalFromPath(location.pathname)
+  const theme = portal ? getThemeForPortal(portal) : baseTheme
+
+  return (
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      {children}
+    </ThemeProvider>
+  )
+}
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <RootErrorBoundary>
-    <BrowserRouter>
-      <App />
-      <Toaster position="top-right" toastOptions={{ duration: 3000 }} />
-      <InstallPrompt />
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <DynamicThemeProvider>
+          <App />
+          <Toaster position="top-right" toastOptions={{ duration: 3000 }} />
+          <InstallPrompt />
+        </DynamicThemeProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   </RootErrorBoundary>
 )

@@ -4,15 +4,22 @@ import api from '../api'
 import toast from 'react-hot-toast'
 import { format } from 'date-fns'
 import {
-  Clock, CheckCircle, XCircle, Calendar, Pill,
-  ClipboardList, Plus, User, Activity, FileText,
-  ChevronDown, ChevronUp, SkipForward, BedDouble
-} from 'lucide-react'
+  CheckCircle,
+  CalendarMonth,
+  Medication,
+  Assignment,
+  Add,
+  Person,
+  ExpandMore,
+  ExpandLess,
+  SkipNext,
+} from '@mui/icons-material'
+import { useAuthStore } from '../stores/authStore'
 
 const TABS = [
-  { id: 'tasks', label: 'My Tasks', icon: Pill },
-  { id: 'leaves', label: 'Apply Leave', icon: Calendar },
-  { id: 'tp', label: 'Treatment Plan', icon: ClipboardList },
+  { id: 'tasks', label: 'My Tasks', icon: Medication },
+  { id: 'leaves', label: 'Apply Leave', icon: CalendarMonth },
+  { id: 'tp', label: 'Treatment Plan', icon: Assignment },
 ]
 
 
@@ -70,7 +77,7 @@ function TaskCard({ task, onDone, onSkip }) {
             )}
           </div>
           <div className="flex items-center gap-2 mt-0.5">
-            <User size={11} className="text-gray-400 shrink-0" />
+            <Person sx={{ fontSize: 12, color: '#9ca3af', flexShrink: 0 }} />
             <span className="text-xs text-gray-500 truncate">{patientName} · Bed {task.bed_code || 'N/A'}</span>
             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ml-auto shrink-0 ${STATUS_CLS[task.status] || ''}`}>
               {task.status}
@@ -89,7 +96,11 @@ function TaskCard({ task, onDone, onSkip }) {
             Mark Done
           </button>
         )}
-        {open ? <ChevronUp size={15} className="text-gray-400 shrink-0" /> : <ChevronDown size={15} className="text-gray-400 shrink-0" />}
+        {open ? (
+          <ExpandLess sx={{ fontSize: 16, color: '#9ca3af', flexShrink: 0 }} />
+        ) : (
+          <ExpandMore sx={{ fontSize: 16, color: '#9ca3af', flexShrink: 0 }} />
+        )}
       </button>
 
       {open && (
@@ -116,23 +127,23 @@ function TaskCard({ task, onDone, onSkip }) {
             <div className="flex gap-2 pt-1">
               <button onClick={() => { onDone(task); setOpen(false) }}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-600 text-white text-xs py-2 rounded-xl font-bold hover:bg-emerald-700">
-                <CheckCircle size={14} /> Mark Done
+                <CheckCircle sx={{ fontSize: 14 }} /> Mark Done
               </button>
               <button onClick={() => { onSkip(task); setOpen(false) }}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-slate-100 text-slate-700 text-xs py-2 rounded-xl font-bold hover:bg-slate-200 border border-slate-200">
-                <SkipForward size={14} /> Skip
+                <SkipNext sx={{ fontSize: 14 }} /> Skip
               </button>
             </div>
           )}
           {isDone && (
             <div className="flex items-center gap-2 text-emerald-700 text-xs font-semibold">
-              <CheckCircle size={14} /> Completed
+              <CheckCircle sx={{ fontSize: 14 }} /> Completed
               {task.completed_at && <span className="text-gray-400 font-normal ml-1">{new Date(task.completed_at).toLocaleString()}</span>}
             </div>
           )}
           {isSkipped && (
             <div className="flex items-center gap-2 text-slate-500 text-xs font-semibold">
-              <SkipForward size={14} /> Skipped
+              <SkipNext sx={{ fontSize: 14 }} /> Skipped
             </div>
           )}
         </div>
@@ -470,7 +481,7 @@ function TasksTab() {
       ) : section === 'done' ? (
         completedPatients.length === 0 ? (
           <div className="text-center py-12">
-            <CheckCircle className="mx-auto text-emerald-400 mb-2" size={40} />
+            <CheckCircle sx={{ mx: 'auto', color: '#34d399', mb: 1, fontSize: 40 }} />
             <p className="text-gray-500 font-medium">No completed tasks yet</p>
           </div>
         ) : (
@@ -497,7 +508,7 @@ function TasksTab() {
         )
       ) : visibleTasks.length === 0 ? (
         <div className="text-center py-12">
-          <CheckCircle className="mx-auto text-emerald-400 mb-2" size={40} />
+          <CheckCircle sx={{ mx: 'auto', color: '#34d399', mb: 1, fontSize: 40 }} />
           <p className="text-gray-500 font-medium">
             {section === 'pending' ? 'No pending tasks — great work!' : `No ${section} tasks`}
           </p>
@@ -644,7 +655,7 @@ function LeaveTab() {
       <form onSubmit={applyLeave} className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 space-y-4">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <h3 className="font-bold text-gray-800 flex items-center gap-2">
-            <Calendar size={18} className="text-blue-500" /> Apply Leave
+            <CalendarMonth sx={{ fontSize: 18, color: '#3b82f6' }} /> Apply Leave
           </h3>
           {/* Earned leave this month tile */}
           <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-1.5">
@@ -823,7 +834,7 @@ function TreatmentPlanTab() {
             <h3 className="font-bold text-gray-800">Order Items</h3>
             <button type="button" onClick={addItem}
               className="flex items-center gap-1 bg-purple-100 text-purple-600 text-xs px-3 py-1.5 rounded-lg font-semibold hover:bg-purple-200 transition-all">
-              <Plus size={13} /> Add Item
+              <Add sx={{ fontSize: 13 }} /> Add Item
             </button>
           </div>
           <div className="space-y-3">
@@ -877,10 +888,10 @@ function TreatmentPlanTab() {
 // ─── Main ────────────────────────────────────────────────────────────────────
 export default function StaffPortal() {
   const [tab, setTab] = useState('tasks')
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  const user = useAuthStore((s) => s.user)
 
   return (
-    <Layout title="Staff Portal" subtitle={user.email || 'Staff'} color="blue" tabs={TABS} activeTab={tab} onTab={setTab}>
+    <Layout title="Staff Portal" subtitle={user?.email || 'Staff'} color="blue" tabs={TABS} activeTab={tab} onTab={setTab}>
       {tab === 'tasks' && <TasksTab />}
       {tab === 'leaves' && <LeaveTab />}
       {tab === 'tp' && <TreatmentPlanTab />}

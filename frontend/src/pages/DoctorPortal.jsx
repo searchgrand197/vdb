@@ -4,15 +4,36 @@ import DoctorAnalytics from '../components/DoctorAnalytics'
 import TreatmentPlansModule from '../components/TreatmentPlansModule'
 import api from '../api'
 import toast from 'react-hot-toast'
+import { useAuthStore } from '../stores/authStore'
 import DraftPrescriptionModal from '../components/DraftPrescriptionModal'
 import { useDebouncedValue } from '../pharmacy/useDebouncedValue'
 import { format, addDays } from 'date-fns'
 import {
-  Users, ChevronRight, ClipboardList, Plus, Trash2,
-  Clock, CheckCircle, ArrowRight, GripVertical, Stethoscope, X, Mic, MicOff, UserPlus,
-  CalendarClock, Receipt, Activity, Pill, Scissors, FileText, Search, Loader2, Settings
-  , Eye
-} from 'lucide-react'
+  Groups as GroupsIcon,
+  ChevronRight as ChevronRightIcon,
+  Checklist as ChecklistIcon,
+  Add as AddIcon,
+  Delete as DeleteIcon,
+  AccessTime as AccessTimeIcon,
+  CheckCircle as CheckCircleIcon,
+  ArrowForward as ArrowForwardIcon,
+  DragIndicator as DragIndicatorIcon,
+  MedicalServices as MedicalServicesIcon,
+  Close as CloseIcon,
+  Mic as MicIcon,
+  MicOff as MicOffIcon,
+  PersonAdd as PersonAddIcon,
+  CalendarMonth as CalendarMonthIcon,
+  ReceiptLong as ReceiptLongIcon,
+  MonitorHeart as MonitorHeartIcon,
+  Medication as MedicationIcon,
+  ContentCut as ContentCutIcon,
+  Description as DescriptionIcon,
+  Search as SearchIcon,
+  Autorenew as AutorenewIcon,
+  Settings as SettingsIcon,
+  Visibility as VisibilityIcon,
+} from '@mui/icons-material'
 import {
   DndContext, closestCenter, PointerSensor, useSensor, useSensors
 } from '@dnd-kit/core'
@@ -20,6 +41,37 @@ import {
   SortableContext, useSortable, verticalListSortingStrategy, arrayMove
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
+
+function asMuiIcon(IconComponent) {
+  return function IconBridge({ size, className, sx, ...rest }) {
+    return <IconComponent className={className} sx={{ ...(size ? { fontSize: size } : {}), ...sx }} {...rest} />
+  }
+}
+
+const Users = asMuiIcon(GroupsIcon)
+const ChevronRight = asMuiIcon(ChevronRightIcon)
+const ClipboardList = asMuiIcon(ChecklistIcon)
+const Plus = asMuiIcon(AddIcon)
+const Trash2 = asMuiIcon(DeleteIcon)
+const Clock = asMuiIcon(AccessTimeIcon)
+const CheckCircle = asMuiIcon(CheckCircleIcon)
+const ArrowRight = asMuiIcon(ArrowForwardIcon)
+const GripVertical = asMuiIcon(DragIndicatorIcon)
+const Stethoscope = asMuiIcon(MedicalServicesIcon)
+const X = asMuiIcon(CloseIcon)
+const Mic = asMuiIcon(MicIcon)
+const MicOff = asMuiIcon(MicOffIcon)
+const UserPlus = asMuiIcon(PersonAddIcon)
+const CalendarClock = asMuiIcon(CalendarMonthIcon)
+const Receipt = asMuiIcon(ReceiptLongIcon)
+const Activity = asMuiIcon(MonitorHeartIcon)
+const Pill = asMuiIcon(MedicationIcon)
+const Scissors = asMuiIcon(ContentCutIcon)
+const FileText = asMuiIcon(DescriptionIcon)
+const Search = asMuiIcon(SearchIcon)
+const Loader2 = asMuiIcon(AutorenewIcon)
+const Settings = asMuiIcon(SettingsIcon)
+const Eye = asMuiIcon(VisibilityIcon)
 
 const TABS = [
   { id: 'opd', label: 'OPD Queue', icon: Users },
@@ -194,7 +246,7 @@ const pkgColors = {
 
 const COPY_DISABLED_TOAST_MESSAGE = 'Copy disabled for security reasons'
 const COPY_DISABLED_TOAST_COOLDOWN_MS = 2000
-const ADMIN_ROLES = new Set(['admin', 'superadmin'])
+const COPY_EXEMPT_ROLES = new Set(['superadmin'])
 
 function useDoctorPortalCopyProtection(scopeRef, { enabled }) {
   const lastToastAtRef = useRef(0)
@@ -3166,9 +3218,9 @@ export default function DoctorPortal() {
   const [aiMode, setAiMode] = useState(false)
   const [showAiTransition, setShowAiTransition] = useState(false)
   const doctorPortalRef = useRef(null)
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  const user = useAuthStore((s) => s.user) || {}
   const role = String(localStorage.getItem('role') || user?.role || '').toLowerCase()
-  const copyRestrictionsEnabled = !ADMIN_ROLES.has(role)
+  const copyRestrictionsEnabled = !COPY_EXEMPT_ROLES.has(role)
 
   useDoctorPortalCopyProtection(doctorPortalRef, { enabled: copyRestrictionsEnabled })
 

@@ -1,3 +1,1 @@
-from django.contrib import admin
-
-# Register your models here.
+# Admin functionality has been removed from this project.

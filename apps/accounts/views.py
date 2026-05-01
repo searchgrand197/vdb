@@ -203,33 +203,4 @@ class PharmacyBranchListView(APIView):
         return success_response(data=data)
 
 
-class SuperuserOnly(permissions.BasePermission):
-    def has_permission(self, request, view):
-        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
-
-
-class UserAdminSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = [
-            "id",
-            "email",
-            "phone",
-            "first_name",
-            "last_name",
-            "hospital",
-            "is_active",
-            "is_staff",
-            "is_superuser",
-            "date_joined",
-            "last_login",
-        ]
-        read_only_fields = ["id", "date_joined", "last_login"]
-
-
-class UserAdminViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.select_related("hospital").all().order_by("-date_joined")
-    serializer_class = UserAdminSerializer
-    permission_classes = [permissions.IsAuthenticated, SuperuserOnly]
-
 

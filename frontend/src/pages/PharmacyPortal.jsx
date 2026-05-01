@@ -1,26 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ShoppingBag,
-  Search,
-  Plus,
-  LogOut,
-  X,
-  Settings,
-  FileText,
-  UserPlus,
-  Package,
-  Truck,
-  Eye,
-  PencilLine,
-  SlidersHorizontal,
-  Trash2,
-  LayoutDashboard,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Tags,
-} from 'lucide-react'
+  ShoppingBag as ShoppingBagIcon,
+  Search as SearchIcon,
+  Add as AddIcon,
+  Logout as LogoutIcon,
+  Close as CloseIcon,
+  Settings as SettingsIcon,
+  Description as DescriptionIcon,
+  PersonAdd as PersonAddIcon,
+  Inventory2 as Inventory2Icon,
+  LocalShipping as LocalShippingIcon,
+  Visibility as VisibilityIcon,
+  Edit as EditIcon,
+  Tune as TuneIcon,
+  Delete as DeleteIcon,
+  Dashboard as DashboardIcon,
+  KeyboardDoubleArrowLeft as KeyboardDoubleArrowLeftIcon,
+  KeyboardDoubleArrowRight as KeyboardDoubleArrowRightIcon,
+  Sell as SellIcon,
+} from '@mui/icons-material'
 import api from '../api'
 import toast from 'react-hot-toast'
+import { useAuthStore } from '../stores/authStore'
 import { format } from 'date-fns'
 import ErpBillingView from '../pharmacy/ErpBillingView'
 import PharmacyInvoicePrint from '../pharmacy/PharmacyInvoicePrint'
@@ -37,6 +38,31 @@ import {
   baseFieldLabel,
   conversionHintLines,
 } from '../pharmacy/categoryRulePresets'
+
+function asMuiIcon(IconComponent) {
+  return function IconBridge({ size, className, sx, ...rest }) {
+    return <IconComponent className={className} sx={{ ...(size ? { fontSize: size } : {}), ...sx }} {...rest} />
+  }
+}
+
+const ShoppingBag = asMuiIcon(ShoppingBagIcon)
+const Search = asMuiIcon(SearchIcon)
+const Plus = asMuiIcon(AddIcon)
+const LogOut = asMuiIcon(LogoutIcon)
+const X = asMuiIcon(CloseIcon)
+const Settings = asMuiIcon(SettingsIcon)
+const FileText = asMuiIcon(DescriptionIcon)
+const UserPlus = asMuiIcon(PersonAddIcon)
+const Package = asMuiIcon(Inventory2Icon)
+const Truck = asMuiIcon(LocalShippingIcon)
+const Eye = asMuiIcon(VisibilityIcon)
+const PencilLine = asMuiIcon(EditIcon)
+const SlidersHorizontal = asMuiIcon(TuneIcon)
+const Trash2 = asMuiIcon(DeleteIcon)
+const LayoutDashboard = asMuiIcon(DashboardIcon)
+const PanelLeftClose = asMuiIcon(KeyboardDoubleArrowLeftIcon)
+const PanelLeftOpen = asMuiIcon(KeyboardDoubleArrowRightIcon)
+const Tags = asMuiIcon(SellIcon)
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -128,11 +154,8 @@ export default function PharmacyPortal() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  function handleLogout() {
-    localStorage.removeItem('access')
-    localStorage.removeItem('refresh')
-    localStorage.removeItem('role')
-    localStorage.removeItem('user')
+  async function handleLogout() {
+    await useAuthStore.getState().logout()
     window.location.href = '/login'
   }
 
