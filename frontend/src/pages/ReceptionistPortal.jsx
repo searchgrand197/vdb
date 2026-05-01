@@ -4,20 +4,112 @@ import { useNavigate } from 'react-router-dom'
 import api from '../api'
 import toast from 'react-hot-toast'
 import { format } from 'date-fns'
+import { useAuthStore } from '../stores/authStore'
 import {
-  Users, Printer, Plus, Tv, ArrowRight, Search, Monitor,
-  Bed, AlertTriangle, FileText, UserPlus, Hospital, LogOut,
-  ChevronDown, ChevronRight, ChevronLeft, ClipboardList, Activity,
-  XCircle, CheckCircle, Clock, RefreshCw, Eye, PlusCircle, Edit2,
-  Wind, IndianRupee, Receipt, Trash2, CreditCard, Bell, Phone, X, Tag, User,
-  HeartPulse, Skull, ScrollText, Syringe, FlaskConical, Pill, MessageSquare,
-} from 'lucide-react'
+  Groups as GroupsIcon,
+  Print as PrintIcon,
+  Add as AddIcon,
+  Tv as TvIcon,
+  ArrowForward as ArrowForwardIcon,
+  Search as SearchIcon,
+  Monitor as MonitorIcon,
+  Bed as BedIcon,
+  WarningAmber as WarningAmberIcon,
+  Description as DescriptionIcon,
+  PersonAdd as PersonAddIcon,
+  LocalHospital as LocalHospitalIcon,
+  Logout as LogoutIcon,
+  ExpandMore as ExpandMoreIcon,
+  ChevronRight as ChevronRightIcon,
+  ChevronLeft as ChevronLeftIcon,
+  Checklist as ChecklistIcon,
+  MonitorHeart as MonitorHeartIcon,
+  Cancel as CancelIcon,
+  CheckCircle as CheckCircleIcon,
+  AccessTime as AccessTimeIcon,
+  Refresh as RefreshIcon,
+  Visibility as VisibilityIcon,
+  AddCircle as AddCircleIcon,
+  Edit as EditIcon,
+  Air as AirIcon,
+  CurrencyRupee as CurrencyRupeeIcon,
+  ReceiptLong as ReceiptLongIcon,
+  Delete as DeleteIcon,
+  CreditCard as CreditCardIcon,
+  Notifications as NotificationsIcon,
+  Phone as PhoneIcon,
+  Close as CloseIcon,
+  LocalOffer as LocalOfferIcon,
+  Person as PersonIcon,
+  Favorite as FavoriteIcon,
+  Report as ReportIcon,
+  Article as ArticleIcon,
+  Vaccines as VaccinesIcon,
+  Science as ScienceIcon,
+  Medication as MedicationIcon,
+  Message as MessageIcon,
+} from '@mui/icons-material'
 import { getRoomsConfig, saveRoomsConfig, getTvGroupsConfig, saveTvGroupsConfig } from '../utils/rooms'
 import BedSelector from '../components/BedSelector'
 import OpdGeneratorTab from '../components/OpdTemplateEditor/OpdGeneratorTab'
 import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel'
 import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
 import { DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS } from '../pharmacy/rxConstants'
+
+function asMuiIcon(IconComponent) {
+  return function IconBridge({ size, className, sx, ...rest }) {
+    return (
+      <IconComponent
+        className={className}
+        sx={{ ...(size ? { fontSize: size } : {}), ...sx }}
+        {...rest}
+      />
+    )
+  }
+}
+
+const Users = asMuiIcon(GroupsIcon)
+const Printer = asMuiIcon(PrintIcon)
+const Plus = asMuiIcon(AddIcon)
+const Tv = asMuiIcon(TvIcon)
+const ArrowRight = asMuiIcon(ArrowForwardIcon)
+const Search = asMuiIcon(SearchIcon)
+const Monitor = asMuiIcon(MonitorIcon)
+const Bed = asMuiIcon(BedIcon)
+const AlertTriangle = asMuiIcon(WarningAmberIcon)
+const FileText = asMuiIcon(DescriptionIcon)
+const UserPlus = asMuiIcon(PersonAddIcon)
+const Hospital = asMuiIcon(LocalHospitalIcon)
+const LogOut = asMuiIcon(LogoutIcon)
+const ChevronDown = asMuiIcon(ExpandMoreIcon)
+const ChevronRight = asMuiIcon(ChevronRightIcon)
+const ChevronLeft = asMuiIcon(ChevronLeftIcon)
+const ClipboardList = asMuiIcon(ChecklistIcon)
+const Activity = asMuiIcon(MonitorHeartIcon)
+const XCircle = asMuiIcon(CancelIcon)
+const CheckCircle = asMuiIcon(CheckCircleIcon)
+const Clock = asMuiIcon(AccessTimeIcon)
+const RefreshCw = asMuiIcon(RefreshIcon)
+const Eye = asMuiIcon(VisibilityIcon)
+const PlusCircle = asMuiIcon(AddCircleIcon)
+const Edit2 = asMuiIcon(EditIcon)
+const Wind = asMuiIcon(AirIcon)
+const IndianRupee = asMuiIcon(CurrencyRupeeIcon)
+const Receipt = asMuiIcon(ReceiptLongIcon)
+const Trash2 = asMuiIcon(DeleteIcon)
+const CreditCard = asMuiIcon(CreditCardIcon)
+const Bell = asMuiIcon(NotificationsIcon)
+const Phone = asMuiIcon(PhoneIcon)
+const X = asMuiIcon(CloseIcon)
+const Tag = asMuiIcon(LocalOfferIcon)
+const User = asMuiIcon(PersonIcon)
+const HeartPulse = asMuiIcon(FavoriteIcon)
+const Skull = asMuiIcon(ReportIcon)
+const ScrollText = asMuiIcon(ArticleIcon)
+const Syringe = asMuiIcon(VaccinesIcon)
+const FlaskConical = asMuiIcon(ScienceIcon)
+const Pill = asMuiIcon(MedicationIcon)
+const MessageSquare = asMuiIcon(MessageIcon)
 
 const DEFAULT_PAYMENT_SLIP_PROFILE = {
   hospital_name: 'Vardraan Hospital',
@@ -41,10 +133,7 @@ let receptionPortalSettingsCache = {
 }
 
 function clearAuthStorage() {
-  localStorage.removeItem('access')
-  localStorage.removeItem('refresh')
-  localStorage.removeItem('role')
-  localStorage.removeItem('user')
+  useAuthStore.getState().logout()
 }
 
 function getReceptionOpdSettings() {
@@ -11342,7 +11431,7 @@ export default function ReceptionistPortal() {
   const [section, setSection] = useState('opd')
   const [ipdAdmissionDraft, setIpdAdmissionDraft] = useState(null)
   const nav = useNavigate()
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  const user = useAuthStore((s) => s.user)
   const [rooms, setRooms] = useState(getRoomsConfig())
   const [tvGroups, setTvGroups] = useState(getTvGroupsConfig(getRoomsConfig()))
   const [alerts, setAlerts] = useState([])

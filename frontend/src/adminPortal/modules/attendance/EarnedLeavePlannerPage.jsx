@@ -1,8 +1,8 @@
-﻿import { useEffect, useMemo, useState } from 'react';
-import { Alert, CircularProgress, Typography } from '@mui/material';
-import { AppButton } from '@admin/components/AppButton';
-import { AppTextField } from '@admin/components/AppTextField';
-import { CommonTable } from '@admin/components/common/CommonTable';
+import { useEffect, useMemo, useState } from 'react';
+import { Box, Alert, CircularProgress, Typography } from '@mui/material';
+import { AppButton } from '@/components/AppButton';
+import { AppTextField } from '@/components/AppTextField';
+import { AppTable } from '@/components/AppTable';
 import { useDesignationsQuery } from '@/hooks/useDesignationsQuery';
 import { useEarnedLeaveAllocations, useEarnedLeaveMutations } from '@/hooks/useEarnedLeaveAllocations';
 import { useAuth } from '@admin/context/AuthContext';
@@ -120,29 +120,29 @@ export function EarnedLeavePlannerPage() {
   const errorMessage = desigError ? getApiErrorMessage(desigErr) : getApiErrorMessage(allocErr);
 
   return (
-    <div className="row g-3">
-      <div className="col-12 d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
         <Typography variant="h5">Yearly earned leave planner — {year}</Typography>
-      </div>
+      </Box>
 
       {user?.hospital_name ? (
-        <div className="col-12">
+        <Box>
           <Typography variant="body2" color="text.secondary">
             Hospital: {user.hospital_name}
           </Typography>
-        </div>
+        </Box>
       ) : null}
 
       {!hospitalId ? (
-        <div className="col-12">
+        <Box>
           <Alert severity="warning">
             Hospital id is missing. Log out and sign in again to load it from the server, or set
             VITE_HOSPITAL_ID in env for development.
           </Alert>
-        </div>
+        </Box>
       ) : null}
 
-      <div className="col-12 col-md-6 col-lg-4 d-flex align-items-end gap-2">
+      <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 2, maxWidth: { md: '50%', lg: '33.33%' } }}>
         <AppTextField
           label="Year"
           type="number"
@@ -155,21 +155,21 @@ export function EarnedLeavePlannerPage() {
         <AppButton variant="outlined" onClick={onReload}>
           Reload
         </AppButton>
-      </div>
+      </Box>
 
       {anyError ? (
-        <div className="col-12">
+        <Box>
           <Alert severity="error">{errorMessage}</Alert>
-        </div>
+        </Box>
       ) : null}
 
-      <div className="col-12 position-relative">
+      <Box sx={{ position: 'relative' }}>
         {loading ? (
-          <div className="d-flex justify-content-center py-5">
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 5 }}>
             <CircularProgress size={32} />
-          </div>
+          </Box>
         ) : (
-          <CommonTable
+          <AppTable
             columns={[
               {
                 id: 'designation',
@@ -201,14 +201,14 @@ export function EarnedLeavePlannerPage() {
             getRowId={(row) => row.id}
           />
         )}
-      </div>
+      </Box>
 
-      <div className="col-12">
+      <Box>
         <AppButton variant="contained" onClick={onSave} disabled={save.isPending || loading}>
           {save.isPending ? 'Saving…' : 'Save yearly planner'}
         </AppButton>
-      </div>
-    </div>
+      </Box>
+    </Box>
   );
 }
 

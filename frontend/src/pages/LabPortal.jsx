@@ -1,13 +1,63 @@
 import React, { useState, useEffect } from 'react'
-import { 
-  Beaker, Search, Plus, Filter, FileText, Printer, CheckCircle, 
-  Clock, AlertTriangle, User, Calendar, LogOut, ChevronRight,
-  Clipboard, Activity, Microscope, ShieldCheck, Download,
-  Settings, Layers, Monitor, ChevronDown, List
-} from 'lucide-react'
+import {
+  Science as ScienceIcon,
+  Search as SearchIcon,
+  Add as AddIcon,
+  FilterList as FilterListIcon,
+  Description as DescriptionIcon,
+  Print as PrintIcon,
+  CheckCircle as CheckCircleIcon,
+  AccessTime as AccessTimeIcon,
+  WarningAmber as WarningAmberIcon,
+  Person as PersonIcon,
+  CalendarMonth as CalendarMonthIcon,
+  Logout as LogoutIcon,
+  ChevronRight as ChevronRightIcon,
+  Assignment as AssignmentIcon,
+  MonitorHeart as MonitorHeartIcon,
+  Biotech as BiotechIcon,
+  VerifiedUser as VerifiedUserIcon,
+  Download as DownloadIcon,
+  Settings as SettingsIcon,
+  Layers as LayersIcon,
+  Monitor as MonitorIcon,
+  ExpandMore as ExpandMoreIcon,
+  ViewList as ViewListIcon,
+} from '@mui/icons-material'
 import api from '../api'
 import toast from 'react-hot-toast'
 import { format } from 'date-fns'
+import { useAuthStore } from '../stores/authStore'
+
+function asMuiIcon(IconComponent) {
+  return function IconBridge({ size, className, sx, ...rest }) {
+    return <IconComponent className={className} sx={{ ...(size ? { fontSize: size } : {}), ...sx }} {...rest} />
+  }
+}
+
+const Beaker = asMuiIcon(ScienceIcon)
+const Search = asMuiIcon(SearchIcon)
+const Plus = asMuiIcon(AddIcon)
+const Filter = asMuiIcon(FilterListIcon)
+const FileText = asMuiIcon(DescriptionIcon)
+const Printer = asMuiIcon(PrintIcon)
+const CheckCircle = asMuiIcon(CheckCircleIcon)
+const Clock = asMuiIcon(AccessTimeIcon)
+const AlertTriangle = asMuiIcon(WarningAmberIcon)
+const User = asMuiIcon(PersonIcon)
+const Calendar = asMuiIcon(CalendarMonthIcon)
+const LogOut = asMuiIcon(LogoutIcon)
+const ChevronRight = asMuiIcon(ChevronRightIcon)
+const Clipboard = asMuiIcon(AssignmentIcon)
+const Activity = asMuiIcon(MonitorHeartIcon)
+const Microscope = asMuiIcon(BiotechIcon)
+const ShieldCheck = asMuiIcon(VerifiedUserIcon)
+const Download = asMuiIcon(DownloadIcon)
+const Settings = asMuiIcon(SettingsIcon)
+const Layers = asMuiIcon(LayersIcon)
+const Monitor = asMuiIcon(MonitorIcon)
+const ChevronDown = asMuiIcon(ExpandMoreIcon)
+const List = asMuiIcon(ViewListIcon)
 
 const STATUS_COLORS = {
   draft: 'bg-amber-100 text-amber-700 border-amber-200',
@@ -45,11 +95,8 @@ export default function LabPortal() {
     }
   }
 
-  function handleLogout() {
-    localStorage.removeItem('access')
-    localStorage.removeItem('refresh')
-    localStorage.removeItem('role')
-    localStorage.removeItem('user')
+  async function handleLogout() {
+    await useAuthStore.getState().logout()
     window.location.href = '/login'
   }
 

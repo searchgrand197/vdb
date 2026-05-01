@@ -10,8 +10,8 @@ function LinkedBlock({ title, items, codeKey }) {
   if (!items?.length) return null;
   const codeHuman = codeKey ? CODE_LABELS[codeKey] ?? codeKey : null;
   return (
-    <Box className="mt-2">
-      <Divider className="mb-2" />
+    <Box sx={{ mt: 2 }}>
+      <Divider sx={{ mb: 2 }} />
       <Typography variant="subtitle2" fontWeight={600} gutterBottom>
         {title} ({items.length})
       </Typography>
@@ -44,7 +44,7 @@ export function DepartmentDeleteConflict({ conflict }) {
     truncated && (truncated.staff === true || truncated.doctors === true || truncated.specialties === true);
 
   return (
-    <Box className="d-flex flex-column gap-1">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       {detail ? <Alert severity="warning">{detail}</Alert> : null}
 
       {linkedCounts ? (
@@ -66,7 +66,7 @@ export function DepartmentDeleteConflict({ conflict }) {
       <LinkedBlock title="Linked doctors" items={linkedDoctors} codeKey="doctor_code" />
       <LinkedBlock title="Linked specialties" items={linkedSpecialties} codeKey="code" />
 
-      <Typography variant="body2" color="text.secondary" className="mt-2">
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
         After reassigning or removing these links, you can delete this department.
       </Typography>
     </Box>

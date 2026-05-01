@@ -2,7 +2,36 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
 import toast from 'react-hot-toast'
-import { LogIn, Building2, FlaskConical, Stethoscope, UserCog, ClipboardList, Store, CheckCircle2, Loader2, Shield } from 'lucide-react'
+import {
+  Login as LoginIcon,
+  CorporateFare as CorporateFareIcon,
+  Science as ScienceIcon,
+  MedicalServices as MedicalServicesIcon,
+  ManageAccounts as ManageAccountsIcon,
+  Checklist as ChecklistIcon,
+  Store as StoreIcon,
+  CheckCircle as CheckCircleIcon,
+  Autorenew as AutorenewIcon,
+  Shield as ShieldIcon,
+} from '@mui/icons-material'
+import { useAuthStore } from '../stores/authStore'
+
+function asMuiIcon(IconComponent) {
+  return function IconBridge({ size, className, sx, ...rest }) {
+    return <IconComponent className={className} sx={{ ...(size ? { fontSize: size } : {}), ...sx }} {...rest} />
+  }
+}
+
+const LogIn = asMuiIcon(LoginIcon)
+const Building2 = asMuiIcon(CorporateFareIcon)
+const FlaskConical = asMuiIcon(ScienceIcon)
+const Stethoscope = asMuiIcon(MedicalServicesIcon)
+const UserCog = asMuiIcon(ManageAccountsIcon)
+const ClipboardList = asMuiIcon(ChecklistIcon)
+const Store = asMuiIcon(StoreIcon)
+const CheckCircle2 = asMuiIcon(CheckCircleIcon)
+const Loader2 = asMuiIcon(AutorenewIcon)
+const Shield = asMuiIcon(ShieldIcon)
 
 const ROLES = [
   { label: 'Staff',        value: 'staff',        path: '/staff',        icon: UserCog,       color: '#6366f1' },
@@ -162,7 +191,7 @@ export default function Login() {
   const [branchesLoading, setBranchesLoading] = useState(false)
 
   useEffect(() => {
-    const savedRole = localStorage.getItem('role')
+    const savedRole = useAuthStore.getState().role
     if (savedRole && ROLES.some((r) => r.value === savedRole)) {
       setRole(savedRole)
     }
@@ -170,7 +199,6 @@ export default function Login() {
 
   const handleRoleSelect = (nextRole) => {
     setRole(nextRole)
-    localStorage.setItem('role', nextRole)
   }
 
   useEffect(() => {
@@ -201,20 +229,10 @@ export default function Login() {
         await document.documentElement.requestFullscreen().catch(() => {})
     } catch (_) {}
     try {
-      const { data } = await api.post('/auth/login/', { email: normalizedEmail, password })
-      const payload = data?.data || {}
-      localStorage.setItem('access',  payload.access)
-      localStorage.setItem('refresh', payload.refresh)
-      localStorage.setItem('role',    role)
-      localStorage.setItem('user',    JSON.stringify(payload))
-      if (role === 'pharmacy' && branchId) {
-        const sel = branches.find(b => b.id === branchId)
-        localStorage.setItem('pharmacy_branch_id',    branchId)
-        localStorage.setItem('pharmacy_branch_label', sel?.label || '')
-      } else {
-        localStorage.removeItem('pharmacy_branch_id')
-        localStorage.removeItem('pharmacy_branch_label')
-      }
+      const pharmacyBranch = role === 'pharmacy' && branchId
+        ? { id: branchId, label: branches.find(b => b.id === branchId)?.label || '' }
+        : null
+      await useAuthStore.getState().login(normalizedEmail, password, role, pharmacyBranch)
       nav(ROLES.find(r => r.value === role)?.path || '/staff')
       toast.success('Welcome back!')
     } catch (err) {

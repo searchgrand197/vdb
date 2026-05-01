@@ -9,7 +9,7 @@ export function DesignationDeleteConflict({ conflict }) {
   const staffTruncated = truncated?.staff === true;
 
   return (
-    <Box className="d-flex flex-column gap-1">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       {detail ? <Alert severity="warning">{detail}</Alert> : null}
 
       {linkedCounts ? (
@@ -26,8 +26,8 @@ export function DesignationDeleteConflict({ conflict }) {
       ) : null}
 
       {linkedStaff?.length ? (
-        <Box className="mt-2">
-          <Divider className="mb-2" />
+        <Box sx={{ mt: 2 }}>
+          <Divider sx={{ mb: 2 }} />
           <Typography variant="subtitle2" fontWeight={600} gutterBottom>
             Linked staff ({linkedStaff.length})
           </Typography>
@@ -56,7 +56,7 @@ export function DesignationDeleteConflict({ conflict }) {
         </Box>
       ) : null}
 
-      <Typography variant="body2" color="text.secondary" className="mt-2">
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
         After reassigning or updating those staff records, you can delete this designation.
       </Typography>
     </Box>

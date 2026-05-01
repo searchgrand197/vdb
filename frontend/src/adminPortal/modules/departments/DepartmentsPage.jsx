@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Alert, Box, CircularProgress, IconButton, Switch, FormControlLabel, Typography } from '@mui/material';
@@ -7,11 +7,11 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined';
 import { useAuth } from '@admin/context/AuthContext';
 import { useDepartmentsQuery, useDepartmentMutations } from '@/hooks/useDepartmentsQuery';
-import { AppButton } from '@admin/components/AppButton';
-import { AppTextField } from '@admin/components/AppTextField';
-import { StatusBadge } from '@admin/components/StatusBadge';
-import { CommonTable } from '@admin/components/common/CommonTable';
-import { CommonDialog } from '@admin/components/common/CommonDialog';
+import { AppButton } from '@/components/AppButton';
+import { AppTextField } from '@/components/AppTextField';
+import { AppStatusBadge } from '@/components/AppStatusBadge';
+import { AppTable } from '@/components/AppTable';
+import { AppDialog } from '@/components/AppDialog';
 import { useToast } from '@admin/context/ToastContext';
 import { DepartmentDeleteConflict } from '@admin/modules/departments/DepartmentDeleteConflict';
 import { departmentFormSchema } from '@admin/modules/departments/departmentSchema';
@@ -220,50 +220,46 @@ export function DepartmentsPage() {
   const saving = create.isPending || patch.isPending;
 
   return (
-    <div className="row g-3">
-      <div className="col-12 d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
         <Typography variant="h5">Departments</Typography>
         {canManage ? (
           <AppButton variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
             Add department
           </AppButton>
         ) : null}
-      </div>
+      </Box>
 
-      <div className="col-12 col-md-6 col-lg-4">
+      <Box sx={{ maxWidth: { md: '50%', lg: '33.33%' } }}>
         <AppTextField
           label="Search"
           placeholder="Name, code, description"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-      </div>
+      </Box>
 
       {!canManage ? (
-        <div className="col-12">
-          <Alert severity="info">
-            Only superusers can create, edit, or delete departments. You can view the list below.
-          </Alert>
-        </div>
+        <Alert severity="info">
+          Only superusers can create, edit, or delete departments. You can view the list below.
+        </Alert>
       ) : null}
 
       {formError && !formOpen ? (
-        <div className="col-12">
-          <Alert severity="error" onClose={() => setFormError('')}>
-            {formError}
-          </Alert>
-        </div>
+        <Alert severity="error" onClose={() => setFormError('')}>
+          {formError}
+        </Alert>
       ) : null}
 
-      <div className="col-12 position-relative">
+      <Box sx={{ position: 'relative' }}>
         {isLoading ? (
-          <div className="d-flex justify-content-center py-5">
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 5 }}>
             <CircularProgress size={32} />
-          </div>
+          </Box>
         ) : isError ? (
           <Typography color="error">{getApiErrorMessage(error)}</Typography>
         ) : (
-          <CommonTable
+          <AppTable
             columns={[
               {
                 id: 'name',
@@ -295,7 +291,7 @@ export function DepartmentsPage() {
                 header: 'Status',
                 renderCell: (raw) => {
                   const m = departmentRowMeta(raw);
-                  return <StatusBadge status={m.isActive ? 'active' : 'inactive'} />;
+                  return <AppStatusBadge status={m.isActive ? 'active' : 'inactive'} />;
                 },
               },
             ]}
@@ -327,9 +323,9 @@ export function DepartmentsPage() {
             }}
           />
         )}
-      </div>
+      </Box>
 
-      <CommonDialog
+      <AppDialog
         open={formOpen}
         onClose={saving ? () => {} : onFormClose}
         title={formMode === 'create' ? 'Add department' : 'Edit department'}
@@ -346,11 +342,11 @@ export function DepartmentsPage() {
         }
       >
         {formError ? (
-          <Alert severity="error" className="mb-2" onClose={() => setFormError('')}>
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setFormError('')}>
             {formError}
           </Alert>
         ) : null}
-        <div className="d-flex flex-column gap-2 pt-1">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
           <AppTextField
             label="Name"
             required
@@ -391,10 +387,10 @@ export function DepartmentsPage() {
               </Box>
             )}
           />
-        </div>
-      </CommonDialog>
+        </Box>
+      </AppDialog>
 
-      <CommonDialog
+      <AppDialog
         open={Boolean(deleteTarget)}
         onClose={remove.isPending ? () => {} : closeDeleteDialog}
         title={deleteConflict ? 'Cannot delete department' : 'Delete department'}
@@ -426,7 +422,7 @@ export function DepartmentsPage() {
         ) : (
           <>
             {deleteError ? (
-              <Alert severity="error" className="mb-2" onClose={() => setDeleteError('')}>
+              <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDeleteError('')}>
                 {deleteError}
               </Alert>
             ) : null}
@@ -435,7 +431,7 @@ export function DepartmentsPage() {
             </Typography>
           </>
         )}
-      </CommonDialog>
-    </div>
+      </AppDialog>
+    </Box>
   );
 }

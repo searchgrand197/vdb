@@ -18,7 +18,7 @@ import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
 import { NAV_ITEMS } from '@/constants/navigation';
 import { useAuth } from '@admin/context/AuthContext';
 import { userHasRole } from '@/utils/roleUtils';
-import { AppButton } from '@admin/components/AppButton';
+import { AppButton } from '@/components/AppButton';
 
 const DRAWER_WIDTH = 260;
 
@@ -36,14 +36,14 @@ export function DashboardLayout() {
   const visibleNav = NAV_ITEMS.filter((item) => userHasRole(user, item.roles));
 
   const drawer = (
-    <Box className="d-flex flex-column h-100">
-      <Toolbar className="px-3" sx={{ minHeight: 64 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <Toolbar sx={{ px: 3, minHeight: 64 }}>
         <Typography variant="h6" noWrap component="div" color="primary">
           HMS Admin
         </Typography>
       </Toolbar>
       <Divider />
-      <List className="flex-grow-1 py-2">
+      <List sx={{ flexGrow: 1, py: 2 }}>
         {visibleNav.map((item) => {
           const Icon = item.icon;
           const adminPath = item.path;
@@ -68,7 +68,7 @@ export function DashboardLayout() {
         })}
       </List>
       <Divider />
-      <Box className="p-3">
+      <Box sx={{ p: 3 }}>
         <Typography variant="caption" color="text.secondary" display="block">
           Signed in as
         </Typography>
@@ -155,10 +155,9 @@ export function DashboardLayout() {
           minHeight: 'calc(100vh - 64px)',
         }}
       >
-        {/* Bootstrap: grid + spacing only */}
-        <div className="container-fluid py-3 py-md-4">
+        <Box sx={{ py: { xs: 3, md: 4 }, px: { xs: 2, md: 3 }, maxWidth: '100%' }}>
           <Outlet />
-        </div>
+        </Box>
       </Box>
     </Box>
   );

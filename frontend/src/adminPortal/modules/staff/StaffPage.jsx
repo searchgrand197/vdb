@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Alert, Box, CircularProgress, IconButton, MenuItem, Typography } from '@mui/material';
@@ -8,11 +8,11 @@ import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined';
 import { useStaffQuery, useStaffMutations } from '@/hooks/useStaffQuery';
 import { useDepartmentsQuery } from '@/hooks/useDepartmentsQuery';
 import { useDesignationsQuery } from '@/hooks/useDesignationsQuery';
-import { AppButton } from '@admin/components/AppButton';
-import { AppTextField } from '@admin/components/AppTextField';
-import { AppSelect } from '@admin/components/AppSelect';
-import { CommonTable } from '@admin/components/common/CommonTable';
-import { CommonDialog } from '@admin/components/common/CommonDialog';
+import { AppButton } from '@/components/AppButton';
+import { AppTextField } from '@/components/AppTextField';
+import { AppSelect } from '@/components/AppSelect';
+import { AppTable } from '@/components/AppTable';
+import { AppDialog } from '@/components/AppDialog';
 import { useToast } from '@admin/context/ToastContext';
 import { getApiErrorMessage } from '@/utils/apiError';
 import { staffFormSchema } from '@admin/modules/staff/staffSchema';
@@ -233,38 +233,38 @@ export function StaffPage() {
   const saving = create.isPending || patch.isPending;
 
   return (
-    <div className="row g-3">
-      <div className="col-12 d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
         <Typography variant="h5">Staff</Typography>
         <AppButton variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
           Add staff
         </AppButton>
-      </div>
+      </Box>
 
-      <div className="col-12 col-md-6 col-lg-4">
+      <Box sx={{ maxWidth: { md: '50%', lg: '33.33%' } }}>
         <AppTextField
           label="Search"
           placeholder="Name, email, department, designation"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-      </div>
+      </Box>
 
       {isError ? (
-        <div className="col-12">
+        <Box>
           <Alert severity="error">
             {error?.message || 'Failed to load staff. Please try again later.'}
           </Alert>
-        </div>
+        </Box>
       ) : null}
 
-      <div className="col-12 position-relative">
+      <Box sx={{ position: 'relative' }}>
         {isLoading ? (
-          <div className="d-flex justify-content-center py-5">
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 5 }}>
             <CircularProgress size={32} />
-          </div>
+          </Box>
         ) : (
-          <CommonTable
+          <AppTable
             columns={[
               {
                 id: 'name',
@@ -319,9 +319,9 @@ export function StaffPage() {
             )}
           />
         )}
-      </div>
+      </Box>
 
-      <CommonDialog
+      <AppDialog
         open={formOpen}
         onClose={saving ? () => {} : closeForm}
         title={formMode === 'create' ? 'Add staff' : 'Edit staff'}
@@ -338,11 +338,11 @@ export function StaffPage() {
         }
       >
         {formError ? (
-          <Alert severity="error" className="mb-2" onClose={() => setFormError('')}>
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setFormError('')}>
             {formError}
           </Alert>
         ) : null}
-        <div className="d-flex flex-column gap-3 pt-1">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, pt: 1 }}>
           <AppTextField
             label="First name"
             required
@@ -426,10 +426,10 @@ export function StaffPage() {
               </AppSelect>
             )}
           />
-        </div>
-      </CommonDialog>
+        </Box>
+      </AppDialog>
 
-      <CommonDialog
+      <AppDialog
         open={Boolean(deleteTarget)}
         onClose={remove.isPending ? () => {} : closeDeleteDialog}
         title="Delete staff"
@@ -451,16 +451,16 @@ export function StaffPage() {
         }
       >
         {deleteError ? (
-          <Alert severity="error" className="mb-2" onClose={() => setDeleteError('')}>
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDeleteError('')}>
             {deleteError}
           </Alert>
         ) : null}
         <Typography variant="body2">
           Delete <strong>{deleteTarget?.name}</strong>? This cannot be undone.
         </Typography>
-      </CommonDialog>
+      </AppDialog>
 
-      <CommonDialog
+      <AppDialog
         open={credentialsOpen}
         onClose={() => setCredentialsOpen(false)}
         title="Staff login credentials"
@@ -471,10 +471,10 @@ export function StaffPage() {
           </AppButton>
         }
       >
-        <Alert severity="info" className="mb-2">
+        <Alert severity="info" sx={{ mb: 2 }}>
           Share these with the staff member once. They may not be shown again.
         </Alert>
-        <Box className="d-flex flex-column gap-2">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <AppTextField
             label="Login email"
             value={credentials.loginEmail}
@@ -490,8 +490,8 @@ export function StaffPage() {
             sx={{ '& .MuiInputBase-input': { fontFamily: 'ui-monospace, monospace' } }}
           />
         </Box>
-      </CommonDialog>
-    </div>
+      </AppDialog>
+    </Box>
   );
 }
 

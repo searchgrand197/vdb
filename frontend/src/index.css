@@ -1,6 +1,22 @@
+/* TEMPORARY: Tailwind is kept until all portals are migrated to MUI.
+   Once every portal uses MUI sx/Grid, remove this import and the tailwindcss dependency. */
 @import "tailwindcss";
 
-/* Subtle thin scrollbars for dense doctor TP view */
+/* Global resets — MUI handles component styling via theme. */
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* Prevent layout shift on scrollbars */
+html {
+  overflow-y: scroll;
+}
+
+/* Custom scrollbar for dense views */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
 }
@@ -12,6 +28,7 @@
   border-radius: 999px;
 }
 
+/* Doctor portal security scope */
 .doctor-portal-security-scope .doctor-no-copy {
   user-select: none;
   -webkit-user-select: none;
@@ -27,15 +44,4 @@
   user-select: text;
   -webkit-user-select: text;
   -ms-user-select: text;
-}
-
-/* Admin portal — ensure full height for MUI layout */
-html,
-body,
-#root {
-  min-height: 100%;
-}
-
-body {
-  margin: 0;
 }

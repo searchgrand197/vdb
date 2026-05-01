@@ -13,6 +13,8 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
       '@admin': fileURLToPath(new URL('./src/adminPortal', import.meta.url)),
+      'react-hot-toast': fileURLToPath(new URL('./src/shims/reactHotToast.jsx', import.meta.url)),
+      'lucide-react': fileURLToPath(new URL('./src/shims/lucideReact.jsx', import.meta.url)),
     },
   },
   server: {

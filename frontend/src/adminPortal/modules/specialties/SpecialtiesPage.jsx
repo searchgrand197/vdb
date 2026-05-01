@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Alert, Box, CircularProgress, IconButton, MenuItem, Switch, FormControlLabel, Typography } from '@mui/material';
@@ -8,12 +8,12 @@ import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined';
 import { useAuth } from '@admin/context/AuthContext';
 import { useDepartmentsQuery } from '@/hooks/useDepartmentsQuery';
 import { useSpecialtiesQuery, useSpecialtyMutations } from '@/hooks/useSpecialtiesQuery';
-import { AppButton } from '@admin/components/AppButton';
-import { AppTextField } from '@admin/components/AppTextField';
-import { AppSelect } from '@admin/components/AppSelect';
-import { StatusBadge } from '@admin/components/StatusBadge';
-import { CommonTable } from '@admin/components/common/CommonTable';
-import { CommonDialog } from '@admin/components/common/CommonDialog';
+import { AppButton } from '@/components/AppButton';
+import { AppTextField } from '@/components/AppTextField';
+import { AppSelect } from '@/components/AppSelect';
+import { AppStatusBadge } from '@/components/AppStatusBadge';
+import { AppTable } from '@/components/AppTable';
+import { AppDialog } from '@/components/AppDialog';
 import { useToast } from '@admin/context/ToastContext';
 import { specialtyFormSchema } from '@admin/modules/specialties/specialtySchema';
 import { parseSpecialtyFieldErrors } from '@/utils/specialtyFormErrors';
@@ -189,54 +189,54 @@ export function SpecialtiesPage() {
   const saving = create.isPending || patch.isPending;
 
   return (
-    <div className="row g-3">
-      <div className="col-12 d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
         <Typography variant="h5">Specialties</Typography>
         {canManage ? (
           <AppButton variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
             Add specialty
           </AppButton>
         ) : null}
-      </div>
+      </Box>
 
-      <div className="col-12 col-md-6 col-lg-4">
+      <Box sx={{ maxWidth: { md: '50%', lg: '33.33%' } }}>
         <AppTextField
           label="Search"
           placeholder="Name, code, description"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-      </div>
+      </Box>
 
       {!canManage ? (
-        <div className="col-12">
+        <Box>
           <Alert severity="info">
             Only superusers can create, edit, or delete specialties. You can view the list below.
           </Alert>
-        </div>
+        </Box>
       ) : null}
 
       {formError && !formOpen ? (
-        <div className="col-12">
+        <Box>
           <Alert severity="error" onClose={() => setFormError('')}>
             {formError}
           </Alert>
-        </div>
+        </Box>
       ) : null}
 
       {isError ? (
-        <div className="col-12">
+        <Box>
           <Alert severity="error">{getApiErrorMessage(error)}</Alert>
-        </div>
+        </Box>
       ) : null}
 
-      <div className="col-12 position-relative">
+      <Box sx={{ position: 'relative' }}>
         {isLoading ? (
-          <div className="d-flex justify-content-center py-5">
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 5 }}>
             <CircularProgress size={32} />
-          </div>
+          </Box>
         ) : (
-          <CommonTable
+          <AppTable
             columns={[
               {
                 id: 'name',
@@ -276,7 +276,7 @@ export function SpecialtiesPage() {
                 header: 'Status',
                 renderCell: (raw) => {
                   const m = specialtyRowMeta(raw, departmentLookup);
-                  return <StatusBadge status={m.isActive ? 'active' : 'inactive'} />;
+                  return <AppStatusBadge status={m.isActive ? 'active' : 'inactive'} />;
                 },
               },
             ]}
@@ -307,9 +307,9 @@ export function SpecialtiesPage() {
             }
           />
         )}
-      </div>
+      </Box>
 
-      <CommonDialog
+      <AppDialog
         open={formOpen}
         onClose={saving ? () => {} : closeForm}
         title={formMode === 'create' ? 'Add specialty' : 'Edit specialty'}
@@ -326,11 +326,11 @@ export function SpecialtiesPage() {
         }
       >
         {formError ? (
-          <Alert severity="error" className="mb-2" onClose={() => setFormError('')}>
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setFormError('')}>
             {formError}
           </Alert>
         ) : null}
-        <div className="d-flex flex-column gap-2 pt-1">
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
           <AppTextField
             label="Name"
             required
@@ -388,10 +388,10 @@ export function SpecialtiesPage() {
               </Box>
             )}
           />
-        </div>
-      </CommonDialog>
+        </Box>
+      </AppDialog>
 
-      <CommonDialog
+      <AppDialog
         open={Boolean(deleteTarget)}
         onClose={remove.isPending ? () => {} : closeDeleteDialog}
         title="Delete specialty"
@@ -413,15 +413,15 @@ export function SpecialtiesPage() {
         }
       >
         {deleteError ? (
-          <Alert severity="error" className="mb-2" onClose={() => setDeleteError('')}>
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDeleteError('')}>
             {deleteError}
           </Alert>
         ) : null}
         <Typography variant="body2">
           Delete <strong>{deleteTarget?.name}</strong>? This cannot be undone.
         </Typography>
-      </CommonDialog>
-    </div>
+      </AppDialog>
+    </Box>
   );
 }
 
