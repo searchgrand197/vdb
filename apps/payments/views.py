@@ -20,6 +20,18 @@ from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.shared.response import success_response
 
 
+def _invoice_amount_paid_success(invoice: BillingInvoice):
+    """Sum only successful, non-deleted payments for invoice.amount_paid."""
+    total = (
+        invoice.payments.filter(
+            status=PaymentTransaction.Status.SUCCESS,
+            is_deleted=False,
+        ).aggregate(t=Sum("amount"))["t"]
+        or 0
+    )
+    return total
+
+
 class PaymentTransactionViewSet(viewsets.ModelViewSet):
     queryset = PaymentTransaction.objects.all().select_related("invoice", "invoice__patient", "collected_by").prefetch_related(
         "invoice__items"
@@ -87,7 +99,7 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
 
         payment = PaymentTransaction.objects.create(**payload)
 
-        total_paid = invoice.payments.aggregate(t=Sum("amount"))["t"] or 0
+        total_paid = _invoice_amount_paid_success(invoice)
         invoice.amount_paid = total_paid
         invoice.save(update_fields=["amount_paid"])
 
@@ -119,10 +131,24 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
 
         serializer = PaymentTransactionCreateSerializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        effective_status = validated.get("status", instance.status)
+        inv = instance.invoice
+        if effective_status == PaymentTransaction.Status.SUCCESS and inv.status in {
+            BillingInvoice.Status.CANCELLED,
+            BillingInvoice.Status.REFUNDED,
+        }:
+            return Response(
+                {
+                    "success": False,
+                    "errors": {"status": ["Cannot set payment to success for a cancelled or refunded invoice."]},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         payment = serializer.save()
 
         invoice = payment.invoice
-        total_paid = invoice.payments.aggregate(t=Sum("amount"))["t"] or 0
+        total_paid = _invoice_amount_paid_success(invoice)
         invoice.amount_paid = total_paid
         invoice.save(update_fields=["amount_paid"])
 

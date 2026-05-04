@@ -22,7 +22,12 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
     queryset = OPDVisit.objects.all()
     filter_backends = (DjangoFilterBackend, SearchFilter, OrderingFilter)
     filterset_fields = ("visit_date", "status", "doctor_user", "patient")
-    search_fields = ("patient__uhid", "patient__phone", "diagnosis", "visit_reason")
+    search_fields = (
+        "patient__uhid",
+        "patient__phone",
+        "patient__first_name",
+        "patient__last_name",
+    )
     ordering_fields = ("created_at", "visit_date")
     ordering = ("-created_at",)
 

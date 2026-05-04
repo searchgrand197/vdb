@@ -10,6 +10,7 @@ class EmergencyCaseSerializer(serializers.ModelSerializer):
             "id",
             "hospital",
             "patient_name",
+            "gender",
             "contact",
             "complaint",
             "triage",

@@ -1,9 +1,16 @@
-import React, { Suspense, lazy, useEffect } from 'react'
+import React, { Suspense, lazy, useEffect, useState, useRef } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Login from './pages/Login'
 import api from './api'
 import { useAuthStore } from './stores/authStore'
 import { resolvePortalFromPath } from './themes'
+import {
+  createManifestBlobUrl,
+  getHospitalBrandingProfile,
+  getHospitalNameForTab,
+  HOSPITAL_BRANDING_CHANGED,
+  syncHospitalBrandingFromApiRow,
+} from './utils/hospitalBranding'
 import { AppRoutes as AdminRoutes } from './adminPortal/routes/AppRoutes'
 import { ToastProvider } from './adminPortal/context/ToastContext'
 
@@ -56,44 +63,76 @@ function PageLoading() {
   )
 }
 
+const PORTAL_TITLE_PREFIX = {
+  doctor: 'Doctor Portal',
+  pharmacy: 'Pharmacy Portal',
+  receptionist: 'Reception Portal',
+  admin: 'Admin Portal',
+  staff: 'Staff Portal',
+  lab: 'Lab Portal',
+}
+
 function AppHeadManager() {
   const location = useLocation()
+  const [hospitalBrandingBump, setHospitalBrandingBump] = useState(0)
+  const manifestBlobUrlRef = useRef(null)
+  const access = useAuthStore((s) => s.tokens.access)
+
+  useEffect(() => {
+    const bump = () => setHospitalBrandingBump((n) => n + 1)
+    window.addEventListener(HOSPITAL_BRANDING_CHANGED, bump)
+    return () => window.removeEventListener(HOSPITAL_BRANDING_CHANGED, bump)
+  }, [])
+
+  useEffect(() => {
+    if (!access || location.pathname.startsWith('/login')) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data } = await api.get('/settings/reception-portal/')
+        const row = data?.data ?? data
+        if (!cancelled && row && typeof row === 'object') syncHospitalBrandingFromApiRow(row)
+      } catch {
+        /* e.g. admin without hospital — keep cached / fallback branding */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [access, location.pathname])
 
   useEffect(() => {
     const roleKey = resolvePortalFromPath(location.pathname) || 'staff'
 
     const roleMeta = {
       doctor: {
-        title: 'Doctor Portal - Vardaan',
         iconHref: '/icons/icon-doctor-192.png?v=4',
-        manifestHref: '/manifest-doctor.json?v=4',
+        manifestFallback: '/manifest-doctor.json?v=4',
       },
       pharmacy: {
-        title: 'Pharmacy Portal - Vardaan',
         iconHref: '/icons/icon-pharmacy-192.png?v=4',
-        manifestHref: '/manifest-pharmacy.json?v=4',
+        manifestFallback: '/manifest-pharmacy.json?v=4',
       },
       receptionist: {
-        title: 'Reception Portal - Vardaan',
         iconHref: '/icons/icon-reception-192.png?v=5',
-        manifestHref: '/manifest-receptionist.json?v=5',
+        manifestFallback: '/manifest-receptionist.json?v=5',
       },
       admin: {
-        title: 'Admin Portal - Vardaan',
         iconHref: '/icons/icon-staff-192.png?v=4',
-        manifestHref: '/manifest-staff.json?v=4',
+        manifestFallback: '/manifest-staff.json?v=4',
       },
       staff: {
-        title: 'Staff Portal - Vardaan',
         iconHref: '/icons/icon-staff-192.png?v=4',
-        manifestHref: '/manifest-staff.json?v=4',
+        manifestFallback: '/manifest-staff.json?v=4',
       },
       lab: {
-        title: 'Lab Portal - Vardaan',
         iconHref: '/icons/icon-staff-192.png?v=4',
-        manifestHref: '/manifest-staff.json?v=4',
+        manifestFallback: '/manifest-staff.json?v=4',
       },
     }[roleKey]
+
+    const titlePrefix = PORTAL_TITLE_PREFIX[roleKey] || PORTAL_TITLE_PREFIX.staff
+    document.title = `${titlePrefix} - ${getHospitalNameForTab()}`
 
     // Force-refresh favicon links so browser tab icon updates reliably.
     document
@@ -122,10 +161,27 @@ function AppHeadManager() {
       manifestLink.setAttribute('rel', 'manifest')
       document.head.appendChild(manifestLink)
     }
-    manifestLink.setAttribute('href', roleMeta.manifestHref)
 
-    document.title = roleMeta.title
-  }, [location.pathname])
+    if (manifestBlobUrlRef.current) {
+      URL.revokeObjectURL(manifestBlobUrlRef.current)
+      manifestBlobUrlRef.current = null
+    }
+    try {
+      const blobUrl = createManifestBlobUrl(roleKey, undefined, getHospitalBrandingProfile())
+      manifestBlobUrlRef.current = blobUrl
+      manifestLink.setAttribute('href', blobUrl)
+    } catch {
+      manifestLink.setAttribute('href', roleMeta.manifestFallback)
+    }
+
+    return () => {
+      const u = manifestBlobUrlRef.current
+      if (u) {
+        URL.revokeObjectURL(u)
+        manifestBlobUrlRef.current = null
+      }
+    }
+  }, [location.pathname, hospitalBrandingBump])
 
   return null
 }

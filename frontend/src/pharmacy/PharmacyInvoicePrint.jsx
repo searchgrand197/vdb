@@ -304,7 +304,7 @@ function buildInvoiceHtml({ invoice, outlet }) {
   const patientNameHtml = escapeHtml(patientDisplayName(pd) || '—')
   const patientAddrHtml = escapeHtml(patientDisplayAddress(pd))
   const doctorNameHtml = escapeHtml(invoiceDoctorDisplayName(invoice))
-  const invoiceDate = safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy')
+  const invoiceDate = safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy HH:mm')
   const notesAdviceText = extractNotesAdviceFromRemarks(invoice.remarks)
   const notesAdviceHtml = notesAdviceText ? escapeHtml(notesAdviceText).replace(/\n/g, '<br/>') : ''
 
@@ -547,7 +547,7 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
             <div><strong>Payment :</strong> {paymentMethod}</div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', borderTop: '1px solid #000', paddingTop: '4px' }}>
               <span><strong>Invoice No. : {invoice.invoice_no}</strong></span>
-              <span><strong>Date: {safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy')}</strong></span>
+              <span><strong>Date: {safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy HH:mm')}</strong></span>
             </div>
           </div>
         </div>

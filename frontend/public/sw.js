@@ -46,6 +46,15 @@ self.addEventListener('fetch', (event) => {
 
   if (request.method !== 'GET') return
 
+  // Let Vite dev (and any /src or /@vite URLs) hit the network untouched — avoids breaking dynamic imports.
+  if (
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/@') ||
+    url.pathname.includes('/node_modules/')
+  ) {
+    return
+  }
+
   if (API_CACHE_PATHS.some((p) => url.pathname.startsWith(p))) {
     event.respondWith(networkFirstApi(request))
     return

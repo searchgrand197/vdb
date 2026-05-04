@@ -9,6 +9,31 @@ import App from './App'
 import InstallPrompt from './components/InstallPrompt'
 import './index.css'
 
+/** Production only — in dev, SW can intercept Vite `/src/...` module requests and break lazy-loaded portals. */
+if (import.meta.env.DEV && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister())).catch(() => {})
+}
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((reg) => {
+        reg.addEventListener('updatefound', () => {
+          const newWorker = reg.installing
+          if (!newWorker) return
+          newWorker.addEventListener('statechange', () => {
+            if (newWorker.state === 'activated' && navigator.serviceWorker.controller) {
+              if (confirm('New version available! Reload to update?')) {
+                window.location.reload()
+              }
+            }
+          })
+        })
+      })
+      .catch(() => {})
+  })
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

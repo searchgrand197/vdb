@@ -466,8 +466,20 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
         delta = end_date - admission.admission_date
         stay_days = max(1, delta.days)
 
-        # Get room rate
-        if admission.bed_code:
+        # Get room rate (respect per-day or total ledger overrides when set)
+        if admission.room_rent_daily_charge_override is not None:
+            room_total = admission.room_rent_daily_charge_override * Decimal(stay_days)
+            if admission.bed_code:
+                bed = Bed.objects.filter(bed_code=admission.bed_code, hospital=admission.hospital).select_related("room").first()
+                if bed and bed.room:
+                    daily_rate = admission.room_rent_daily_charge_override
+        elif admission.room_rent_override is not None:
+            room_total = admission.room_rent_override
+            if admission.bed_code:
+                bed = Bed.objects.filter(bed_code=admission.bed_code, hospital=admission.hospital).select_related("room").first()
+                if bed and bed.room:
+                    daily_rate = bed.room.daily_charge
+        elif admission.bed_code:
             bed = Bed.objects.filter(bed_code=admission.bed_code, hospital=admission.hospital).select_related("room").first()
             if bed and bed.room:
                 daily_rate = bed.room.daily_charge

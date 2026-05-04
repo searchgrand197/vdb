@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import api from '../api'
@@ -55,6 +55,7 @@ import OpdGeneratorTab from '../components/OpdTemplateEditor/OpdGeneratorTab'
 import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel'
 import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
 import { DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS } from '../pharmacy/rxConstants'
+import { syncHospitalBrandingFromApiRow } from '../utils/hospitalBranding'
 
 function asMuiIcon(IconComponent) {
   return function IconBridge({ size, className, sx, ...rest }) {
@@ -132,6 +133,9 @@ let receptionPortalSettingsCache = {
   ...DEFAULT_PAYMENT_SLIP_PROFILE,
 }
 
+/** Discharge preview registers afterprint; bill print must not close preview (`ipd_ledger` vs `discharge`). */
+let receptionistLastPrintKind = null
+
 function clearAuthStorage() {
   useAuthStore.getState().logout()
 }
@@ -162,6 +166,7 @@ async function loadReceptionPortalSettings() {
       website: row.website ?? receptionPortalSettingsCache.website,
       print_with_background: row.print_with_background ?? receptionPortalSettingsCache.print_with_background,
     }
+    syncHospitalBrandingFromApiRow(receptionPortalSettingsCache)
   } catch {
     // keep defaults if API fails
   }
@@ -189,6 +194,42 @@ function getPaymentSlipProfile() {
   }
 }
 
+/** Ledger / IPD receipt lines: date with time in parentheses (matches print). */
+function formatReceiptDateTime(value) {
+  if (value == null || value === '') return '—'
+  const d = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(d.getTime())) return '—'
+  return `${format(d, 'd/M/yyyy')} (${format(d, 'HH:mm:ss')})`
+}
+
+function toDateTimeInputValue(v) {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return ''
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const min = String(d.getMinutes()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}T${hh}:${min}`
+}
+
+function formatApiError(err, fallback) {
+  const d = err?.response?.data
+  if (!d) return fallback
+  if (typeof d.detail === 'string') return d.detail
+  if (d.errors && typeof d.errors === 'object') {
+    const first = Object.values(d.errors).flat()[0]
+    if (typeof first === 'string') return first
+  }
+  if (d.message && typeof d.message === 'string') return d.message
+  try {
+    return JSON.stringify(d)
+  } catch {
+    return fallback
+  }
+}
+
 async function savePaymentSlipProfile(profile) {
   const payload = {
     hospital_name: profile.hospital_name || '',
@@ -200,6 +241,7 @@ async function savePaymentSlipProfile(profile) {
   }
   await api.patch('/settings/reception-portal/', payload)
   receptionPortalSettingsCache = { ...receptionPortalSettingsCache, ...payload }
+  syncHospitalBrandingFromApiRow(receptionPortalSettingsCache)
 }
 
 function escapeHtml(value) {
@@ -557,6 +599,12 @@ function PrintSlip({ visit, onClose }) {
 
   function printBasicSlip() {
     const w = createSameTabPrintWindow()
+    const slipDateTime =
+      visit.visit_date
+        ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} ${
+            visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')
+          }`
+        : ''
     w.document.write(`
       <html><head><title>OPD Slip</title>
       <style>
@@ -574,7 +622,7 @@ function PrintSlip({ visit, onClose }) {
       <div class="row"><span class="label">UHID</span><span>${visit.patient_uhid || ''}</span></div>
       <div class="row"><span class="label">Patient</span><span>${visit.patient_name}</span></div>
       ${visit.patient_guardian_name ? `<div class="row"><span class="label">Guardian</span><span>${visit.patient_guardian_name}</span></div>` : ''}
-      <div class="row"><span class="label">Date</span><span>${visit.visit_date ? format(new Date(visit.visit_date), 'd/M/yyyy') : ''}</span></div>
+      <div class="row"><span class="label">Date</span><span>${slipDateTime}</span></div>
       <div class="row"><span class="label">Doctor</span><span>${visit.room?.label || visit.doc_name || 'OPD'}</span></div>
       <div class="row"><span class="label">Complaint</span><span>${visit.chief_complaint || '-'}</span></div>
       ${visit.patient_city ? `<div class="row"><span class="label">City</span><span>${visit.patient_city}${visit.patient_state ? ', ' + visit.patient_state : ''}</span></div>` : ''}
@@ -702,6 +750,7 @@ function OPDSection({ rooms }) {
   })
   const [form, setForm] = useState(() => buildEmptyForm())
   const [matchedPatient, setMatchedPatient] = useState(null)  // existing patient found by phone
+  const [lookupCandidates, setLookupCandidates] = useState([])
   const [opdNewPersonSamePhone, setOpdNewPersonSamePhone] = useState(false) // register different person; same mobile → family link
   const samePhoneModeDigitsRef = useRef(null)
   const [samePhoneFamilyModalOpen, setSamePhoneFamilyModalOpen] = useState(false)
@@ -763,6 +812,40 @@ function OPDSection({ rooms }) {
     .split(' ')
     .map((part) => (part ? `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}` : ''))
     .join(' ')
+
+  const hydratePatientIntoForm = useCallback(async (pt) => {
+    if (!pt?.id) return
+    try {
+      const detail = await api.get(`/patients/${pt.id}/`)
+      const p = detail.data?.data || detail.data
+      if (p) {
+        setForm(f => ({
+          ...f,
+          patient_name: capitalizePersonName([p.first_name, p.last_name].filter(Boolean).join(' ') || ''),
+          gender: p.gender || 'male',
+          age: p.age != null && p.age !== '' ? String(p.age) : '',
+          address_line1: p.address_line1 || '',
+          city: p.city || '',
+          state: p.state || '',
+          guardian_name: capitalizePersonName(p.guardian_name || ''),
+        }))
+      }
+    } catch {
+      setForm(f => ({
+        ...f,
+        patient_name: capitalizePersonName([pt.first_name, pt.last_name].filter(Boolean).join(' ') || ''),
+        gender: pt.gender || 'male',
+        guardian_name: capitalizePersonName(pt.guardian_name || ''),
+      }))
+    }
+  }, [])
+
+  async function selectLookupCandidate(pt) {
+    if (!pt?.id) return
+    setMatchedPatient(pt)
+    setLookupCandidates([])
+    await hydratePatientIntoForm(pt)
+  }
 
   function startAddAnotherPersonSamePhone() {
     const ten = form.phone.replace(/\D/g, '').slice(-10)
@@ -927,6 +1010,7 @@ function OPDSection({ rooms }) {
     const raw = form.phone.trim()
     if (raw.length < 3) {
       setMatchedPatient(null)
+      setLookupCandidates([])
       setSamePhoneFamilyList([])
       setOpdNewPersonSamePhone(false)
       samePhoneModeDigitsRef.current = null
@@ -949,6 +1033,7 @@ function OPDSection({ rooms }) {
     const looksLikePhone = /^[\d\s\-+()]+$/.test(raw) && digitsOnly.length > 0
     if (looksLikePhone && digitsOnly.length < 10) {
       setMatchedPatient(null)
+      setLookupCandidates([])
       setSamePhoneFamilyList([])
       setOpdNewPersonSamePhone(false)
       samePhoneModeDigitsRef.current = null
@@ -978,34 +1063,6 @@ function OPDSection({ rooms }) {
           looksLikePhone && digitsOnly.length >= 10 && !/[a-zA-Z]/.test(raw)
         const ten = digitsOnly.slice(-10)
 
-        async function hydratePatientIntoForm(pt) {
-          if (!pt?.id) return
-          try {
-            const detail = await api.get(`/patients/${pt.id}/`)
-            if (cancelled) return
-            const p = detail.data?.data || detail.data
-            if (p) {
-              setForm(f => ({
-                ...f,
-                patient_name: capitalizePersonName([p.first_name, p.last_name].filter(Boolean).join(' ') || ''),
-                gender: p.gender || 'male',
-                age: p.age != null && p.age !== '' ? String(p.age) : '',
-                address_line1: p.address_line1 || '',
-                city: p.city || '',
-                state: p.state || '',
-                guardian_name: capitalizePersonName(p.guardian_name || ''),
-              }))
-            }
-          } catch {
-            setForm(f => ({
-              ...f,
-              patient_name: capitalizePersonName([pt.first_name, pt.last_name].filter(Boolean).join(' ') || ''),
-              gender: pt.gender || 'male',
-              guardian_name: capitalizePersonName(pt.guardian_name || ''),
-            }))
-          }
-        }
-
         let familyList = []
 
         if (isTenDigitPhone) {
@@ -1031,6 +1088,7 @@ function OPDSection({ rooms }) {
         if (cancelled) return
 
         if (familyList.length > 0) {
+          setLookupCandidates([])
           setSamePhoneFamilyList(familyList)
           const pt = familyList[0]
           setMatchedPatient(pt)
@@ -1041,10 +1099,18 @@ function OPDSection({ rooms }) {
           const rows = Array.isArray(data?.data) ? data.data : (data?.results || data || [])
           if (cancelled) return
           if (rows.length > 0) {
-            const pt = rows[0]
-            setMatchedPatient(pt)
-            await hydratePatientIntoForm(pt)
+            setLookupCandidates(rows)
+            const normalizedRaw = raw.replace(/\s+/g, '').toLowerCase()
+            const exactUhidMatch = rows.find((row) => String(row.uhid || '').replace(/\s+/g, '').toLowerCase() === normalizedRaw)
+            if (exactUhidMatch) {
+              setMatchedPatient(exactUhidMatch)
+              setLookupCandidates([])
+              await hydratePatientIntoForm(exactUhidMatch)
+            } else {
+              setMatchedPatient(null)
+            }
           } else {
+            setLookupCandidates([])
             setMatchedPatient(null)
             setForm(f => ({
               ...f,
@@ -1060,6 +1126,7 @@ function OPDSection({ rooms }) {
       } catch {
         if (!cancelled) {
           setMatchedPatient(null)
+          setLookupCandidates([])
           setSamePhoneFamilyList([])
         }
       } finally {
@@ -1070,7 +1137,7 @@ function OPDSection({ rooms }) {
       cancelled = true
       clearTimeout(t)
     }
-  }, [form.phone, opdNewPersonSamePhone])
+  }, [form.phone, opdNewPersonSamePhone, hydratePatientIntoForm])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -1427,7 +1494,7 @@ function OPDSection({ rooms }) {
                 </span>
               )}
             </label>
-            <div className="relative max-w-[14rem]">
+            <div className="relative w-full">
               <input
                 value={form.phone}
                 onChange={e => {
@@ -1443,6 +1510,26 @@ function OPDSection({ rooms }) {
               />
               {lookingUp && (
                 <span className="absolute right-2 top-2 w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+              )}
+              {lookupCandidates.length > 0 && !matchedPatient && (
+                <ul className="absolute left-0 top-full z-50 mt-1 w-full bg-white rounded-xl shadow-xl border border-gray-100 divide-y divide-gray-50 max-h-48 overflow-y-auto">
+                  {lookupCandidates.map((p) => (
+                    <li key={p.id}>
+                      <button
+                        type="button"
+                        onClick={() => { void selectLookupCandidate(p) }}
+                        className="w-full text-left px-3 py-2 hover:bg-emerald-50/60"
+                      >
+                        <p className="text-xs font-semibold text-gray-900 truncate">
+                          {[p.first_name, p.last_name].filter(Boolean).join(' ') || 'Patient'}
+                        </p>
+                        <p className="text-[11px] text-gray-500 truncate">
+                          {p.uhid || 'No UHID'} · {p.phone || 'No phone'}
+                        </p>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
             {matchedPatient && looksLikeUhidInput && (
@@ -2404,8 +2491,28 @@ function StaffAttendanceSection() {
   )
 }
 
+/** When ward and room match (e.g. bed picker sets room = ward), show one label + bed, not "Ward / Ward / Bed". */
+function formatIpdBedAllocationLine(wardName, roomName, bedCode) {
+  const w = String(wardName ?? '').trim()
+  const r = String(roomName ?? '').trim()
+  const b = String(bedCode ?? '').trim()
+  if (w && r && w.toLowerCase() === r.toLowerCase()) {
+    return `${w || '--'} / ${b || '--'}`
+  }
+  return `${w || '--'} / ${r || '--'} / ${b || '--'}`
+}
+
+function formatWardRoomReceiptLabel(wardName, roomName) {
+  const w = String(wardName ?? '').trim()
+  const r = String(roomName ?? '').trim()
+  if (w && r && w.toLowerCase() === r.toLowerCase()) return w
+  if (!w && !r) return '—'
+  return `${w || '—'} / ${r || '—'}`
+}
+
+/** IPD admit slip: use `ipdNo` (ledger IPD ID), not the admission UUID. */
 function printIpdAdmitSlip({
-  admissionId,
+  ipdNo,
   admissionDate,
   patientName,
   patientUhid,
@@ -2433,10 +2540,11 @@ function printIpdAdmitSlip({
   const hasBedPrice = Number.isFinite(bedPriceNum) && bedPriceNum > 0
   const bedPriceFixed = hasBedPrice ? bedPriceNum.toFixed(2) : '0.00'
   const safe = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const bedAllocationLine = formatIpdBedAllocationLine(wardName, roomName, bedCode)
 
   w.document.write(`<!DOCTYPE html><html><head>
     <meta charset="utf-8"/>
-    <title>IPD Admit Slip — ${safe(admissionId || 'New')}</title>
+    <title>IPD Admit Slip — ${safe(ipdNo || 'New')}</title>
     <style>
       @page { size: A4 portrait; margin: 0; }
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2496,7 +2604,7 @@ function printIpdAdmitSlip({
       <div class="receipt-title">IPD Admission Slip</div>
 
         <div class="info-grid">
-        <div class="info-cell"><span class="info-label">Admission ID</span><span class="info-val">${safe(admissionId || '--')}</span></div>
+        <div class="info-cell"><span class="info-label">IPD ID</span><span class="info-val">${safe(ipdNo || '--')}</span></div>
         <div class="info-cell"><span class="info-label">Admission Date</span><span class="info-val">${safe(admitDate)}</span></div>
         <div class="info-cell"><span class="info-label">Generated At</span><span class="info-val">${safe(now)}</span></div>
         <div class="info-cell"><span class="info-label">Patient Name</span><span class="info-val">${safe(patientName || 'Patient')}</span></div>
@@ -2504,7 +2612,7 @@ function printIpdAdmitSlip({
         <div class="info-cell"><span class="info-label">Mobile No.</span><span class="info-val">${safe(patientPhone || '--')}</span></div>
         <div class="info-cell"><span class="info-label">Department</span><span class="info-val">${safe(department || '--')}</span></div>
         <div class="info-cell"><span class="info-label">Assigned Doctor</span><span class="info-val">${safe(doctorName || '--')}</span></div>
-        <div class="info-cell"><span class="info-label">Bed Allocation</span><span class="info-val">${safe(wardName || '--')} / ${safe(roomName || '--')} / ${safe(bedCode || '--')}</span></div>
+        <div class="info-cell"><span class="info-label">Bed Allocation</span><span class="info-val">${safe(bedAllocationLine)}</span></div>
           <div class="info-cell"><span class="info-label">Bed Price (Per Day)</span><span class="info-val">₹${hasBedPrice ? bedPriceFixed : '--'}</span></div>
       </div>
 
@@ -2538,7 +2646,7 @@ function printIpdAdmitSlip({
       <div class="totals">
         <div class="t-row"><span>Total Amount:</span><span>₹${bedPriceFixed}</span></div>
         <div class="t-row disc"><span>Discount:</span><span>₹0.00</span></div>
-        <div class="t-row.final"><span>Net Amount:</span><span>₹${bedPriceFixed}</span></div>
+        <div class="t-row final"><span>Net Amount:</span><span>₹${bedPriceFixed}</span></div>
       </div>
 
       <div class="footer">
@@ -2590,7 +2698,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
   const [ptSearching, setPtSearching] = useState(false)
   const [selectedPatient, setSelectedPatient] = useState(null)
   const [isAddingNew, setIsAddingNew] = useState(false)
-  const [newPt, setNewPt] = useState({ name: '', phone: '', address: '' })
+  const [newPt, setNewPt] = useState({ name: '', phone: '', address: '', gender: '' })
 
   const [showPayments, setShowPayments] = useState(null) // admission object
   const [showAddCharge, setShowAddCharge] = useState(null) // admission object
@@ -2733,6 +2841,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
     if (isAddingNew) {
       if (!newPt.name.trim()) { toast.error('Patient name is required'); return }
       if (/\d/.test(newPt.name || '')) { toast.error('Patient name cannot contain numbers'); return }
+      if (!newPt.gender) { toast.error('Please select patient gender'); return }
       if ((newPt.phone || '').replace(/\D/g, '').length >= 10) {
         try {
           const ten = (newPt.phone || '').replace(/\D/g, '').slice(-10)
@@ -2754,6 +2863,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
         const payload = {
           first_name: parts[0] || 'New',
           last_name: parts.slice(1).join(' ') || 'Patient',
+          gender: newPt.gender,
           phone: newPt.phone || '',
           address_line1: newPt.address || '',
         }
@@ -2777,7 +2887,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
       if (autoPrintAdmitSlip) {
         const doc = doctors.find(d => (d.user || d.id) === form.assigned_doctor)
         printIpdAdmitSlip({
-          admissionId: admitted?.id,
+          ipdNo: admitted?.ipd_no,
           admissionDate: admitted?.admission_date || form.admission_date,
           patientName: [currentPatient?.first_name, currentPatient?.last_name].filter(Boolean).join(' ') || currentPatient?.name,
           patientUhid: currentPatient?.uhid,
@@ -2800,7 +2910,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
       setAutoPrintAdmitSlip(false)
       setSelectedPatient(null)
       setIsAddingNew(false)
-      setNewPt({ name: '', phone: '', address: '' })
+      setNewPt({ name: '', phone: '', address: '', gender: '' })
       setPickedBed(null)
       fetchAdmissions()
     } catch (err) {
@@ -2814,7 +2924,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
     const doc = doctors.find(d => (d.user || d.id) === admission.assigned_doctor)
     const bedPrice = bedPriceMap[String(admission.bed_code || '')]
     printIpdAdmitSlip({
-      admissionId: admission.id,
+      ipdNo: admission.ipd_no,
       admissionDate: admission.admission_date,
       patientName: admission.patient_name || [patientRow?.first_name, patientRow?.last_name].filter(Boolean).join(' '),
       patientUhid: admission.patient_uhid || patientRow?.uhid,
@@ -2876,6 +2986,16 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                       const v = e.target.value.replace(/\D/g, '').slice(0, 10);
                       setNewPt(p => ({ ...p, phone: v }));
                     }} placeholder="10-digit Mobile" />
+                  <select
+                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    value={newPt.gender}
+                    onChange={e => setNewPt(p => ({ ...p, gender: e.target.value }))}
+                  >
+                    <option value="">Select Gender *</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                  </select>
                   <input className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none" 
                     value={newPt.address} onChange={e => setNewPt(p => ({ ...p, address: e.target.value }))} placeholder="Address (Optional)" />
                 </div>
@@ -2908,7 +3028,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                         </li>
                       ))}
                       <li className="bg-blue-50/50">
-                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: ptSearch, phone: '', address: '' }); setPtSearch(''); setPtResults([]) }}
+                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: ptSearch, phone: '', address: '', gender: '' }); setPtSearch(''); setPtResults([]) }}
                           className="w-full text-left px-3 py-3 flex items-center gap-3 group transition-all">
                           <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
                             <Plus size={16} strokeWidth={3} />
@@ -3206,6 +3326,65 @@ function IPDSection({ mode, initialAdmissionDraft }) {
   )
 }
 
+/** Values for `<input type="date" />` must be YYYY-MM-DD (API may return ISO datetime strings). */
+function toHtmlDateInputValue(v) {
+  if (v == null || v === '') return ''
+  const s = String(v).trim()
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return ''
+  return format(d, 'yyyy-MM-dd')
+}
+
+/** IPD API expects YYYY-MM-DD; optional fields should be `null`, not `''`. */
+function toApiDateOrNull(v) {
+  if (v == null || String(v).trim() === '') return null
+  const s = String(v).trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return null
+  return format(d, 'yyyy-MM-dd')
+}
+
+const EMPTY_PATIENT_FORM = {
+  first_name: '',
+  last_name: '',
+  phone: '',
+  age: '',
+  gender: '',
+  guardian_name: '',
+  address_line1: '',
+  city: '',
+  state: '',
+}
+
+function mapPatientApiToForm(p) {
+  if (!p || typeof p !== 'object') return { ...EMPTY_PATIENT_FORM }
+  return {
+    first_name: String(p.first_name ?? '').trim(),
+    last_name: String(p.last_name ?? '').trim(),
+    phone: String(p.phone ?? '').trim(),
+    age: p.age != null && p.age !== '' ? String(p.age) : '',
+    gender: String(p.gender ?? '').trim(),
+    guardian_name: String(p.guardian_name ?? '').trim(),
+    address_line1: String(p.address_line1 ?? '').trim(),
+    city: String(p.city ?? '').trim(),
+    state: String(p.state ?? '').trim(),
+  }
+}
+
+function fallbackPatientFormFromAdmissionName(patientName) {
+  const parts = String(patientName || '').trim().split(/\s+/).filter(Boolean)
+  return {
+    ...EMPTY_PATIENT_FORM,
+    first_name: parts[0] || '',
+    last_name: parts.slice(1).join(' ') || '',
+  }
+}
+
 function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved }) {
   const [submitting, setSubmitting] = useState(false)
   const [patientSubmitting, setPatientSubmitting] = useState(false)
@@ -3215,37 +3394,65 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
     patient_name: admission.patient_name || '--',
     patient_uhid: admission.patient_uhid || 'UHID unavailable',
   })
-  const splitPatientName = (name) => {
-    const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
-    return {
-      first_name: parts[0] || '',
-      last_name: parts.slice(1).join(' ') || '',
-    }
-  }
-  const initialName = splitPatientName(admission.patient_name)
-  const initialPatientForm = {
-    first_name: admission.first_name || initialName.first_name,
-    last_name: admission.last_name || initialName.last_name,
-    phone: admission.patient_phone || admission.phone || '',
-    age: admission.patient_age != null && admission.patient_age !== '' ? String(admission.patient_age) : '',
-    gender: admission.patient_gender || admission.gender || '',
-    guardian_name: admission.patient_guardian_name || admission.guardian_name || '',
-    address_line1: admission.patient_address || admission.address_line1 || '',
-    city: admission.patient_city || admission.city || '',
-    state: admission.patient_state || admission.state || '',
-  }
   const [form, setForm] = useState({
     assigned_doctor: admission.assigned_doctor || '',
     department: admission.department || '',
     ward_name: admission.ward_name || '',
     room_name: admission.room_name || '',
     bed_code: admission.bed_code || '',
-    admission_date: admission.admission_date || format(new Date(), 'yyyy-MM-dd'),
-    expected_discharge_date: admission.expected_discharge_date || '',
+    admission_date: toHtmlDateInputValue(admission.admission_date) || format(new Date(), 'yyyy-MM-dd'),
+    expected_discharge_date: toHtmlDateInputValue(admission.expected_discharge_date),
     admission_diagnosis: admission.admission_diagnosis || '',
     admission_notes: admission.admission_notes || '',
   })
-  const [patientForm, setPatientForm] = useState(initialPatientForm)
+  const [bedBaseline] = useState(() => ({
+    bed_code: admission.bed_code || '',
+    room_name: admission.room_name || '',
+    ward_name: admission.ward_name || '',
+  }))
+  const bedAssignmentDirty = useMemo(() => {
+    const n = (s) => String(s ?? '').trim()
+    return (
+      n(form.bed_code) !== n(bedBaseline.bed_code) ||
+      n(form.room_name) !== n(bedBaseline.room_name) ||
+      n(form.ward_name) !== n(bedBaseline.ward_name)
+    )
+  }, [form.bed_code, form.room_name, form.ward_name, bedBaseline])
+  const [patientForm, setPatientForm] = useState(() => ({ ...EMPTY_PATIENT_FORM }))
+  const [baselinePatientForm, setBaselinePatientForm] = useState(() => ({ ...EMPTY_PATIENT_FORM }))
+  const [patientDetailLoading, setPatientDetailLoading] = useState(false)
+
+  useEffect(() => {
+    if (!admission?.patient) {
+      const fb = fallbackPatientFormFromAdmissionName(admission?.patient_name)
+      setPatientForm(fb)
+      setBaselinePatientForm(fb)
+      return
+    }
+    let cancelled = false
+    setPatientDetailLoading(true)
+    ;(async () => {
+      try {
+        const { data } = await api.get(`/patients/${admission.patient}/`)
+        const p = data?.data ?? data ?? {}
+        if (cancelled) return
+        const next = mapPatientApiToForm(p)
+        setPatientForm(next)
+        setBaselinePatientForm(next)
+      } catch {
+        if (!cancelled) {
+          const fb = fallbackPatientFormFromAdmissionName(admission.patient_name)
+          setPatientForm(fb)
+          setBaselinePatientForm(fb)
+        }
+      } finally {
+        if (!cancelled) setPatientDetailLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [admission.patient, admission.id, showPatientEditModal])
 
   function handleBedSelect(bedInfo) {
     setForm(f => ({
@@ -3261,9 +3468,25 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
     e.preventDefault()
     if (!form.department) { toast.error('Department is required'); return }
     if (!form.bed_code) { toast.error('Bed assignment is required'); return }
+    const admissionDate = toApiDateOrNull(form.admission_date)
+    if (!admissionDate) {
+      toast.error('Admission date must be a valid date (YYYY-MM-DD)')
+      return
+    }
     setSubmitting(true)
     try {
-      await api.patch(`/ipd-admissions/${admission.id}/`, form)
+      const payload = {
+        assigned_doctor: form.assigned_doctor || null,
+        department: form.department,
+        ward_name: form.ward_name,
+        room_name: form.room_name,
+        bed_code: form.bed_code,
+        admission_date: admissionDate,
+        expected_discharge_date: toApiDateOrNull(form.expected_discharge_date),
+        admission_diagnosis: form.admission_diagnosis || '',
+        admission_notes: form.admission_notes || '',
+      }
+      await api.patch(`/ipd-admissions/${admission.id}/`, payload)
       toast.success('Admission details updated')
       onSaved()
     } catch (err) {
@@ -3289,7 +3512,7 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
       const patientKeys = ["first_name", "last_name", "phone", "age", "gender", "guardian_name", "address_line1", "city", "state"]
       patientKeys.forEach((key) => {
         const nextVal = String(patientForm[key] ?? '').trim()
-        const prevVal = String(initialPatientForm[key] ?? '').trim()
+        const prevVal = String(baselinePatientForm[key] ?? '').trim()
         if (nextVal !== prevVal) {
           if (key === 'age') {
             if (nextVal === '') return
@@ -3307,6 +3530,7 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
       await api.patch(`/patients/${admission.patient}/`, patientPayload)
       const fullName = [patientForm.first_name, patientForm.last_name].filter(Boolean).join(' ').trim()
       setPatientPreview((p) => ({ ...p, patient_name: fullName || p.patient_name }))
+      setBaselinePatientForm({ ...patientForm })
       toast.success('Patient details updated')
       setShowPatientEditModal(false)
       onSaved()
@@ -3382,13 +3606,36 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
 
             <div className="col-span-2">
               <label className="text-xs text-gray-500 mb-1 block">Bed Assignment *</label>
-              <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
-                <div>
-                  <p className="text-sm font-bold text-amber-900">{form.bed_code || '--'} · {form.room_name || '--'}</p>
-                  <p className="text-xs text-amber-700">{form.ward_name || 'Ward not set'}</p>
+              <div className={`flex items-start justify-between gap-3 rounded-xl px-3 py-2.5 border ${bedAssignmentDirty ? 'bg-amber-50 border-amber-400/70' : 'bg-amber-50 border-amber-200'}`}>
+                <div className="min-w-0 flex-1">
+                  {bedAssignmentDirty ? (
+                    <>
+                      <p className="font-black text-amber-900 mb-1.5 uppercase tracking-wide text-[10px]">Bed assignment changed</p>
+                      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-start text-xs">
+                        <span className="text-amber-600 font-bold shrink-0">From</span>
+                        <div className="min-w-0">
+                          <p className="font-bold text-amber-900">{bedBaseline.bed_code || '—'} · {bedBaseline.room_name || '—'}</p>
+                          <p className="text-amber-800/90">{bedBaseline.ward_name || 'Ward not set'}</p>
+                        </div>
+                        <span className="text-amber-600 font-bold shrink-0">To</span>
+                        <div className="min-w-0">
+                          <p className="font-bold text-amber-900">{form.bed_code || '—'} · {form.room_name || '—'}</p>
+                          <p className="text-amber-800/90">{form.ward_name || 'Ward not set'}</p>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-sm font-bold text-amber-900">{form.bed_code || '--'} · {form.room_name || '--'}</p>
+                      <p className="text-xs text-amber-700">{form.ward_name || 'Ward not set'}</p>
+                    </>
+                  )}
                 </div>
-                <button type="button" onClick={() => setShowBedPicker(true)}
-                  className="text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg font-bold hover:bg-amber-200">
+                <button
+                  type="button"
+                  onClick={() => setShowBedPicker(true)}
+                  className="shrink-0 text-xs bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg font-bold hover:bg-amber-200"
+                >
                   Change Bed
                 </button>
               </div>
@@ -3401,9 +3648,13 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
             </div>
 
             <div>
-              <label className="text-xs text-gray-500 mb-1 block">Expected Discharge Date</label>
-              <input type="date" value={form.expected_discharge_date || ''} onChange={e => setForm(f => ({ ...f, expected_discharge_date: e.target.value }))}
-                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none" />
+              <label className="text-xs text-gray-500 mb-1 block">Expected Discharge Date <span className="text-gray-400 font-normal">(optional)</span></label>
+              <input
+                type="date"
+                value={form.expected_discharge_date || ''}
+                onChange={e => setForm(f => ({ ...f, expected_discharge_date: e.target.value }))}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
             </div>
 
             <div className="col-span-2">
@@ -3446,7 +3697,12 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
                 <XCircle size={20} />
               </button>
             </div>
-            <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3 relative">
+              {patientDetailLoading && admission.patient && (
+                <div className="absolute inset-0 z-10 bg-white/70 backdrop-blur-[1px] flex items-center justify-center rounded-b-2xl">
+                  <span className="text-sm font-semibold text-blue-600">Loading patient…</span>
+                </div>
+              )}
               <div>
                 <label className="text-xs text-gray-500 mb-1 block">First Name</label>
                 <input value={patientForm.first_name} onChange={e => setPatientForm(p => ({ ...p, first_name: e.target.value }))}
@@ -3717,7 +3973,7 @@ function AdmissionPaymentsModal({ admission, onClose }) {
 function EmergencySection() {
   const [cases, setCases] = useState([])
   const [loading, setLoading] = useState(true)
-  const [form, setForm] = useState({ patient_name: '', contact: '', complaint: '', triage: 'yellow' })
+  const [form, setForm] = useState({ patient_name: '', gender: '', contact: '', complaint: '', triage: 'yellow' })
   const [selectedCase, setSelectedCase] = useState(null)
   const [admitCase, setAdmitCase] = useState(null)
   const [doctors, setDoctors] = useState([])
@@ -3778,9 +4034,14 @@ function EmergencySection() {
 
   async function addCase(e) {
     e.preventDefault()
+    if (!form.gender) {
+      toast.error('Please select patient gender')
+      return
+    }
     try {
       const { data } = await api.post('/emergency/cases/', {
         patient_name: form.patient_name,
+        gender: form.gender,
         contact: form.contact || '',
         complaint: form.complaint || '',
         triage: form.triage || 'yellow',
@@ -3792,7 +4053,7 @@ function EmergencySection() {
       if (autoPrintEmergencySlip) {
         printEmergencyCaseSlip(entry)
       }
-      setForm({ patient_name: '', contact: '', complaint: '', triage: 'yellow' })
+      setForm({ patient_name: '', gender: '', contact: '', complaint: '', triage: 'yellow' })
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Failed to log emergency case')
     }
@@ -3817,7 +4078,7 @@ function EmergencySection() {
     })
   }
 
-  function printEmergencyReceipt({ invoiceNo, slipNumber, patientName, patientUhid, patientPhone, description, amount, paymentMode }) {
+  function printEmergencyReceipt({ invoiceNo, slipNumber, patientName, patientGender, patientUhid, patientPhone, description, amount, paymentMode }) {
     const w = createSameTabPrintWindow()
     const slipProfile = getPaymentSlipProfile()
     const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
@@ -3836,6 +4097,7 @@ function EmergencySection() {
           : paymentMode === 'upi'
             ? 'UPI Payment'
             : (paymentMode || 'Payment').toUpperCase()
+    const genderLabel = patientGender === 'female' ? 'Female' : patientGender === 'male' ? 'Male' : patientGender === 'other' ? 'Other' : ''
     const amountFixed = Number(amount || 0).toFixed(2)
 
     w.document.write(`<!DOCTYPE html><html><head>
@@ -3895,7 +4157,7 @@ function EmergencySection() {
           <div class="info-cell"><span class="info-label">Slip Number</span><span class="info-val">${slipNumber || '--'}</span></div>
           <div class="info-cell"><span class="info-label">Invoice Number</span><span class="info-val">${invoiceNo || '--'}</span></div>
           <div class="info-cell"><span class="info-label">Name</span><span class="info-val">${upPatient}</span></div>
-          <div class="info-cell"><span class="info-label">Gender / Age</span><span class="info-val">Other</span></div>
+          <div class="info-cell"><span class="info-label">Gender / Age</span><span class="info-val">${genderLabel || '—'}</span></div>
           <div class="info-cell"><span class="info-label">Pay Mode</span><span class="info-val">${payModeLabel}</span></div>
           <div class="info-cell"><span class="info-label">Mobile No.</span><span class="info-val">${patientPhone || '—'}</span></div>
           <div class="info-cell"><span class="info-label">Date</span><span class="info-val">${dateTimeStr}</span></div>
@@ -3907,7 +4169,7 @@ function EmergencySection() {
         <div class="totals">
           <div class="t-row"><span>Total Amount:</span><span>₹${amountFixed}</span></div>
           <div class="t-row disc"><span>Discount:</span><span>₹0.00</span></div>
-          <div class="t-row.final"><span>Net Amount:</span><span>₹${amountFixed}</span></div>
+          <div class="t-row final"><span>Net Amount:</span><span>₹${amountFixed}</span></div>
         </div>
         <div class="footer">
           <div class="note"><strong>Note:</strong> Your reports will be preserved only for 6 months.<br/>Please retain this receipt for future reference.</div>
@@ -4021,6 +4283,7 @@ function EmergencySection() {
     const payload = {
       first_name: parts[0] || 'Emergency',
       last_name: parts.slice(1).join(' ') || 'Patient',
+      gender: caseRow?.gender || 'other',
       phone: digits || '',
     }
     const { data } = await api.post('/patients/', payload)
@@ -4082,6 +4345,7 @@ function EmergencySection() {
           invoiceNo: inv.invoice_no,
           slipNumber: payment?.slip_number || '',
           patientName: [patient.first_name, patient.last_name].filter(Boolean).join(' '),
+          patientGender: patient.gender,
           patientUhid: patient.uhid,
           patientPhone: patient.phone,
           description: chargeForm.description,
@@ -4150,6 +4414,7 @@ function EmergencySection() {
         const payload = {
           first_name: parts[0] || 'Emergency',
           last_name: parts.slice(1).join(' ') || 'Patient',
+          gender: admitCase?.gender || 'other',
           phone: digits || '',
         }
         const { data } = await api.post('/patients/', payload)
@@ -4187,7 +4452,7 @@ function EmergencySection() {
       if (admitForm.auto_print_admit_slip) {
         const doc = doctors.find(d => (d.user || d.id) === admitForm.assigned_doctor)
         printIpdAdmitSlip({
-          admissionId: admitted?.id,
+          ipdNo: admitted?.ipd_no,
           admissionDate: admitted?.admission_date || format(new Date(), 'yyyy-MM-dd'),
           patientName: [patientRecord?.first_name, patientRecord?.last_name].filter(Boolean).join(' ') || admitCase.patient_name,
           patientUhid: patientRecord?.uhid,
@@ -4249,11 +4514,25 @@ function EmergencySection() {
           <AlertTriangle size={16} className="text-red-500" /> Log Emergency Case
         </h3>
         <div className="grid grid-cols-4 gap-3">
-          <div className="col-span-2">
+          <div>
             <label className="text-xs text-gray-500 mb-1 block">Patient Name *</label>
             <input value={form.patient_name} onChange={e => setForm(f => ({ ...f, patient_name: e.target.value }))} required
               placeholder="Enter patient name"
               className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-red-400 focus:outline-none" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 mb-1 block">Gender *</label>
+            <select
+              value={form.gender}
+              onChange={e => setForm(f => ({ ...f, gender: e.target.value }))}
+              required
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-red-400 focus:outline-none"
+            >
+              <option value="">Select gender</option>
+              <option value="male">Male</option>
+              <option value="female">Female</option>
+              <option value="other">Other</option>
+            </select>
           </div>
           <div>
             <label className="text-xs text-gray-500 mb-1 block">Contact</label>
@@ -4360,6 +4639,10 @@ function EmergencySection() {
               <div className="bg-gray-50 rounded-xl p-3">
                 <p className="text-[11px] text-gray-400 uppercase">Contact</p>
                 <p className="text-sm font-semibold text-gray-800">{selectedCase.contact || 'No contact'}</p>
+              </div>
+              <div className="bg-gray-50 rounded-xl p-3">
+                <p className="text-[11px] text-gray-400 uppercase">Gender</p>
+                <p className="text-sm font-semibold text-gray-800 capitalize">{selectedCase.gender || '—'}</p>
               </div>
               <div className="bg-gray-50 rounded-xl p-3">
                 <p className="text-[11px] text-gray-400 uppercase">Triage</p>
@@ -4621,6 +4904,12 @@ function PrintOpdReceipt({ visit, patient, onClose }) {
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
   const now = format(new Date(), 'd/M/yyyy (HH:mm)')
   const patientName = [patient?.first_name, patient?.last_name].filter(Boolean).join(' ') || patient?.uhid || '—'
+  const visitDateDisplay =
+    visit.visit_date
+      ? `${format(new Date(visit.visit_date), 'd/M/yyyy')}${
+          visit.created_at ? ` ${format(new Date(visit.created_at), 'HH:mm')}` : ''
+        }`
+      : '—'
 
   useEffect(() => {
     const t = setTimeout(() => window.print(), 800)
@@ -4659,7 +4948,7 @@ function PrintOpdReceipt({ visit, patient, onClose }) {
             ['UHID', patient?.uhid || '—'],
             ['Token No', visit.queue_number || '—'],
             ['Consultant', visit.doctor_name || '—'],
-            ['Visit Date', visit.visit_date ? format(new Date(visit.visit_date), 'd/M/yyyy') : '—'],
+            ['Visit Date', visitDateDisplay],
             ['Payment Mode', (visit.payment_mode || '—').toUpperCase()],
           ].map(([l, v]) => (
             <div key={l}>
@@ -4729,6 +5018,11 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
   const [expandedOpds, setExpandedOpds] = useState({})
   const [expandedSubs, setExpandedSubs] = useState({}) // { [admId_section]: bool }
   const [printTarget, setPrintTarget] = useState(null)
+  const [tlPayCancel, setTlPayCancel] = useState(null)
+  const [tlPayCancelReason, setTlPayCancelReason] = useState('')
+  const [tlPayCancelling, setTlPayCancelling] = useState(false)
+  const [tlPayEdit, setTlPayEdit] = useState(null)
+  const [tlPaySaving, setTlPaySaving] = useState(false)
 
   const fullName = [patient?.first_name, patient?.last_name].filter(Boolean).join(' ') || patient?.uhid || 'Patient'
 
@@ -4765,6 +5059,83 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
       setLedgerByAdmission(prev => ({ ...prev, [admissionId]: payload }))
     } catch { toast.error('Failed to load IPD ledger') }
     finally { setLoadingLedger(prev => ({ ...prev, [admissionId]: false })) }
+  }
+
+  async function reloadLedgerAdmission(admissionId) {
+    if (!admissionId) return
+    setLoadingLedger(prev => ({ ...prev, [admissionId]: true }))
+    try {
+      const { data: payload } = await api.get(`/ipd-admissions/${admissionId}/ledger/`)
+      setLedgerByAdmission(prev => ({ ...prev, [admissionId]: payload }))
+    } catch {
+      toast.error('Failed to refresh IPD ledger')
+    } finally {
+      setLoadingLedger(prev => ({ ...prev, [admissionId]: false }))
+    }
+  }
+
+  async function openTimelineLedgerEditPayment(admissionId, paymentId) {
+    if (!paymentId) return
+    setTlPaySaving(true)
+    try {
+      const { data } = await api.get(`/payments/${paymentId}/`)
+      const row = data?.data || data
+      setTlPayEdit({ ...row, admissionId, paid_at: toDateTimeInputValue(row.paid_at) })
+    } catch {
+      toast.error('Failed to load payment')
+    } finally {
+      setTlPaySaving(false)
+    }
+  }
+
+  async function submitTlPayCancel() {
+    if (!tlPayCancel?.paymentTransactionId) return
+    const reason = tlPayCancelReason.trim()
+    if (!reason) {
+      toast.error('Please enter cancellation reason')
+      return
+    }
+    setTlPayCancelling(true)
+    try {
+      const ref = `CANCEL:${reason}`.slice(0, 120)
+      await api.patch(`/payments/${tlPayCancel.paymentTransactionId}/`, {
+        status: 'cancelled',
+        transaction_reference: ref,
+      })
+      toast.success('Payment receipt cancelled')
+      const admId = tlPayCancel.admissionId
+      setTlPayCancel(null)
+      setTlPayCancelReason('')
+      await reloadLedgerAdmission(admId)
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to cancel payment'))
+    } finally {
+      setTlPayCancelling(false)
+    }
+  }
+
+  async function handleTlPayEditSave(e) {
+    e.preventDefault()
+    if (!tlPayEdit?.id) return
+    const admId = tlPayEdit.admissionId
+    setTlPaySaving(true)
+    try {
+      await api.patch(`/payments/${tlPayEdit.id}/`, {
+        payment_mode: tlPayEdit.payment_mode || 'cash',
+        amount: tlPayEdit.amount || 0,
+        transaction_reference: tlPayEdit.transaction_reference || '',
+        receipt_no: tlPayEdit.receipt_no || '',
+        status: tlPayEdit.status || 'success',
+        paid_at: tlPayEdit.paid_at || null,
+      })
+      toast.success('Payment slip updated!')
+      setTlPayEdit(null)
+      await reloadLedgerAdmission(admId)
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to update payment slip'))
+    } finally {
+      setTlPaySaving(false)
+    }
   }
 
   function toggleAdmission(id) {
@@ -4985,8 +5356,12 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                   desc = 'Room Rent / Bed Charges'
                                 }
 
+                                // One row per billing invoice (same desc on two invoices must not merge)
+                                const invPart = c.invoice_id != null && String(c.invoice_id) !== '' ? String(c.invoice_id) : String(c.id || '')
+                                key = `${key}::__inv__${invPart}`
+
                                 if (!groupedMap[key]) {
-                                  groupedMap[key] = { ...c, description: desc, qty: 1, total_amount: parseFloat(c.amount || 0) }
+                                  groupedMap[key] = { ...c, description: desc, qty: 1, total_amount: parseFloat(c.amount || 0), invoice_status: c.invoice_status }
                                 } else {
                                   groupedMap[key].qty += 1
                                   groupedMap[key].total_amount += parseFloat(c.amount || 0)
@@ -4995,7 +5370,14 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                   }
                                 }
                               })
-                              const chargeRows = Object.values(groupedMap)
+                              const chargeRows = Object.values(groupedMap).sort((a, b) => {
+                                const ca = String(a.invoice_status || '').toLowerCase() === 'cancelled'
+                                const cb = String(b.invoice_status || '').toLowerCase() === 'cancelled'
+                                if (ca !== cb) return ca ? 1 : -1
+                                const da = a.date ? new Date(a.date).getTime() : 0
+                                const db = b.date ? new Date(b.date).getTime() : 0
+                                return da - db
+                              })
 
                               return (
                                 <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
@@ -5019,8 +5401,13 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                         </thead>
                                         <tbody className="divide-y divide-gray-50">
                                           {chargeRows.map((c,i)=>(
-                                            <tr key={i} className="hover:bg-gray-50/80">
-                                              <td className="px-3 py-2.5 font-medium text-gray-800">{c.description}</td>
+                                            <tr key={i} className={`hover:bg-gray-50/80 ${String(c.invoice_status || '').toLowerCase() === 'cancelled' ? 'bg-slate-50/90' : ''}`}>
+                                              <td className="px-3 py-2.5 font-medium text-gray-800">
+                                                <span>{c.description}</span>
+                                                {String(c.invoice_status || '').toLowerCase() === 'cancelled' ? (
+                                                  <span className="ml-1.5 text-[9px] font-black uppercase tracking-wide text-red-700 bg-red-100 px-1.5 py-0.5 rounded">Cancelled</span>
+                                                ) : null}
+                                              </td>
                                               <td className="px-3 py-2.5 text-center text-gray-600 font-bold">{c.qty}</td>
                                               <td className="px-3 py-2.5 text-gray-500">{c.date?format(new Date(c.date),'d/M/yy'):'—'}</td>
                                               <td className="px-3 py-2.5 text-right font-bold text-gray-900">₹{fmtM(c.total_amount)}</td>
@@ -5044,41 +5431,106 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                             {(ledger.payments||[]).length>0 && (() => {
                               const subKey = `${a.id}_payments`
                               const subOpen = expandedSubs[subKey]
-                              const payRows = ledger.payments||[]
+                              const payRows = [...(ledger.payments || [])].sort((a, b) => {
+                                const voidA = String(a?.type || '') === 'pharmacy_payment' ? false : (String(a?.status || '').toLowerCase() === 'cancelled' || String(a?.invoice_status || '').toLowerCase() === 'cancelled')
+                                const voidB = String(b?.type || '') === 'pharmacy_payment' ? false : (String(b?.status || '').toLowerCase() === 'cancelled' || String(b?.invoice_status || '').toLowerCase() === 'cancelled')
+                                if (voidA !== voidB) return voidA ? 1 : -1
+                                return new Date(a.date) - new Date(b.date)
+                              })
                               return (
                                 <div className="border border-emerald-200 rounded-xl overflow-hidden bg-white">
                                   <button type="button" onClick={() => setExpandedSubs(prev=>({...prev,[subKey]:!prev[subKey]}))}
-                                    className="w-full flex items-center gap-2 px-3 py-2.5 bg-emerald-50 hover:bg-emerald-100 transition-colors text-left">
+                                    className="w-full flex flex-nowrap items-center gap-2 px-3 py-2.5 bg-emerald-50 hover:bg-emerald-100 transition-colors text-left min-w-0">
                                     <CreditCard size={12} className="text-emerald-600 shrink-0" />
-                                    <span className="font-black text-emerald-700 text-xs flex-1">Payment Receipts</span>
-                                    <span className="text-[10px] font-bold text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded-full">{payRows.length} payments</span>
+                                    <span className="font-black text-emerald-700 text-xs flex-1 min-w-0 truncate">Payment Receipts</span>
+                                    <span className="text-[10px] font-bold text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded-full shrink-0">{payRows.length} payments</span>
                                     <button type="button" onClick={e=>{e.stopPropagation();setPrintTarget({type:'full_bill',admission:admObj,ledger})}}
-                                      className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded-md font-bold hover:bg-indigo-700 flex items-center gap-1 mr-1">
+                                      className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded-md font-bold hover:bg-indigo-700 inline-flex items-center gap-1 shrink-0">
                                       <Printer size={9} /> Full Bill
                                     </button>
-                                    <ChevronDown size={13} className={`text-emerald-400 transition-transform duration-200 ${subOpen?'rotate-180':''}`} />
+                                    <ChevronDown size={13} className={`text-emerald-400 shrink-0 transition-transform duration-200 ${subOpen?'rotate-180':''}`} />
                                   </button>
                                   {subOpen && (
                                     <div className="overflow-x-auto border-t border-emerald-100">
                                       <table className="w-full text-xs">
                                         <thead className="bg-gray-50 text-gray-400 text-[10px] uppercase">
-                                          <tr><th className="px-3 py-2 text-left font-semibold">Description</th><th className="px-3 py-2 text-left font-semibold">Date</th><th className="px-3 py-2 text-right font-semibold">Amount</th><th className="px-3 py-2 text-center font-semibold">Receipt</th></tr>
+                                          <tr><th className="px-3 py-2 text-left font-semibold">Description</th><th className="px-3 py-2 text-left font-semibold">Date &amp; time</th><th className="px-3 py-2 text-right font-semibold">Amount</th><th className="px-3 py-2 text-center font-semibold">Status</th><th className="px-3 py-2 text-center font-semibold">Actions</th></tr>
                                         </thead>
                                         <tbody className="divide-y divide-gray-50">
                                           {payRows.map((p,i)=>{
                                             const md=(p.description||'').toUpperCase().includes('UPI')?'upi':(p.description||'').toUpperCase().includes('CREDIT')?'credit':'cash'
                                             const isAdv=(p.description||'').toLowerCase().includes('advance')
+                                            const rawPid = p?.id != null ? String(p.id) : ''
+                                            const isPharmacy = p?.type === 'pharmacy_payment' || rawPid.startsWith('pharmacy-paid-')
+                                            const payId = isPharmacy ? '' : rawPid
+                                            const isPayCancelled = (p?.status || 'success') === 'cancelled'
+                                            const invStPay = String(p?.invoice_status || 'finalized').toLowerCase()
+                                            const isPayReadOnly = isPayCancelled || invStPay === 'cancelled'
+                                            const canMutateTimelinePay = payId && !isPharmacy && !isPayReadOnly && invStPay === 'finalized'
+                                            const slip = p?.slip_number || ''
                                             return (
-                                              <tr key={i} className="hover:bg-emerald-50/40">
+                                              <tr key={i} className={`hover:bg-emerald-50/40 ${isPayReadOnly ? 'bg-slate-50/80 opacity-90' : ''}`}>
                                                 <td className="px-3 py-2.5 font-medium text-gray-800">{p.description}</td>
-                                                <td className="px-3 py-2.5 text-gray-500">{p.date?format(new Date(p.date),'d/M/yy'):'—'}</td>
+                                                <td className="px-3 py-2.5 text-gray-500 whitespace-nowrap">{formatReceiptDateTime(p.date)}</td>
                                                 <td className="px-3 py-2.5 text-right font-bold text-emerald-700">₹{fmtM(p.amount)}</td>
+                                                <td className="px-3 py-2.5 text-center whitespace-nowrap">
+                                                  {isPayReadOnly ? (
+                                                    <span className="text-[9px] font-black uppercase tracking-wide text-red-700 bg-red-100 px-1.5 py-0.5 rounded">Cancelled</span>
+                                                  ) : (
+                                                    <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">Active</span>
+                                                  )}
+                                                </td>
                                                 <td className="px-3 py-2.5 text-center">
-                                                  <button type="button"
-                                                    onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:p.amount,mode:md,invoice_no:p.invoice_no},receiptType:isAdv?'advance':'service'})}
-                                                    className="flex items-center gap-1 text-[10px] bg-blue-100 text-blue-700 px-2 py-1 rounded-lg font-bold hover:bg-blue-200 transition-colors mx-auto">
-                                                    <Printer size={9} /> Print
-                                                  </button>
+                                                  <div className="inline-flex flex-nowrap items-center justify-center gap-1.5 max-w-full overflow-x-auto py-0.5">
+                                                    <button type="button"
+                                                      onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:p.amount,mode:md,invoice_no:p.invoice_no,paid_at:p.date,slip_number:slip},receiptType:isAdv?'advance':'service',viewOnly:true})}
+                                                      title="View"
+                                                      aria-label="View receipt"
+                                                      className="h-8 w-8 hover:w-[72px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-indigo-600 hover:text-white bg-indigo-50 hover:bg-indigo-600 rounded-lg transition-all duration-150 border border-indigo-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                                    >
+                                                      <Eye size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                      <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[40px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">View</span>
+                                                    </button>
+                                                    <button type="button"
+                                                      onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:p.amount,mode:md,invoice_no:p.invoice_no,paid_at:p.date,slip_number:slip},receiptType:isAdv?'advance':'service',viewOnly:isPayReadOnly})}
+                                                      title="Print"
+                                                      aria-label="Print receipt"
+                                                      className="h-8 w-8 hover:w-[74px] shrink-0 flex items-center justify-center gap-1 overflow-hidden rounded-lg transition-all duration-150 border shadow-sm hover:shadow-md active:scale-95 group text-sky-600 hover:text-white bg-sky-50 hover:bg-sky-600 border-sky-100"
+                                                    >
+                                                      <Printer size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                      <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[44px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Print</span>
+                                                    </button>
+                                                    {canMutateTimelinePay ? (
+                                                      <>
+                                                        <button type="button"
+                                                          onClick={() => openTimelineLedgerEditPayment(a.id, payId)}
+                                                          title="Edit"
+                                                          aria-label="Edit payment"
+                                                          className="h-8 w-8 hover:w-[68px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-emerald-600 hover:text-white bg-emerald-50 hover:bg-emerald-600 rounded-lg transition-all duration-150 border border-emerald-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                                        >
+                                                          <Edit2 size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                          <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[36px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Edit</span>
+                                                        </button>
+                                                        <button type="button"
+                                                          onClick={() => {
+                                                            setTlPayCancel({
+                                                              admissionId: a.id,
+                                                              paymentTransactionId: payId,
+                                                              invoice_no: p.invoice_no,
+                                                              amount: parseFloat(String(p.amount || '0')),
+                                                            })
+                                                            setTlPayCancelReason('')
+                                                          }}
+                                                          title="Cancel"
+                                                          aria-label="Cancel payment"
+                                                          className="h-8 w-8 hover:w-[84px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-red-600 hover:text-white bg-red-50 hover:bg-red-600 rounded-lg transition-all duration-150 border border-red-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                                        >
+                                                          <X size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                          <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[52px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Cancel</span>
+                                                        </button>
+                                                      </>
+                                                    ) : null}
+                                                  </div>
                                                 </td>
                                               </tr>
                                             )
@@ -5088,6 +5540,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                           <tr className="bg-emerald-50">
                                             <td colSpan={2} className="px-3 py-2 font-black text-emerald-700 text-xs">Total Paid</td>
                                             <td className="px-3 py-2 text-right font-black text-emerald-700">₹{fmtM(ledger.total_paid)}</td>
+                                            <td />
                                             <td />
                                           </tr>
                                         </tfoot>
@@ -5109,7 +5562,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                     <CheckCircle size={12} className="text-teal-600 shrink-0" />
                                     <span className="font-black text-teal-700 text-xs flex-1">Discharge Summary</span>
                                     {isDischarged && (
-                                      <button type="button" onClick={e=>{e.stopPropagation();setPrintTarget({type:'discharge',rec:{...a.discharge_summary},admission:a,ledger})}}
+                                      <button type="button" onClick={e=>{e.stopPropagation();setPrintTarget({type:'discharge',rec:{...a.discharge_summary},admission:a})}}
                                         className="text-[10px] bg-teal-600 text-white px-2 py-0.5 rounded-md font-bold hover:bg-teal-700 flex items-center gap-1 mr-1">
                                         <Printer size={9} /> Print
                                       </button>
@@ -5118,7 +5571,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                   </button>
                                   {subOpen && (
                                     <div className="p-3 space-y-2 border-t border-teal-100">
-                                      {[['Condition at Discharge',a.discharge_summary.condition_at_discharge],['Treatment Given',a.discharge_summary.treatment_given],['Medications on Discharge',a.discharge_summary.medications_on_discharge],['Follow-up Advice',a.discharge_summary.follow_up_advice],['Total Billed',a.discharge_summary.total_billed?`₹${fmtM(a.discharge_summary.total_billed)}`:null],['Total Paid',a.discharge_summary.total_paid?`₹${fmtM(a.discharge_summary.total_paid)}`:null],['Outstanding',a.discharge_summary.outstanding_balance!=null?`₹${fmtM(a.discharge_summary.outstanding_balance)}`:null]].filter(([,v])=>v).map(([l,val])=>(
+                                      {[['Condition at Discharge',a.discharge_summary.condition_at_discharge],['Treatment Given',a.discharge_summary.treatment_given],['Medications on Discharge',a.discharge_summary.medications_on_discharge],['Follow-up Advice',a.discharge_summary.follow_up_advice]].filter(([,v])=>v).map(([l,val])=>(
                                         <div key={l} className="flex gap-2 text-xs">
                                           <span className="text-teal-600 font-bold shrink-0 w-44">{l}:</span>
                                           <span className="text-gray-700">{val}</span>
@@ -5147,12 +5600,100 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
       </div>
     </div>
 
+    {tlPayCancel && (
+      <div className="fixed inset-0 z-[340] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { if (!tlPayCancelling) { setTlPayCancel(null); setTlPayCancelReason('') } }}>
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className="px-4 py-3 bg-red-600 text-white flex items-center justify-between">
+            <h3 className="font-bold">Cancel payment receipt</h3>
+            <button type="button" onClick={() => { if (!tlPayCancelling) { setTlPayCancel(null); setTlPayCancelReason('') } }} className="text-white/80 hover:text-white" disabled={tlPayCancelling}><X size={18} /></button>
+          </div>
+          <div className="p-4 space-y-3">
+            <p className="text-sm text-gray-700">
+              Cancelling payment for <span className="font-black">{tlPayCancel.invoice_no || '—'}</span>
+              {' · '}
+              <span className="font-semibold">₹{parseFloat(tlPayCancel.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+            </p>
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation reason *</label>
+              <textarea value={tlPayCancelReason} onChange={e => setTlPayCancelReason(e.target.value)} rows={4} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none resize-none" disabled={tlPayCancelling} placeholder="Enter reason" />
+            </div>
+          </div>
+          <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
+            <button type="button" onClick={() => { if (!tlPayCancelling) { setTlPayCancel(null); setTlPayCancelReason('') } }} disabled={tlPayCancelling} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200">Close</button>
+            <button type="button" onClick={submitTlPayCancel} disabled={tlPayCancelling} className="px-4 py-2 rounded-xl text-sm font-bold bg-red-600 text-white hover:bg-red-700">{tlPayCancelling ? 'Cancelling…' : 'Confirm cancel'}</button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {tlPayEdit && (
+      <div className="fixed inset-0 z-[340] bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !tlPaySaving && setTlPayEdit(null)}>
+        <form onSubmit={handleTlPayEditSave} className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className="bg-emerald-600 px-4 py-3 flex items-center justify-between text-white">
+            <h2 className="font-bold">Edit payment slip</h2>
+            <button type="button" onClick={() => !tlPaySaving && setTlPayEdit(null)}><X size={18} /></button>
+          </div>
+          <div className="p-4 space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1">Paid at</label>
+              <input type="datetime-local" value={tlPayEdit.paid_at || ''} onChange={e => setTlPayEdit({ ...tlPayEdit, paid_at: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-gray-600 mb-1">Amount</label>
+                <input type="number" step="0.01" value={tlPayEdit.amount ?? ''} onChange={e => setTlPayEdit({ ...tlPayEdit, amount: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-600 mb-1">Mode</label>
+                <select value={tlPayEdit.payment_mode || 'cash'} onChange={e => setTlPayEdit({ ...tlPayEdit, payment_mode: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none">
+                  <option value="cash">Cash</option>
+                  <option value="upi">UPI</option>
+                  <option value="card">Card</option>
+                  <option value="bank_transfer">Bank transfer</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1">Transaction reference</label>
+              <input type="text" value={tlPayEdit.transaction_reference || ''} onChange={e => setTlPayEdit({ ...tlPayEdit, transaction_reference: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1">Receipt number</label>
+              <input type="text" value={tlPayEdit.receipt_no || ''} onChange={e => setTlPayEdit({ ...tlPayEdit, receipt_no: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-600 mb-1">Status</label>
+              <select value={tlPayEdit.status || 'success'} onChange={e => setTlPayEdit({ ...tlPayEdit, status: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none">
+                <option value="success">Success</option>
+                <option value="pending">Pending</option>
+                <option value="failed">Failed</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </div>
+          </div>
+          <div className="p-4 border-t flex justify-end gap-2 bg-gray-50">
+            <button type="button" onClick={() => !tlPaySaving && setTlPayEdit(null)} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200">Close</button>
+            <button type="submit" disabled={tlPaySaving} className="px-4 py-2 rounded-xl text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700">{tlPaySaving ? 'Saving…' : 'Save'}</button>
+          </div>
+        </form>
+      </div>
+    )}
+
     {/* ── Print portals ── */}
     {printTarget?.type==='opd_receipt' && <PrintOpdReceipt visit={printTarget.visit} patient={printTarget.visit} onClose={()=>setPrintTarget(null)} />}
     {printTarget?.type==='opd_slip' && <PrintSlip visit={printTarget.visit} onClose={()=>setPrintTarget(null)} />}
     {printTarget?.type==='full_bill' && <PrintIpdLedger admission={printTarget.admission} ledger={printTarget.ledger} onClose={()=>setPrintTarget(null)} />}
-    {printTarget?.type==='discharge' && <PrintDischargeSummary rec={printTarget.rec} admission={printTarget.admission} ledger={printTarget.ledger} onClose={()=>setPrintTarget(null)} />}
-    {printTarget?.type==='ipd_receipt' && <PrintMiniReceipt admission={printTarget.admission} data={printTarget.receiptData} type={printTarget.receiptType} onClose={()=>setPrintTarget(null)} />}
+    {printTarget?.type==='discharge' && <PrintDischargeSummary rec={printTarget.rec} admission={printTarget.admission} onClose={()=>setPrintTarget(null)} />}
+    {printTarget?.type==='ipd_receipt' && (
+      <PrintMiniReceipt
+        admission={printTarget.admission}
+        data={printTarget.receiptData}
+        type={printTarget.receiptType}
+        viewOnly={!!printTarget.viewOnly}
+        onClose={()=>setPrintTarget(null)}
+      />
+    )}
     </>
   )
 }
@@ -5401,6 +5942,13 @@ function PatientListSection() {
                   ))}
                 </div>
               )}
+
+              {String(selected.registration_note || '').trim() !== '' && (
+                <div className="mt-3 p-3 rounded-xl bg-amber-50/90 border border-amber-100">
+                  <p className="text-[11px] font-semibold text-amber-900/80 uppercase tracking-wide mb-1.5">Registration note</p>
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">{selected.registration_note}</p>
+                </div>
+              )}
             </div>
 
             <div className="px-5 pb-4">
@@ -5425,7 +5973,7 @@ function PatientListSection() {
 
 // ─── Register Patient ─────────────────────────────────────────────────────────
 function RegisterPatientSection() {
-  const EMPTY = { first_name: '', last_name: '', dob: '', gender: 'male', phone: '', email: '', blood_group: '' }
+  const EMPTY = { first_name: '', last_name: '', dob: '', gender: 'male', phone: '', email: '', blood_group: '', registration_note: '' }
   const [form, setForm] = useState(EMPTY)
   const [submitting, setSubmitting] = useState(false)
 
@@ -5441,6 +5989,7 @@ function RegisterPatientSection() {
         phone: form.phone,
         email: form.email,
         blood_group: form.blood_group,
+        registration_note: form.registration_note?.trim() || undefined,
       }
       const { data } = await api.post('/patients/', payload)
       const patient = data?.data || data
@@ -5519,6 +6068,18 @@ function RegisterPatientSection() {
             </select>
           </div>
         </div>
+        <div>
+          <label className="text-xs text-gray-500 mb-1 block">Registration note</label>
+          <textarea
+            value={form.registration_note}
+            onChange={e => setForm(f => ({ ...f, registration_note: e.target.value }))}
+            rows={4}
+            maxLength={2000}
+            placeholder="Optional — why this patient is being registered (visible on their record)"
+            className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none resize-y min-h-[88px]"
+          />
+          <p className="text-[11px] text-gray-400 mt-1">{form.registration_note?.length || 0} / 2000</p>
+        </div>
         <button type="submit" disabled={submitting}
           className="bg-emerald-600 text-white px-8 py-2.5 rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-60 flex items-center gap-2">
           <UserPlus size={14} /> {submitting ? 'Registering…' : 'Register Patient'}
@@ -5528,7 +6089,7 @@ function RegisterPatientSection() {
   )
 }
 
-function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose }) {
+function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrintBill, externalPrintBillLoading = false, onBeforePrintDocument }) {
   const printRef = useRef(null)
   const slipProfile = getPaymentSlipProfile()
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
@@ -5538,6 +6099,41 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
   const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
   const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
   const adm = admissionProp || {}
+
+  const [billPrintTarget, setBillPrintTarget] = useState(null)
+  const [billPrintLoading, setBillPrintLoading] = useState(false)
+
+  function resolveAdmissionIdForBill() {
+    const raw = rec?.admission ?? adm?.id ?? adm
+    if (raw && typeof raw === 'object' && raw !== null && 'id' in raw) return raw.id
+    return raw
+  }
+
+  async function handlePrintBillFromPreview() {
+    if (onPrintBill) {
+      onPrintBill(rec)
+      return
+    }
+    const admissionId = resolveAdmissionIdForBill()
+    if (!admissionId) {
+      toast.error('Missing admission for billing')
+      return
+    }
+    setBillPrintLoading(true)
+    try {
+      const [{ data: admission }, { data: ledger }] = await Promise.all([
+        api.get(`/ipd-admissions/${admissionId}/`),
+        api.get(`/ipd-admissions/${admissionId}/ledger/`),
+      ])
+      setBillPrintTarget({ admission, ledger })
+    } catch {
+      toast.error('Could not load bill for printing')
+    } finally {
+      setBillPrintLoading(false)
+    }
+  }
+
+  const billBtnBusy = onPrintBill ? externalPrintBillLoading : billPrintLoading
 
   const fmtDischargeWhen = () => {
     if (rec.discharge_date) {
@@ -5559,13 +6155,17 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
   
   useEffect(() => {
     function handleAfterPrint() {
+      if (receptionistLastPrintKind === 'ipd_ledger') {
+        receptionistLastPrintKind = null
+        return
+      }
+      receptionistLastPrintKind = null
       onClose()
     }
     window.addEventListener('afterprint', handleAfterPrint)
     return () => window.removeEventListener('afterprint', handleAfterPrint)
   }, [onClose])
 
-  const now = format(new Date(), 'd/M/yyyy (HH:mm)')
   const surgeryRows = Array.isArray(rec.surgery_rows) && rec.surgery_rows.length > 0
     ? rec.surgery_rows
     : (
@@ -5612,43 +6212,40 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
   const medRows = rec.medication_rows || []
   const showOperative = surgeryRows.length > 0
 
-  const billingItems = ledger ? (() => {
-    const raw = (ledger.charges || []).filter(c => c.type !== 'payment' && c.type !== 'pharmacy_payment')
-    const grouped = {}
-    raw.forEach(c => {
-      let desc = (c.description || 'Service').trim()
-      let key = desc
-      
-      const lower = key.toLowerCase()
-      if (lower.includes('room rent') || lower.includes('bed charge') || lower.includes('room charge')) {
-        key = 'Room Rent / Bed Charges'
-        desc = 'Room Rent / Bed Charges'
-      }
-
-      if (!grouped[key]) {
-        grouped[key] = { description: desc, quantity: 1, total_amount: parseFloat(c.amount || 0) }
-      } else {
-        grouped[key].quantity += 1
-        grouped[key].total_amount += parseFloat(c.amount || 0)
-      }
-    })
-    return Object.values(grouped).sort((a, b) => a.description.localeCompare(b.description))
-  })() : []
-  const payments = ledger ? [...(ledger.payments || [])].sort((a, b) => new Date(a.date) - new Date(b.date)) : []
-
   const content = (
     <div id="__discharge_doc_root" className="fixed inset-0 z-[600] bg-black/60 backdrop-blur-sm p-3 sm:p-5 flex items-center justify-center print:static print:p-0 print:block print:bg-transparent">
       <div className="w-full max-w-[1120px] max-h-[94vh] bg-white rounded-2xl shadow-2xl overflow-hidden print:max-h-none print:rounded-none print:shadow-none">
-        <div className="print:hidden sticky top-0 z-20 px-4 py-3 border-b border-gray-200 bg-white/95 backdrop-blur flex items-center justify-end gap-2">
-          <button onClick={() => window.print()} className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-700">Print Document</button>
-          <button onClick={onClose} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-200">Close Preview</button>
+        <div className="print:hidden sticky top-0 z-20 px-4 py-3 border-b border-gray-200 bg-white/95 backdrop-blur flex items-center justify-end gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handlePrintBillFromPreview}
+            disabled={billBtnBusy}
+            title="Print IPD bill (A4)"
+            className="inline-flex items-center gap-2 bg-teal-50 text-teal-900 border border-teal-200 px-4 py-2 rounded-lg text-sm font-bold hover:bg-teal-100 disabled:opacity-50 shrink-0"
+          >
+            <Receipt size={16} /> Print bill
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onBeforePrintDocument?.()
+              setTimeout(() => {
+                receptionistLastPrintKind = 'discharge'
+                window.print()
+              }, 0)
+            }}
+            className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-700 shrink-0"
+          >
+            Print Document
+          </button>
+          <button type="button" onClick={onClose} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-200 shrink-0">Close Preview</button>
         </div>
 
         <div className="overflow-y-auto max-h-[calc(94vh-56px)] print:overflow-visible print:max-h-none p-3 sm:p-5 print:p-0">
       <div ref={printRef} className="mx-auto w-full max-w-[210mm] text-black bg-white print:shadow-none shadow-sm">
         
         {/* ── PAGE 1: CLINICAL DISCHARGE SUMMARY (MEDANTA STYLE) ── */}
-        <div className="p-4 sm:p-[15mm] print:p-0 min-h-screen print:min-h-[281mm] flex flex-col relative" style={{ pageBreakAfter: 'always' }}>
+        <div className="p-4 sm:p-[15mm] print:p-0 min-h-screen print:min-h-[281mm] flex flex-col relative">
           {/* Header */}
           <div className="flex justify-between items-start border-b-2 border-gray-900 pb-4 mb-4">
             <div className="w-16 h-16 bg-gray-100 rounded-lg flex items-center justify-center font-black text-2xl text-gray-400">LOGO</div>
@@ -5657,7 +6254,7 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
               <p className="text-sm text-gray-600 font-medium">{address}, PIN: {pinCode}</p>
               <h2 className="text-xl font-bold mt-2 uppercase tracking-widest border-t border-gray-100 pt-1 inline-block">Discharge Summary</h2>
             </div>
-            <div className="text-right text-xs text-gray-400 font-bold">Page 1 of 2</div>
+            <div className="w-16" aria-hidden />
           </div>
 
           {/* Patient & meta */}
@@ -5670,6 +6267,7 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Discharge type</span> <span className="font-bold uppercase">{(rec.discharge_type || 'routine').replace(/_/g, ' ')}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Admission</span> <span>{rec.admission_date ? format(new Date(rec.admission_date), 'd/M/yyyy') : '—'}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Discharge</span> <span>{fmtDischargeWhen()}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Printed at</span> <span>{format(new Date(), 'd/M/yyyy HH:mm')}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Treating consultant</span> <span className="text-right">{rec.treating_consultant || adm.assigned_doctor_name || '—'}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Reg. no. / RMO</span> <span className="text-right text-[10px]">{[rec.consultant_registration_no, rec.rmo_signed_by].filter(Boolean).join(' · ') || '—'}</span></div>
             <div className="col-span-2 flex justify-between border-b border-gray-200 py-0.5"><span className="font-bold">Condition at discharge</span> <span className="font-bold text-right">{rec.condition_at_discharge || '—'}</span></div>
@@ -5822,109 +6420,6 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
             </div>
           </div>
         </div>
-
-
-        {/* ── PAGE 2: FINAL BILL (MANTHAN STYLE) ── */}
-        <div className="p-4 sm:p-[15mm] print:p-0 min-h-screen print:min-h-[281mm] flex flex-col relative bg-white">
-          {/* Bill Header */}
-          <div className="text-center mb-8">
-            <h1 className="text-4xl font-black tracking-widest text-gray-900 leading-none">{hospitalName}</h1>
-            <p className="text-sm font-medium text-gray-500 mt-1 uppercase tracking-wider">{address}, {pinCode}</p>
-            <div className="mt-6 border-y-2 border-gray-900 py-2">
-              <h2 className="text-2xl font-black uppercase tracking-[0.3em]">Final Bill</h2>
-            </div>
-          </div>
-
-          {/* Bill Info Grid */}
-          <div className="grid grid-cols-2 gap-x-12 gap-y-2 text-sm mb-8">
-            {/* Left Col */}
-            <div className="space-y-1">
-              <div className="flex"><span className="w-24 font-bold">Patient Name</span><span className="font-medium">: {rec.patient_name}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Guardian Name</span><span className="font-medium">: {adm.guardian_name || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Address</span><span className="font-medium">: {adm.address || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Mobile No</span><span className="font-medium">: {adm.mobile_number || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Consultant</span><span className="font-medium">: {rec.treating_consultant || adm.assigned_doctor_name || '—'}</span></div>
-            </div>
-            {/* Right Col */}
-            <div className="space-y-1">
-              <div className="flex"><span className="w-28 font-bold">Bill No</span><span className="font-medium">: BILL-{String(rec?.id || 'PREVIEW').slice(0,6).toUpperCase()}</span></div>
-              <div className="flex"><span className="w-28 font-bold">UHID No</span><span className="font-medium">: {rec.patient_uhid}</span></div>
-              <div className="flex"><span className="w-28 font-bold">IPD No</span><span className="font-medium">: {rec.admission_ipd_no}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Room / Bed</span><span className="font-medium">: {adm.room_name || '—'} / {adm.bed_code || '—'}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Bill Date</span><span className="font-medium">: {now.split(' ')[0]}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Stay Period</span><span className="font-medium">: {rec.admission_date ? format(new Date(rec.admission_date), 'd/M/yy') : '—'} to {format(new Date(rec.created_at || Date.now()), 'd/M/yy')}</span></div>
-            </div>
-          </div>
-
-          {/* Billing Table */}
-          <div className="ipd-ledger-body flex-1">
-            <table className="w-full border-collapse border border-gray-800 text-sm">
-              <thead>
-                <tr className="bg-gray-50">
-                  <th className="border border-gray-800 px-3 py-2 text-left w-12">S.No</th>
-                  <th className="border border-gray-800 px-3 py-2 text-left">Description</th>
-                  <th className="border border-gray-800 px-3 py-2 text-right w-20">Unit</th>
-                  <th className="border border-gray-800 px-3 py-2 text-right w-24">Rate</th>
-                  <th className="border border-gray-800 px-3 py-2 text-right w-32">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {billingItems.map((item, idx) => (
-                  <tr key={idx}>
-                    <td className="border border-gray-800 px-3 py-2">{idx + 1}</td>
-                    <td className="border border-gray-800 px-3 py-2 font-bold uppercase break-words">{item.description}</td>
-                    <td className="border border-gray-800 px-3 py-2 text-right">{item.quantity}</td>
-                    <td className="border border-gray-800 px-3 py-2 text-right">{parseFloat(item.total_amount / item.quantity || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                    <td className="border border-gray-800 px-3 py-2 text-right font-bold">{parseFloat(item.total_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                  </tr>
-                ))}
-                {/* Empty rows to fill space */}
-                {Array.from({ length: Math.max(0, 8 - billingItems.length) }).map((_, i) => (
-                  <tr key={`empty-${i}`}>
-                    <td className="border border-gray-800 px-3 py-3 text-center text-gray-200">—</td>
-                    <td className="border border-gray-800 px-3 py-3"></td>
-                    <td className="border border-gray-800 px-3 py-3"></td>
-                    <td className="border border-gray-800 px-3 py-3"></td>
-                    <td className="border border-gray-800 px-3 py-3"></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            {/* Totals Section */}
-            <div className="mt-0 border-x border-b border-gray-800 flex divide-x divide-gray-800 break-inside-avoid">
-               <div className="flex-1 p-3 text-xs">
-                 <p className="font-black underline mb-2">Receipt Details :</p>
-                 {payments.length > 0 ? (
-                    <div className="space-y-0.5">
-                      {payments.map((p, i) => (
-                        <p key={i}>R.No: {p.invoice_no || '--'} - Dt. {format(new Date(p.date), 'd/M/yy')} - Amt. {parseFloat(p.amount).toLocaleString('en-IN')}</p>
-                      ))}
-                    </div>
-                 ) : <p className="italic opacity-50">No payments recorded</p>}
-               </div>
-               <div className="w-80 font-bold text-sm">
-                 <div className="flex justify-between border-b border-gray-200 p-2"><span className="uppercase tracking-tighter">Gross Amount :</span> <span>₹{parseFloat(rec.total_billed || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-                 <div className="flex justify-between border-b border-gray-200 p-2"><span className="uppercase tracking-tighter">Round Off :</span> <span>₹0.00</span></div>
-                 <div className="flex justify-between bg-gray-50 p-2 text-base font-black"><span className="uppercase tracking-tighter">Net Amount :</span> <span>₹{parseFloat(rec.total_billed || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-                 <div className="flex justify-between border-b border-gray-200 p-2"><span className="uppercase tracking-tighter">Payment Recd :</span> <span className="text-emerald-700">₹{parseFloat(rec.total_paid || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-                 <div className="flex justify-between p-2"><span className="uppercase tracking-tighter">Refund / Due :</span> <span className={rec.outstanding_balance > 0 ? 'text-red-600' : 'text-blue-600'}>₹{parseFloat(Math.abs(rec.outstanding_balance || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-               </div>
-            </div>
-          </div>
-
-          {/* Bill Footer */}
-          <div className="mt-auto pt-12 flex justify-between items-end break-inside-avoid">
-            <div className="text-xs font-bold italic">
-               <p>E. & O.E.</p>
-               <p className="mt-4">Doc. Prepared by : {rec.created_by_name || 'System'}</p>
-            </div>
-            <div className="text-center w-56">
-              <div className="h-12 flex items-center justify-center italic text-gray-300">Signatory</div>
-              <div className="border-t-2 border-gray-900 pt-1 font-black text-xs uppercase tracking-wider">Authorized Signatory</div>
-            </div>
-          </div>
-        </div>
       </div>
         </div>
       </div>
@@ -5933,7 +6428,8 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
         @media print {
           @page { size: A4 portrait; margin: 8mm; }
           body, html { background: #fff !important; height: auto !important; overflow: visible !important; }
-          body > *:not(#__discharge_doc_root) { display: none !important; }
+          /* Do not hide #__ipd_ledger_root: bill portal shares body with this portal; hiding it blanked IPD print preview. */
+          body > *:not(#__discharge_doc_root):not(#__ipd_ledger_root) { display: none !important; }
           #__discharge_doc_root { 
             position: static !important; 
             display: block !important; 
@@ -5950,7 +6446,14 @@ function PrintDischargeSummary({ rec, ledger, admission: admissionProp, onClose 
     </div>
   )
 
-  return createPortal(content, document.body)
+  return (
+    <>
+      {createPortal(content, document.body)}
+      {!onPrintBill && billPrintTarget && (
+        <PrintIpdLedger admission={billPrintTarget.admission} ledger={billPrintTarget.ledger} onClose={() => setBillPrintTarget(null)} />
+      )}
+    </>
+  )
 }
 
 function DischargeSection() {
@@ -5966,6 +6469,8 @@ function DischargeSection() {
     setPage(0)
   }, [search])
   const [printData, setPrintData] = useState(null)
+  const [billPrintTarget, setBillPrintTarget] = useState(null)
+  const [billPrintLoading, setBillPrintLoading] = useState(false)
 
   useEffect(() => { 
     fetchDischarged()
@@ -5981,15 +6486,27 @@ function DischargeSection() {
   }
 
 
-  async function handlePrintClick(rec) {
-    let ledger = null;
-    try {
-      const { data } = await api.get(`/ipd-admissions/${rec.admission}/ledger/`);
-      ledger = data;
-    } catch (err) {
-      console.error('Failed to load ledger for discharge summary', err);
+  function handlePrintClick(rec) {
+    setPrintData({ rec })
+  }
+
+  async function handlePrintBillFromHistory(r) {
+    if (!r?.admission) {
+      toast.error('Missing admission for this record')
+      return
     }
-    setPrintData({ rec, ledger });
+    setBillPrintLoading(true)
+    try {
+      const [{ data: admission }, { data: ledger }] = await Promise.all([
+        api.get(`/ipd-admissions/${r.admission}/`),
+        api.get(`/ipd-admissions/${r.admission}/ledger/`),
+      ])
+      setBillPrintTarget({ admission, ledger })
+    } catch {
+      toast.error('Could not load bill for printing')
+    } finally {
+      setBillPrintLoading(false)
+    }
   }
 
   async function openDischargeSummaryEdit(rec) {
@@ -6026,8 +6543,19 @@ function DischargeSection() {
           autoOpenDischargeEdit
         />
       )}
-      {printData && <PrintDischargeSummary rec={printData.rec} ledger={printData.ledger} onClose={() => setPrintData(null)} />}
-      
+      {printData && (
+        <PrintDischargeSummary
+          rec={printData.rec}
+          onClose={() => setPrintData(null)}
+          onPrintBill={handlePrintBillFromHistory}
+          externalPrintBillLoading={billPrintLoading}
+          onBeforePrintDocument={() => setBillPrintTarget(null)}
+        />
+      )}
+      {billPrintTarget && (
+        <PrintIpdLedger admission={billPrintTarget.admission} ledger={billPrintTarget.ledger} onClose={() => setBillPrintTarget(null)} />
+      )}
+
       {/* ── Discharge History ── */}
       <div className="grid grid-cols-2 gap-3 mb-3">
         {[['Total Discharges', total, 'text-gray-900'], ['Showing', total === 0 ? '0' : `${page * PAGE_SIZE + 1}-${Math.min((page + 1) * PAGE_SIZE, total)}`, 'text-blue-600']].map(([l, v, c]) => (
@@ -6076,10 +6604,28 @@ function DischargeSection() {
                   className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-lg font-bold flex items-center gap-2 transition-colors disabled:opacity-50">
                   <Edit2 size={15} /> Edit summary
                 </button>
-                <button type="button" onClick={() => handlePrintClick(r)}
-                  className="text-xs bg-gray-100 hover:bg-blue-100 text-gray-700 hover:text-blue-700 px-3 py-1.5 rounded-lg font-bold flex items-center gap-2 transition-colors">
-                  <Printer size={15} /> View Details & Slip
-                </button>
+                <div
+                  className="inline-flex rounded-xl border border-teal-200/70 bg-white shadow-sm overflow-hidden shrink-0"
+                  role="group"
+                  aria-label="Bill and discharge slip"
+                >
+                  <button
+                    type="button"
+                    onClick={() => handlePrintBillFromHistory(r)}
+                    disabled={billPrintLoading}
+                    title="Print IPD bill (A4)"
+                    className="text-xs px-3 py-1.5 font-bold flex items-center gap-2 transition-colors disabled:opacity-50 border-0 border-r border-teal-200/80 bg-teal-50 text-teal-900 hover:bg-teal-100 active:bg-teal-100/90"
+                  >
+                    <Receipt size={15} /> Print bill
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePrintClick(r)}
+                    className="text-xs px-3 py-1.5 font-bold flex items-center gap-2 transition-colors border-0 bg-sky-50 text-sky-900 hover:bg-sky-100 active:bg-sky-100/90"
+                  >
+                    <Printer size={15} /> View Details & Slip
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -6246,10 +6792,25 @@ function PaymentSlipSection() {
     setItems(prev => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it))
   }
   function quickAdd(svc) {
+    const label = String(svc.label || '').trim()
+    const price = Number(svc.price)
     setItems(prev => {
+      const sameIdx = prev.findIndex(
+        it =>
+          String(it.description || '').trim() === label &&
+          Number.isFinite(price) &&
+          Math.abs((parseFloat(String(it.unit_price)) || 0) - price) < 0.005
+      )
+      if (sameIdx !== -1) {
+        return prev.map((it, i) => {
+          if (i !== sameIdx) return it
+          const q = parseFloat(String(it.quantity)) || 0
+          return { ...it, quantity: q + 1 }
+        })
+      }
       const empty = prev.findIndex(it => !it.description)
       if (empty !== -1) {
-        return prev.map((it, i) => i === empty ? { description: svc.label, unit_price: svc.price, quantity: 1 } : it)
+        return prev.map((it, i) => (i === empty ? { description: svc.label, unit_price: svc.price, quantity: 1 } : it))
       }
       return [...prev, { description: svc.label, unit_price: svc.price, quantity: 1 }]
     })
@@ -6306,6 +6867,7 @@ function PaymentSlipSection() {
 
     if (isAddingNew) {
       if (!newPt.name.trim()) { toast.error('Patient name is required'); return }
+      if (!newPt.gender) { toast.error('Please select patient gender'); return }
       if ((newPt.phone || '').replace(/\D/g, '').length >= 10) {
         try {
           const ten = (newPt.phone || '').replace(/\D/g, '').slice(-10)
@@ -6327,6 +6889,7 @@ function PaymentSlipSection() {
         const payload = {
           first_name: parts[0] || 'New',
           last_name: parts.slice(1).join(' ') || 'Patient',
+          gender: newPt.gender,
           phone: newPt.phone || '',
           address_line1: newPt.address || '',
         }
@@ -6397,7 +6960,7 @@ function PaymentSlipSection() {
     autoPrintedInvoiceNoRef.current = null
     setPatient(null)
     setIsAddingNew(false)
-    setNewPt({ name: '', phone: '', address: '' })
+    setNewPt({ name: '', phone: '', address: '', gender: '' })
     setPtSearch('')
     setItems([{ description: '', unit_price: '', quantity: 1 }])
     setDiscount('')
@@ -6801,6 +7364,16 @@ function PaymentSlipSection() {
                       const v = e.target.value.replace(/\D/g, '').slice(0, 10);
                       setNewPt(p => ({ ...p, phone: v }));
                     }} placeholder="10-digit Mobile" />
+                  <select
+                    className={`${inp} py-1.5 text-xs`}
+                    value={newPt.gender}
+                    onChange={e => setNewPt(p => ({ ...p, gender: e.target.value }))}
+                  >
+                    <option value="">Select Gender *</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                  </select>
                   <input className={`${inp} py-1.5 text-xs`} value={newPt.address} onChange={e => setNewPt(p => ({ ...p, address: e.target.value }))} placeholder="Address" />
                 </div>
               ) : (
@@ -6829,7 +7402,7 @@ function PaymentSlipSection() {
                         </li>
                       ))}
                       <li className="bg-emerald-50/50">
-                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: sanitizePersonName(ptSearch), phone: '', address: '' }); setPtSearch(''); setPtResults([]) }}
+                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: sanitizePersonName(ptSearch), phone: '', address: '', gender: '' }); setPtSearch(''); setPtResults([]) }}
                           className="w-full text-left px-3 py-2.5 flex items-center gap-2 group transition-all">
                           <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center group-hover:scale-110 transition-transform">
                             <Plus size={14} strokeWidth={3} />
@@ -7676,7 +8249,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden relative flex flex-col min-h-[calc(100vh-320px)]">
         <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-3 bg-gray-50/60">
           <Search size={15} className="text-gray-400 shrink-0" strokeWidth={2} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search slips by patient, UHID…" className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by patient name, mobile, UHID…" className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400" />
           {loading && <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0" />}
           <button onClick={() => fetchVisits(page, search)} className="text-gray-400 hover:text-emerald-600 shrink-0"><RefreshCw size={14} strokeWidth={2} /></button>
           <span className="text-xs text-gray-400 shrink-0">{total} slips</span>
@@ -7697,7 +8270,13 @@ function OpdSlipsSection({ onMoveToIpd }) {
             return (
              <div key={v.id} className={`grid grid-cols-12 px-4 py-3 items-center text-sm transition-colors ${isCancelled ? 'bg-red-50/40 hover:bg-red-50/50' : 'hover:bg-gray-50/50'}`}>
                 <div className="col-span-2 flex flex-col items-start min-w-0 pr-2">
-                  <span className="font-bold text-gray-800">{v.visit_date ? format(new Date(v.visit_date), 'd/M/yyyy') : '--'}</span>
+                  <span className="font-bold text-gray-800">
+                    {v.created_at
+                      ? `${format(new Date(v.created_at), 'd/M/yyyy')} (${format(new Date(v.created_at), 'h:mm a')})`
+                      : v.visit_date
+                        ? format(new Date(`${v.visit_date}T12:00:00`), 'd/M/yyyy')
+                        : '--'}
+                  </span>
                   <div className="flex flex-wrap gap-1 mt-0.5">
                     {v.opd_no && <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-1.5 py-0.5 rounded">{v.opd_no}</span>}
                     <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 rounded">#{v.queue_number || v.token_number}</span>
@@ -8200,18 +8779,6 @@ function PaymentSlipsListSection() {
     }
   }
 
-  function toDateTimeInputValue(v) {
-    if (!v) return ''
-    const d = new Date(v)
-    if (Number.isNaN(d.getTime())) return ''
-    const yyyy = d.getFullYear()
-    const mm = String(d.getMonth() + 1).padStart(2, '0')
-    const dd = String(d.getDate()).padStart(2, '0')
-    const hh = String(d.getHours()).padStart(2, '0')
-    const min = String(d.getMinutes()).padStart(2, '0')
-    return `${yyyy}-${mm}-${dd}T${hh}:${min}`
-  }
-
   async function handleSaveEdit(e) {
     e.preventDefault()
     try {
@@ -8444,7 +9011,7 @@ function PaymentSlipsListSection() {
         <div class="totals">
           <div class="t-row"><span>Total Amount:</span><span>₹${subtotalFixed}</span></div>
           <div class="t-row disc"><span>Discount:</span><span>₹${discountFixed}</span></div>
-          <div class="t-row.final"><span>Net Amount:</span><span>₹${totalFixed}</span></div>
+          <div class="t-row final"><span>Net Amount:</span><span>₹${totalFixed}</span></div>
         </div>
 
         <div class="footer">
@@ -8776,7 +9343,7 @@ function PaymentSlipSettingsSection() {
   return (
     <div className="max-w-3xl mx-auto">
       <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-5 md:p-6">
-        <h2 className="text-lg font-black text-gray-800">Payment Slip Settings</h2>
+        <h2 className="text-lg font-black text-gray-800">Hospital Settings</h2>
         <p className="text-sm text-gray-500 mt-1">
           These details will be printed in the payment slip header.
         </p>
@@ -9032,7 +9599,7 @@ function ReceptionSettingsSection({ rooms, setRooms, tvGroups, setTvGroups }) {
     { id: 'opd', label: 'OPD Settings', icon: Users },
     { id: 'opd_template', label: 'OPD Template', icon: Printer },
     { id: 'tv', label: 'TV Screens', icon: Monitor },
-    { id: 'payment_slip', label: 'Payment Slip Settings', icon: Receipt },
+    { id: 'payment_slip', label: 'Hospital Settings', icon: Receipt },
   ]
   const [tab, setTab] = useState('opd')
 
@@ -9077,21 +9644,22 @@ function ReceptionSettingsSection({ rooms, setRooms, tvGroups, setTvGroups }) {
 }
 
 // ─── A4 Payment Slip (Advance / Service) ─────────────────────────────────────
-function PrintMiniReceipt({ admission, data, type, onClose }) {
+function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) {
   const slipProfile = getPaymentSlipProfile()
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
 
   useEffect(() => {
+    if (viewOnly) return undefined
     const timer = setTimeout(() => window.print(), 800)
     function after() { onClose() }
     window.addEventListener('afterprint', after)
     return () => { clearTimeout(timer); window.removeEventListener('afterprint', after) }
-  }, [])
+  }, [viewOnly, onClose])
 
   const label = type === 'advance' ? 'ADVANCE PAYMENT RECEIPT' : 'IPD PAYMENT RECEIPT'
-  const now = format(new Date(), 'd/M/yyyy (HH:mm)')
+  const receiptStamp = formatReceiptDateTime(data.paid_at || new Date())
 
   const isCredit = data.mode === 'credit'
   const totalLabel = isCredit ? 'TOTAL DUE' : 'TOTAL PAID'
@@ -9100,8 +9668,17 @@ function PrintMiniReceipt({ admission, data, type, onClose }) {
 
   const content = (
     <div id="__receipt_root" className="fixed inset-0 z-[600] bg-white overflow-y-auto print:static print:h-auto print:overflow-visible print:bg-transparent">
-      <div className="flex justify-end p-4 print:hidden">
-        <button onClick={onClose} className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-5 py-2 rounded-xl font-bold text-sm transition-colors">✕ Close</button>
+      <div className="flex flex-nowrap justify-end items-center gap-2 p-4 print:hidden">
+        {viewOnly && (
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-xl font-bold text-sm transition-colors inline-flex items-center gap-1.5"
+          >
+            <Printer sx={{ fontSize: 18 }} /> Print
+          </button>
+        )}
+        <button type="button" onClick={onClose} className="shrink-0 bg-gray-100 hover:bg-gray-200 text-gray-700 px-5 py-2 rounded-xl font-bold text-sm transition-colors">✕ Close</button>
       </div>
 
       <div className="shadow-2xl print:shadow-none" style={{ width: '210mm', height: '148.5mm', margin: '0 auto', background: '#fff', color: '#111', fontFamily: 'Arial, sans-serif', padding: '10mm 12mm', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', borderBottom: '2px dashed #aaa' }}>
@@ -9115,7 +9692,7 @@ function PrintMiniReceipt({ admission, data, type, onClose }) {
            <div style={{ textAlign: 'right', fontSize: 10, color: '#333' }}>
              <p><strong>{address}</strong></p>
              <p>Contact: {phone}</p>
-             <p style={{ marginTop: 2, fontWeight: 700 }}>{now}</p>
+             <p style={{ marginTop: 2, fontWeight: 700 }}>{receiptStamp}</p>
            </div>
         </div>
 
@@ -9127,7 +9704,7 @@ function PrintMiniReceipt({ admission, data, type, onClose }) {
             ['Patient Name', (admission.patient_name || '—').toUpperCase()],
             ['UHID', admission.patient_uhid || '—'],
             ['IPD ID', admission.ipd_no || '—'],
-            ['Ward / Room', `${admission.ward_name || '—'} / ${admission.room_name || '—'}`],
+            ['Ward / Room', formatWardRoomReceiptLabel(admission.ward_name, admission.room_name)],
             ['Bed Code', admission.bed_code || '—'],
             ['Adm. Date', admission.admission_date ? format(new Date(admission.admission_date), 'd/M/yyyy') : '—'],
             ['Payment Mode', (data.mode || '—').toUpperCase()],
@@ -9190,6 +9767,12 @@ function PrintMiniReceipt({ admission, data, type, onClose }) {
   return createPortal(content, document.body)
 }
 
+function isIpdLedgerGroupedRowCancelled(row) {
+  if (!row) return false
+  if (String(row.description || '').includes('(Cancelled)')) return true
+  return (row.events || []).some(e => String(e?.invoice_status || '').toLowerCase() === 'cancelled')
+}
+
 // ─── IPD Ledger Modal ────────────────────────────────────────────────────────
 function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDischargeInitiated, autoOpenDischargeEdit = false }) {
   const [ledger, setLedger]         = useState(null)
@@ -9199,6 +9782,16 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   const [showPrint, setShowPrint]   = useState(false)
   const [receipt, setReceipt]       = useState(null)
   const [showReceiptsModal, setShowReceiptsModal] = useState(false)
+  const [ledgerCancelPayment, setLedgerCancelPayment] = useState(null)
+  const [ledgerCancelPaymentReason, setLedgerCancelPaymentReason] = useState('')
+  const [ledgerCancellingPayment, setLedgerCancellingPayment] = useState(false)
+  const [ledgerCancelInvoice, setLedgerCancelInvoice] = useState(null)
+  const [ledgerCancelInvoiceReason, setLedgerCancelInvoiceReason] = useState('')
+  const [ledgerCancellingInvoice, setLedgerCancellingInvoice] = useState(false)
+  const [ledgerEditingPayment, setLedgerEditingPayment] = useState(null)
+  const [ledgerSavingPayment, setLedgerSavingPayment] = useState(false)
+  const [ledgerEditingCharge, setLedgerEditingCharge] = useState(null)
+  const [ledgerSavingCharge, setLedgerSavingCharge] = useState(false)
 
   const paidReceipts = useMemo(() => {
     if (!ledger) return []
@@ -9206,6 +9799,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       const desc = p?.description || ''
       const upper = String(desc || '').toUpperCase()
       const isAdvance = upper.includes('ADVANCE') || String(p?.invoice_no || '').toUpperCase().includes('IPDADV-')
+      const rawId = p?.id != null ? String(p.id) : ''
+      const isPharmacy = p?.type === 'pharmacy_payment' || rawId.startsWith('pharmacy-paid-')
+      const rowKind = isPharmacy ? 'pharmacy_payment' : 'payment'
 
       let mode = 'cash'
       if (upper.includes('UPI')) mode = 'upi'
@@ -9213,7 +9809,11 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       else if (upper.includes('CARD')) mode = 'card'
 
       return {
-        id: `payment-${String(p?.id || '')}-${String(p?.date || '')}`,
+        id: `payment-${rawId}-${String(p?.date || '')}`,
+        paymentTransactionId: isPharmacy ? '' : rawId,
+        rowKind,
+        status: p?.status || 'success',
+        invoice_status: p?.invoice_status != null ? String(p.invoice_status) : 'finalized',
         date: p?.date,
         description: desc || (isAdvance ? 'Advance' : 'Payment'),
         amount: parseFloat(p?.amount || 0),
@@ -9223,11 +9823,30 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         receiptKind: isAdvance ? 'advance' : 'charge',
       }
     }).sort((a, b) => {
+      const voidA = a.rowKind === 'pharmacy_payment' ? false : (a.status === 'cancelled' || String(a.invoice_status || '').toLowerCase() === 'cancelled')
+      const voidB = b.rowKind === 'pharmacy_payment' ? false : (b.status === 'cancelled' || String(b.invoice_status || '').toLowerCase() === 'cancelled')
+      if (voidA !== voidB) return voidA ? 1 : -1
       const ta = a.date ? new Date(a.date).getTime() : 0
       const tb = b.date ? new Date(b.date).getTime() : 0
       return ta - tb
     })
   }, [ledger])
+
+  const admissionLedgerStatementParts = useMemo(() => {
+    const gc = ledger?.grouped_charges || []
+    const active = []
+    const cancelled = []
+    for (const row of gc) {
+      if (isIpdLedgerGroupedRowCancelled(row)) cancelled.push(row)
+      else active.push(row)
+    }
+    const rooms = (ledger?.charges || []).filter(c => c.type === 'room_rent')
+    return [
+      ...active.map(row => ({ kind: 'group', row })),
+      ...rooms.map(row => ({ kind: 'room', row })),
+      ...cancelled.map(row => ({ kind: 'group', row })),
+    ]
+  }, [ledger?.grouped_charges, ledger?.charges])
 
   // Discharge State
   const [journey, setJourney] = useState(null) // { admission, step: 'form'|'billing' }
@@ -9326,8 +9945,8 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
   const [expandedChargeRows, setExpandedChargeRows] = useState({})
 
-  const dsInp = 'w-full bg-white border border-slate-200 hover:border-slate-300 rounded-lg px-2 py-1.5 text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500/15 focus:border-emerald-500 outline-none'
-  const dsLbl = 'text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5 block'
+  const dsInp = 'w-full [box-sizing:border-box] bg-white border border-slate-300 hover:border-slate-400 shadow-sm rounded-lg px-4 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none [&[type=date]]:pr-10 [&[type=time]]:pr-11 [&[type=datetime-local]]:pr-10'
+  const dsLbl = 'text-[10px] font-black text-slate-400 uppercase tracking-wider mb-1 block'
   const setVital = (k, v) => setSummary(s => ({
     ...s,
     vitals_at_discharge: { ...emptyVitals(), ...(s.vitals_at_discharge || {}), [k]: v },
@@ -9539,6 +10158,168 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       setLedger(data)
     } catch { toast.error('Failed to load ledger') }
     finally { setLoading(false) }
+  }
+
+  async function openLedgerEditPayment(paymentId) {
+    if (!paymentId) return
+    setLedgerSavingPayment(true)
+    try {
+      const { data } = await api.get(`/payments/${paymentId}/`)
+      const row = data?.data || data
+      setLedgerEditingPayment({ ...row, paid_at: toDateTimeInputValue(row.paid_at) })
+    } catch {
+      toast.error('Failed to load payment')
+    } finally {
+      setLedgerSavingPayment(false)
+    }
+  }
+
+  async function submitLedgerCancelPayment() {
+    if (!ledgerCancelPayment?.paymentTransactionId) return
+    const reason = ledgerCancelPaymentReason.trim()
+    if (!reason) {
+      toast.error('Please enter cancellation reason')
+      return
+    }
+    setLedgerCancellingPayment(true)
+    try {
+      const ref = `CANCEL:${reason}`.slice(0, 120)
+      await api.patch(`/payments/${ledgerCancelPayment.paymentTransactionId}/`, {
+        status: 'cancelled',
+        transaction_reference: ref,
+      })
+      toast.success('Payment receipt cancelled')
+      setLedgerCancelPayment(null)
+      setLedgerCancelPaymentReason('')
+      await fetchLedger()
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to cancel payment'))
+    } finally {
+      setLedgerCancellingPayment(false)
+    }
+  }
+
+  async function submitLedgerCancelInvoice() {
+    if (!ledgerCancelInvoice?.invoice_id) return
+    const reason = ledgerCancelInvoiceReason.trim()
+    if (!reason) {
+      toast.error('Please enter cancellation reason')
+      return
+    }
+    setLedgerCancellingInvoice(true)
+    try {
+      await api.post(`/invoices/${ledgerCancelInvoice.invoice_id}/cancel/`, { reason })
+      toast.success('Invoice cancelled')
+      setLedgerCancelInvoice(null)
+      setLedgerCancelInvoiceReason('')
+      await fetchLedger()
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to cancel invoice'))
+    } finally {
+      setLedgerCancellingInvoice(false)
+    }
+  }
+
+  async function handleLedgerSavePayment(e) {
+    e.preventDefault()
+    if (!ledgerEditingPayment?.id) return
+    setLedgerSavingPayment(true)
+    try {
+      await api.patch(`/payments/${ledgerEditingPayment.id}/`, {
+        payment_mode: ledgerEditingPayment.payment_mode || 'cash',
+        amount: ledgerEditingPayment.amount || 0,
+        transaction_reference: ledgerEditingPayment.transaction_reference || '',
+        receipt_no: ledgerEditingPayment.receipt_no || '',
+        status: ledgerEditingPayment.status || 'success',
+        paid_at: ledgerEditingPayment.paid_at || null,
+      })
+      toast.success('Payment slip updated!')
+      setLedgerEditingPayment(null)
+      await fetchLedger()
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to update payment slip'))
+    } finally {
+      setLedgerSavingPayment(false)
+    }
+  }
+
+  function openLedgerEditChargeFromEvent(ev, descriptionFallback) {
+    if (!ev?.invoice_id) return
+    const invStatus = String(ev.invoice_status || '').toLowerCase()
+    if (invStatus !== 'finalized') {
+      toast.error('Only finalized invoices can be edited from here')
+      return
+    }
+    const qty = parseFloat(String(ev.quantity || '1')) || 1
+    const price = parseFloat(String(ev.price || '0')) || 0
+    const unit = qty > 0 ? price / qty : price
+    setLedgerEditingCharge({
+      invoice_id: ev.invoice_id,
+      description: ev.name || descriptionFallback || 'Service',
+      amount: String(price),
+      quantity: String(ev.quantity ?? '1'),
+      unit_price: String(Number.isFinite(unit) ? unit.toFixed(2) : '0'),
+      isRoomRent: false,
+    })
+  }
+
+  function openLedgerEditRoomRent(item) {
+    const days = Math.max(1, parseInt(String(ledger?.days ?? '1'), 10) || 1)
+    const fromApiDaily = item?.unit_price != null && String(item.unit_price) !== '' ? parseFloat(String(item.unit_price)) : NaN
+    const amt = parseFloat(String(item?.amount ?? '0')) || 0
+    const impliedDaily = days > 0 ? amt / days : amt
+    const daily = Number.isFinite(fromApiDaily) ? fromApiDaily : impliedDaily
+    const total = (Number.isFinite(daily) ? daily : 0) * days
+    setLedgerEditingCharge({
+      invoice_id: 'room_rent',
+      description: item?.description || 'Room rent',
+      amount: String(Number.isFinite(total) ? total.toFixed(2) : '0'),
+      quantity: String(days),
+      unit_price: String(Number.isFinite(daily) ? daily.toFixed(2) : '0'),
+      isRoomRent: true,
+    })
+  }
+
+  async function clearRoomRentOverride() {
+    setLedgerSavingCharge(true)
+    try {
+      await api.patch(`/ipd-admissions/${admission.id}/update-charge/`, {
+        invoice_id: 'room_rent',
+        clear_room_rent_override: true,
+      })
+      toast.success('Room rent reset to calculated amount')
+      setLedgerEditingCharge(null)
+      await fetchLedger()
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to reset room rent'))
+    } finally {
+      setLedgerSavingCharge(false)
+    }
+  }
+
+  async function handleLedgerSaveCharge(e) {
+    e.preventDefault()
+    if (!ledgerEditingCharge?.invoice_id) return
+    setLedgerSavingCharge(true)
+    try {
+      const isRoom = ledgerEditingCharge.invoice_id === 'room_rent'
+      const payload = { invoice_id: ledgerEditingCharge.invoice_id }
+      if (isRoom) {
+        payload.unit_price = parseFloat(String(ledgerEditingCharge.unit_price || '0'))
+      } else {
+        payload.amount = parseFloat(String(ledgerEditingCharge.amount || '0'))
+        payload.quantity = parseFloat(String(ledgerEditingCharge.quantity || '1'))
+        payload.unit_price = parseFloat(String(ledgerEditingCharge.unit_price || '0'))
+      }
+      await api.patch(`/ipd-admissions/${admission.id}/update-charge/`, payload)
+      toast.success(isRoom ? 'Room rent updated' : 'Charge updated')
+      setLedgerEditingCharge(null)
+      await fetchLedger()
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to update charge'))
+    } finally {
+      setLedgerSavingCharge(false)
+    }
   }
 
   function handleInitiateDischarge() {
@@ -9877,7 +10658,6 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   function openDischargePrintPreview() {
     setDischargePreviewData({
       rec: buildDischargePreviewRecord(),
-      ledger: ledger || null,
       admission: journey?.admission || admission,
     })
   }
@@ -9912,8 +10692,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
             mode: settleMode,
             invoice_no: data.invoice_no,
             slip_number: data?.payment?.slip_number || '',
-            description: 'Final Settlement Payment'
-          }
+            description: 'Final Settlement Payment',
+            paid_at: data?.payment?.paid_at || data?.payment?.created_at || undefined,
+          },
         })
       }
       setSettleRef('')
@@ -9981,7 +10762,8 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
             mode: advMode,
             invoice_no: data.invoice_no,
             slip_number: data?.payment?.slip_number || '',
-            description: 'Advance Payment'
+            description: 'Advance Payment',
+            paid_at: data?.payment?.paid_at || data?.payment?.created_at || undefined,
           }
         })
       }
@@ -10016,7 +10798,19 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       })
       toast.success(chgStatus === 'paid' ? 'Charge saved & paid' : 'Charge added to bill')
       fetchLedger()
-      if (chgPrint) setReceipt({ type: 'charge', data: { amount: total, mode: paymentMode, invoice_no: data.invoice_no, slip_number: data?.payment?.slip_number || '', description: chgDesc } })
+      if (chgPrint) {
+        setReceipt({
+          type: 'charge',
+          data: {
+            amount: total,
+            mode: paymentMode,
+            invoice_no: data.invoice_no,
+            slip_number: data?.payment?.slip_number || '',
+            description: chgDesc,
+            paid_at: data?.payment?.paid_at || data?.payment?.created_at || undefined,
+          },
+        })
+      }
       setChgDesc(''); setChgQty('1'); setChgUnitPrice(''); setChgStatus('due'); setChgPaidMode('cash'); setSelectedExistingCharge(''); setIsServiceMenuOpen(false); setHighlightedServiceIndex(-1)
     } catch { toast.error('Failed to add charge') }
     finally { setSubmitting(false) }
@@ -10056,6 +10850,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     () =>
       (ledger?.grouped_charges || [])
         .filter((g) => (g?.description || "").trim())
+        .filter((g) => !String(g.description || "").includes("(Cancelled)"))
         .map((g) => ({
           id: g.id,
           description: String(g.description || "").trim(),
@@ -10111,12 +10906,21 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   }, [])
 
 
-  if (receipt) return <PrintMiniReceipt admission={admission} data={receipt.data} type={receipt.type} onClose={() => setReceipt(null)} />
+  if (receipt) {
+    return (
+      <PrintMiniReceipt
+        admission={admission}
+        data={receipt.data}
+        type={receipt.type}
+        viewOnly={!!receipt.viewOnly}
+        onClose={() => setReceipt(null)}
+      />
+    )
+  }
   if (dischargePreviewData) {
     return (
       <PrintDischargeSummary
         rec={dischargePreviewData.rec}
-        ledger={dischargePreviewData.ledger}
         admission={dischargePreviewData.admission}
         onClose={() => setDischargePreviewData(null)}
       />
@@ -10219,9 +11023,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                 ))}
               </aside>
             )}
-            <div ref={dischargeScrollRootRef} className="flex-1 overflow-y-auto min-h-0 scroll-smooth p-4 sm:p-5 custom-scrollbar scroll-pt-3">
+            <div ref={dischargeScrollRootRef} className="flex-1 overflow-y-auto min-h-0 scroll-smooth px-5 sm:px-7 py-4 sm:py-5 custom-scrollbar scroll-pt-3">
             {isStep1 ? (
-              <div className="space-y-3 max-w-5xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="space-y-4 max-w-5xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                   <div>
                     <h4 className="text-lg font-black text-slate-800 tracking-tight">Clinical Documentation</h4>
@@ -10234,8 +11038,8 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                 <details id="discharge-section-metadata" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Discharge metadata & identifiers</summary>
-                  <div className="p-3 space-y-3 border-t border-slate-100">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                  <div className="px-4 sm:px-5 py-4 space-y-4 bg-slate-50/70 border-t border-slate-200">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
                       <div><span className={dsLbl}>Discharge type</span>
                         <select value={summary.discharge_type} onChange={e => setSummary(s => ({ ...s, discharge_type: e.target.value }))} className={dsInp}>
                           {[{ v: 'routine', l: 'Routine' }, { v: 'lama', l: 'LAMA' }, { v: 'dama', l: 'DAMA' }, { v: 'referred', l: 'Referred' }, { v: 'transferred', l: 'Transferred' }, { v: 'death', l: 'Death' }, { v: 'absconded', l: 'Absconded' }].map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
@@ -10251,38 +11055,43 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       <div><span className={dsLbl}>Condition at discharge (text)</span>
                         <input value={summary.condition_at_discharge} onChange={e => setSummary(s => ({ ...s, condition_at_discharge: e.target.value }))} className={dsInp} placeholder="e.g. Stable, afebrile" /></div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
                       <div><span className={dsLbl}>Discharge date</span><input type="date" value={summary.discharge_date || ''} onChange={e => setSummary(s => ({ ...s, discharge_date: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Discharge time</span><input type="time" value={summary.discharge_time || ''} onChange={e => setSummary(s => ({ ...s, discharge_time: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Next follow-up</span><input type="date" value={summary.next_follow_up_date || ''} onChange={e => setSummary(s => ({ ...s, next_follow_up_date: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Stitch removal</span><input type="date" value={summary.stitch_removal_date || ''} onChange={e => setSummary(s => ({ ...s, stitch_removal_date: e.target.value }))} className={dsInp} /></div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
                       <div><span className={dsLbl}>Treating consultant</span><input value={summary.treating_consultant} onChange={e => setSummary(s => ({ ...s, treating_consultant: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Consultant reg. no.</span><input value={summary.consultant_registration_no} onChange={e => setSummary(s => ({ ...s, consultant_registration_no: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>RMO / Signatory name</span><input value={summary.rmo_signed_by} onChange={e => setSummary(s => ({ ...s, rmo_signed_by: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Follow-up doctor / dept</span>
-                        <div className="flex gap-1"><input value={summary.follow_up_doctor} onChange={e => setSummary(s => ({ ...s, follow_up_doctor: e.target.value }))} className={dsInp} placeholder="Doctor" /><input value={summary.follow_up_department} onChange={e => setSummary(s => ({ ...s, follow_up_department: e.target.value }))} className={dsInp} placeholder="Dept" /></div></div>
+                      <div><span className={dsLbl}>Follow-up doctor</span><input value={summary.follow_up_doctor} onChange={e => setSummary(s => ({ ...s, follow_up_doctor: e.target.value }))} className={dsInp} placeholder="Doctor name" /></div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
+                      <div><span className={dsLbl}>Follow-up department</span><input value={summary.follow_up_department} onChange={e => setSummary(s => ({ ...s, follow_up_department: e.target.value }))} className={dsInp} placeholder="Department" /></div>
                       <div><span className={dsLbl}>Referred to facility</span><input value={summary.referred_to_facility} onChange={e => setSummary(s => ({ ...s, referred_to_facility: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Referral reason</span><input value={summary.referral_reason} onChange={e => setSummary(s => ({ ...s, referral_reason: e.target.value }))} className={dsInp} /></div>
+                      <div className="sm:col-span-2 lg:col-span-2"><span className={dsLbl}>Referral reason</span><input value={summary.referral_reason} onChange={e => setSummary(s => ({ ...s, referral_reason: e.target.value }))} className={dsInp} /></div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-2 border-t border-slate-100">
-                      <div><span className={dsLbl}>ABHA ID</span><input value={summary.abha_id} onChange={e => setSummary(s => ({ ...s, abha_id: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Insurance</span><input value={summary.insurance_provider} onChange={e => setSummary(s => ({ ...s, insurance_provider: e.target.value }))} className={dsInp} /></div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-200 [&>*]:min-w-0">
+                      <div className="sm:col-span-2"><span className={dsLbl}>ABHA ID</span><input value={summary.abha_id} onChange={e => setSummary(s => ({ ...s, abha_id: e.target.value }))} className={dsInp} /></div>
+                      <div className="sm:col-span-2"><span className={dsLbl}>Insurance provider</span><input value={summary.insurance_provider} onChange={e => setSummary(s => ({ ...s, insurance_provider: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>TPA</span><input value={summary.tpa_name} onChange={e => setSummary(s => ({ ...s, tpa_name: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Policy no.</span><input value={summary.policy_number} onChange={e => setSummary(s => ({ ...s, policy_number: e.target.value }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Claim no.</span><input value={summary.claim_number} onChange={e => setSummary(s => ({ ...s, claim_number: e.target.value }))} className={dsInp} /></div>
-                      <label className="flex items-center gap-2 text-sm text-slate-700 pt-5"><input type="checkbox" checked={summary.patient_education_given} onChange={e => setSummary(s => ({ ...s, patient_education_given: e.target.checked }))} /> Patient education given</label>
-                      <div className="sm:col-span-2"><span className={dsLbl}>Attendant counselled by</span><input value={summary.attendant_counselled_by} onChange={e => setSummary(s => ({ ...s, attendant_counselled_by: e.target.value }))} className={dsInp} /></div>
+                      <div className="flex items-center gap-2.5 pt-5">
+                        <input type="checkbox" id="patient_edu" checked={summary.patient_education_given} onChange={e => setSummary(s => ({ ...s, patient_education_given: e.target.checked }))} className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer" />
+                        <label htmlFor="patient_edu" className="text-xs font-semibold text-slate-600 uppercase tracking-wide cursor-pointer select-none">Patient education given</label>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
+                      <div className="col-span-2 sm:col-span-2"><span className={dsLbl}>Attendant counselled by</span><input value={summary.attendant_counselled_by} onChange={e => setSummary(s => ({ ...s, attendant_counselled_by: e.target.value }))} className={dsInp} /></div>
                     </div>
                   </div>
                 </details>
 
                 <details id="discharge-section-vitals" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Vitals at discharge</summary>
-                  <div className="p-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 border-t border-slate-100">
+                  <div className="px-4 sm:px-5 py-4 grid grid-cols-3 sm:grid-cols-6 gap-4 bg-slate-50/70 border-t border-slate-200">
                     {['bp', 'pulse', 'spo2', 'temp', 'weight', 'rbs'].map(k => (
                       <div key={k}><span className={dsLbl}>{k === 'bp' ? 'BP' : k.toUpperCase()}</span>
                         <input value={(summary.vitals_at_discharge || {})[k] || ''} onChange={e => setVital(k, e.target.value)} className={dsInp} /></div>
@@ -10293,7 +11102,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                 {summary.discharge_type === 'death' && (
                   <details id="discharge-section-death" open className="scroll-mt-3 bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm">
                     <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-red-800 bg-red-100">Death summary</summary>
-                    <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-red-100">
+                    <div className="px-5 sm:px-6 py-5 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-red-50/60 border-t border-red-200">
                       <div className="sm:col-span-2"><span className={dsLbl}>Cause of death</span><textarea rows={2} value={summary.cause_of_death} onChange={e => setSummary(s => ({ ...s, cause_of_death: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                       <div><span className={dsLbl}>Time of death</span><input type="datetime-local" value={summary.time_of_death ? summary.time_of_death.slice(0, 16) : ''} onChange={e => setSummary(s => ({ ...s, time_of_death: e.target.value ? `${e.target.value}:00` : '' }))} className={dsInp} /></div>
                       <div><span className={dsLbl}>Notified to</span><input value={summary.notified_to} onChange={e => setSummary(s => ({ ...s, notified_to: e.target.value }))} className={dsInp} /></div>
@@ -10304,9 +11113,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                 <details id="discharge-section-narrative" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Clinical narrative</summary>
-                  <div className="p-3 space-y-3 border-t border-slate-100">
+                  <div className="px-5 sm:px-6 py-5 space-y-5 bg-slate-50/70 border-t border-slate-200">
                     <div><span className={dsLbl}>Discharge summary / overview</span><textarea rows={2} value={summary.summary_notes} onChange={e => setSummary(s => ({ ...s, summary_notes: e.target.value }))} className={`${dsInp} min-h-[52px]`} placeholder="Brief overview..." /></div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div><span className={dsLbl}>Chief complaints</span><textarea rows={2} value={summary.chief_complaints} onChange={e => setSummary(s => ({ ...s, chief_complaints: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                       <div><span className={dsLbl}>Reason for admission</span><textarea rows={2} value={summary.reason_for_admission} onChange={e => setSummary(s => ({ ...s, reason_for_admission: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                       <div><span className={dsLbl}>Diagnosis</span><textarea rows={2} value={summary.diagnosis} onChange={e => setSummary(s => ({ ...s, diagnosis: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
@@ -10323,7 +11132,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                 <details id="discharge-section-operative" className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Operative / procedure</summary>
-                  <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
+                  <div className="px-5 sm:px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
                     <div><span className={dsLbl}>Surgery date</span><input type="date" value={surgeryDraft.surgery_date || ''} onChange={e => updateSurgeryDraftField('surgery_date', e.target.value)} className={dsInp} /></div>
                     <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={surgeryDraft.procedure_name} onChange={e => updateSurgeryDraftField('procedure_name', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
                     <div><span className={dsLbl}>Surgeon</span><input value={surgeryDraft.surgeon_name} onChange={e => updateSurgeryDraftField('surgeon_name', e.target.value)} className={dsInp} /></div>
@@ -10393,19 +11202,19 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                 <details id="discharge-section-investigations" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Investigations (structured)</summary>
-                  <div className="p-3 border-t border-slate-100 space-y-2">
+                  <div className="px-5 sm:px-6 py-5 bg-slate-50/70 border-t border-slate-200 space-y-3">
                     <div className="overflow-x-auto rounded-lg border border-slate-200">
                       <table className="w-full text-xs">
-                        <thead><tr className="bg-slate-50 text-left"><th className="p-2">Type</th><th className="p-2">Test</th><th className="p-2">Value</th><th className="p-2">Ref</th><th className="p-2">Date</th><th className="p-2 w-8" /></tr></thead>
+                        <thead><tr className="bg-slate-50 text-left"><th className="px-2.5 py-2">Type</th><th className="px-2.5 py-2">Test</th><th className="px-2.5 py-2">Value</th><th className="px-2.5 py-2">Ref</th><th className="px-2.5 py-2">Date</th><th className="px-2 py-2 w-8" /></tr></thead>
                         <tbody>
                           {(summary.investigation_rows || []).map((row, idx) => (
                             <tr key={idx} className="border-t border-slate-100">
-                              <td className="p-1"><select value={row.category || 'lab'} onChange={e => updateInvRow(idx, 'category', e.target.value)} className={dsInp}><option value="lab">Lab</option><option value="imaging">Imaging</option></select></td>
-                              <td className="p-1"><input value={row.test_name} onChange={e => updateInvRow(idx, 'test_name', e.target.value)} className={dsInp} placeholder="Test name" /></td>
-                              <td className="p-1"><input value={row.value} onChange={e => updateInvRow(idx, 'value', e.target.value)} className={dsInp} /></td>
-                              <td className="p-1"><input value={row.reference_range} onChange={e => updateInvRow(idx, 'reference_range', e.target.value)} className={dsInp} /></td>
-                              <td className="p-1"><input type="date" value={row.test_date || ''} onChange={e => updateInvRow(idx, 'test_date', e.target.value)} className={dsInp} /></td>
-                              <td className="p-1"><button type="button" onClick={() => removeInvRow(idx)} className="text-red-600 font-bold px-1">×</button></td>
+                              <td className="px-2.5 py-1.5"><select value={row.category || 'lab'} onChange={e => updateInvRow(idx, 'category', e.target.value)} className={dsInp}><option value="lab">Lab</option><option value="imaging">Imaging</option></select></td>
+                              <td className="px-2.5 py-1.5"><input value={row.test_name} onChange={e => updateInvRow(idx, 'test_name', e.target.value)} className={dsInp} placeholder="Test name" /></td>
+                              <td className="px-2.5 py-1.5"><input value={row.value} onChange={e => updateInvRow(idx, 'value', e.target.value)} className={dsInp} /></td>
+                              <td className="px-2.5 py-1.5"><input value={row.reference_range} onChange={e => updateInvRow(idx, 'reference_range', e.target.value)} className={dsInp} /></td>
+                              <td className="px-2.5 py-1.5"><input type="date" value={row.test_date || ''} onChange={e => updateInvRow(idx, 'test_date', e.target.value)} className={dsInp} /></td>
+                              <td className="px-2 py-1.5"><button type="button" onClick={() => removeInvRow(idx)} className="text-red-600 font-bold px-1">×</button></td>
                             </tr>
                           ))}
                         </tbody>
@@ -10418,7 +11227,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                 <details id="discharge-section-course" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Hospital course & complications</summary>
-                  <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
+                  <div className="px-5 sm:px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
                     <div className="md:col-span-2"><span className={dsLbl}>Course in hospital</span><textarea rows={2} value={summary.course_in_hospital} onChange={e => setSummary(s => ({ ...s, course_in_hospital: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                     <div><span className={dsLbl}>Complications</span><textarea rows={2} value={summary.complications_during_stay} onChange={e => setSummary(s => ({ ...s, complications_during_stay: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                     <div><span className={dsLbl}>Blood transfusion</span><textarea rows={2} value={summary.blood_transfusion_details} onChange={e => setSummary(s => ({ ...s, blood_transfusion_details: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
@@ -10437,7 +11246,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   />
                   <details className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                     <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-50 hover:bg-slate-100">Extra medication notes (optional)</summary>
-                    <div className="p-3 border-t border-slate-100">
+                    <div className="px-5 sm:px-6 py-5 bg-slate-50/70 border-t border-slate-200">
                       <textarea rows={2} value={summary.medications_on_discharge} onChange={e => setSummary(s => ({ ...s, medications_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px] font-mono w-full`} placeholder="Additional instructions not covered above..." />
                     </div>
                   </details>
@@ -10445,7 +11254,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                 <details id="discharge-section-advice" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                   <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Advice on discharge</summary>
-                  <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-slate-100">
+                  <div className="px-5 sm:px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
                     <div><span className={dsLbl}>Diet</span><textarea rows={2} value={summary.diet_advice} onChange={e => setSummary(s => ({ ...s, diet_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                     <div><span className={dsLbl}>Activity</span><textarea rows={2} value={summary.activity_advice} onChange={e => setSummary(s => ({ ...s, activity_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
                     <div><span className={dsLbl}>Wound care</span><textarea rows={2} value={summary.wound_care_instructions} onChange={e => setSummary(s => ({ ...s, wound_care_instructions: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
@@ -10625,7 +11434,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
   return (
     <div className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[80vw] min-w-0 overflow-hidden flex flex-col max-h-[92vh]">
 
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-700 to-blue-500 px-6 py-4 flex items-center justify-between shadow-sm shrink-0">
@@ -10737,7 +11546,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   onClick={() => setShowReceiptsModal(false)}
                 >
                   <div
-                    className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden"
+                    className="bg-white rounded-2xl shadow-2xl w-full max-w-[75vw] min-w-0 overflow-hidden"
                     onClick={e => e.stopPropagation()}
                   >
                     <div className="px-4 py-3 bg-emerald-600 text-white flex items-center justify-between">
@@ -10758,61 +11567,349 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                     </div>
 
                     <div className="p-4">
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="overflow-x-auto min-w-0">
+                        <table className="w-full min-w-[640px] table-fixed text-xs border border-gray-200 rounded-lg overflow-hidden">
+                          <colgroup>
+                            <col className="w-[17%]" />
+                            <col className="w-[30%]" />
+                            <col className="w-[11%]" />
+                            <col className="w-[12%]" />
+                            <col className="w-[14%]" />
+                            <col style={{ width: 300 }} />
+                          </colgroup>
                           <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold">
                             <tr>
-                              <th className="px-3 py-2 text-left">Date</th>
+                              <th className="px-3 py-2 text-left">Date &amp; time</th>
                               <th className="px-3 py-2 text-left">Description</th>
+                              <th className="px-3 py-2 text-center">Status</th>
                               <th className="px-3 py-2 text-right">Amount</th>
                               <th className="px-3 py-2 text-left">Ref</th>
-                              <th className="px-3 py-2 text-center">Print</th>
+                              <th className="px-3 py-2 text-center align-middle">Actions</th>
                             </tr>
                           </thead>
                           <tbody>
                             {paidReceipts.length === 0 ? (
                               <tr>
-                                <td colSpan={5} className="px-3 py-6 text-center text-gray-400">
+                                <td colSpan={6} className="px-3 py-6 text-center text-gray-400">
                                   No receipts found.
                                 </td>
                               </tr>
                             ) : (
-                              paidReceipts.map((r) => (
-                                <tr key={r.id} className="border-t border-gray-100 hover:bg-emerald-50/30">
+                              paidReceipts.map((r) => {
+                                const invSt = String(r.invoice_status || 'finalized').toLowerCase()
+                                const isVoidReceipt = r.status === 'cancelled' || invSt === 'cancelled'
+                                const canMutateLedgerPayment = r.rowKind === 'payment' && r.status !== 'cancelled' && invSt === 'finalized' && r.paymentTransactionId
+                                return (
+                                <tr key={r.id} className={`border-t border-gray-100 hover:bg-emerald-50/30 ${isVoidReceipt ? 'bg-slate-50/80 opacity-90' : ''}`}>
                                   <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
-                                    {r.date ? format(new Date(r.date), 'd/M/yy') : '—'}
+                                    {formatReceiptDateTime(r.date)}
                                   </td>
-                                  <td className="px-3 py-2.5 text-gray-800 font-medium">{r.description || '—'}</td>
+                                  <td className="px-3 py-2.5 text-gray-800 font-medium min-w-0 truncate" title={r.description || ''}>{r.description || '—'}</td>
+                                  <td className="px-3 py-2.5 text-center whitespace-nowrap">
+                                    {isVoidReceipt ? (
+                                      <span className="text-[9px] font-black uppercase tracking-wide text-red-700 bg-red-100 px-2 py-0.5 rounded">Cancelled</span>
+                                    ) : (
+                                      <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">Active</span>
+                                    )}
+                                  </td>
                                   <td className="px-3 py-2.5 text-right text-emerald-700 font-bold whitespace-nowrap">₹{parseFloat(r.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                                   <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{r.invoice_no || '—'}</td>
-                                  <td className="px-3 py-2.5 text-center">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setReceipt({
-                                          type: r.receiptKind === 'advance' ? 'advance' : 'charge',
-                                          data: {
-                                            description: r.description,
-                                            amount: r.amount,
-                                            mode: r.mode,
-                                            invoice_no: r.invoice_no,
-                                            slip_number: r.slip_number || '',
-                                          },
-                                        })
-                                      }}
-                                      className="text-[10px] bg-blue-100 text-blue-700 px-2 py-1 rounded-lg font-bold hover:bg-blue-200"
-                                    >
-                                      Print
-                                    </button>
+                                  <td className="px-2 py-2.5 text-center align-middle w-[300px] max-w-[300px] min-w-[300px] overflow-visible relative z-[1]">
+                                    <div className="flex flex-nowrap items-center justify-center gap-1.5 py-0.5 w-full min-w-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setShowReceiptsModal(false)
+                                          setReceipt({
+                                            viewOnly: true,
+                                            type: r.receiptKind === 'advance' ? 'advance' : 'charge',
+                                            data: {
+                                              description: r.description,
+                                              amount: r.amount,
+                                              mode: r.mode,
+                                              invoice_no: r.invoice_no,
+                                              slip_number: r.slip_number || '',
+                                              paid_at: r.date,
+                                            },
+                                          })
+                                        }}
+                                        title="View"
+                                        aria-label="View receipt"
+                                        className="h-8 w-8 hover:w-[72px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-indigo-600 hover:text-white bg-indigo-50 hover:bg-indigo-600 rounded-lg transition-all duration-150 border border-indigo-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                      >
+                                        <Eye size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                        <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[40px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">View</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setShowReceiptsModal(false)
+                                          setReceipt({
+                                            viewOnly: isVoidReceipt,
+                                            type: r.receiptKind === 'advance' ? 'advance' : 'charge',
+                                            data: {
+                                              description: r.description,
+                                              amount: r.amount,
+                                              mode: r.mode,
+                                              invoice_no: r.invoice_no,
+                                              slip_number: r.slip_number || '',
+                                              paid_at: r.date,
+                                            },
+                                          })
+                                        }}
+                                        title="Print"
+                                        aria-label="Print receipt"
+                                        className="h-8 w-8 hover:w-[74px] shrink-0 flex items-center justify-center gap-1 overflow-hidden rounded-lg transition-all duration-150 border shadow-sm hover:shadow-md active:scale-95 group text-sky-600 hover:text-white bg-sky-50 hover:bg-sky-600 border-sky-100"
+                                      >
+                                        <Printer size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                        <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[44px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Print</span>
+                                      </button>
+                                      {canMutateLedgerPayment ? (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() => openLedgerEditPayment(r.paymentTransactionId)}
+                                            title="Edit"
+                                            aria-label="Edit payment"
+                                            className="h-8 w-8 hover:w-[68px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-emerald-600 hover:text-white bg-emerald-50 hover:bg-emerald-600 rounded-lg transition-all duration-150 border border-emerald-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                          >
+                                            <Edit2 size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                            <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[36px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Edit</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => { setLedgerCancelPayment(r); setLedgerCancelPaymentReason('') }}
+                                            title="Cancel"
+                                            aria-label="Cancel payment"
+                                            className="h-8 w-8 hover:w-[84px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-red-600 hover:text-white bg-red-50 hover:bg-red-600 rounded-lg transition-all duration-150 border border-red-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                          >
+                                            <X size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                            <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[52px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Cancel</span>
+                                          </button>
+                                        </>
+                                      ) : null}
+                                    </div>
                                   </td>
                                 </tr>
-                              ))
+                                )
+                              })
                             )}
                           </tbody>
                         </table>
                       </div>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {ledgerCancelPayment && (
+                <div
+                  className="fixed inset-0 z-[660] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                  onClick={() => { if (!ledgerCancellingPayment) { setLedgerCancelPayment(null); setLedgerCancelPaymentReason('') } }}
+                >
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+                    <div className="px-4 py-3 bg-red-600 text-white flex items-center justify-between">
+                      <h3 className="font-bold">Cancel payment receipt</h3>
+                      <button type="button" onClick={() => { if (!ledgerCancellingPayment) { setLedgerCancelPayment(null); setLedgerCancelPaymentReason('') } }} className="text-white/80 hover:text-white" disabled={ledgerCancellingPayment}><X size={18} /></button>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <p className="text-sm text-gray-700">
+                        Cancelling payment for <span className="font-black">{ledgerCancelPayment.invoice_no || '—'}</span>
+                        {' · '}
+                        <span className="font-semibold">₹{parseFloat(ledgerCancelPayment.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                      </p>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation reason *</label>
+                        <textarea value={ledgerCancelPaymentReason} onChange={e => setLedgerCancelPaymentReason(e.target.value)} rows={4} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none" placeholder="Enter reason" disabled={ledgerCancellingPayment} />
+                      </div>
+                    </div>
+                    <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
+                      <button type="button" onClick={() => { if (!ledgerCancellingPayment) { setLedgerCancelPayment(null); setLedgerCancelPaymentReason('') } }} disabled={ledgerCancellingPayment} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200">Close</button>
+                      <button type="button" onClick={submitLedgerCancelPayment} disabled={ledgerCancellingPayment} className="px-4 py-2 rounded-xl text-sm font-bold bg-red-600 text-white hover:bg-red-700">{ledgerCancellingPayment ? 'Cancelling…' : 'Confirm cancel'}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {ledgerCancelInvoice && (
+                <div
+                  className="fixed inset-0 z-[660] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                  onClick={() => { if (!ledgerCancellingInvoice) { setLedgerCancelInvoice(null); setLedgerCancelInvoiceReason('') } }}
+                >
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+                    <div className="px-4 py-3 bg-red-600 text-white flex items-center justify-between">
+                      <h3 className="font-bold">Cancel invoice / service slip</h3>
+                      <button type="button" onClick={() => { if (!ledgerCancellingInvoice) { setLedgerCancelInvoice(null); setLedgerCancelInvoiceReason('') } }} className="text-white/80 hover:text-white" disabled={ledgerCancellingInvoice}><X size={18} /></button>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <p className="text-sm text-gray-700">
+                        Cancelling invoice <span className="font-black">{ledgerCancelInvoice.label || '—'}</span>. Linked successful payments will be voided.
+                      </p>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation reason *</label>
+                        <textarea value={ledgerCancelInvoiceReason} onChange={e => setLedgerCancelInvoiceReason(e.target.value)} rows={4} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none" placeholder="Enter reason" disabled={ledgerCancellingInvoice} />
+                      </div>
+                    </div>
+                    <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
+                      <button type="button" onClick={() => { if (!ledgerCancellingInvoice) { setLedgerCancelInvoice(null); setLedgerCancelInvoiceReason('') } }} disabled={ledgerCancellingInvoice} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200">Close</button>
+                      <button type="button" onClick={submitLedgerCancelInvoice} disabled={ledgerCancellingInvoice} className="px-4 py-2 rounded-xl text-sm font-bold bg-red-600 text-white hover:bg-red-700">{ledgerCancellingInvoice ? 'Cancelling…' : 'Confirm cancel'}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {ledgerEditingPayment && (
+                <div className="fixed inset-0 z-[660] bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !ledgerSavingPayment && setLedgerEditingPayment(null)}>
+                  <form onSubmit={handleLedgerSavePayment} className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-full" onClick={e => e.stopPropagation()}>
+                    <div className="bg-emerald-600 px-4 py-3 flex items-center justify-between">
+                      <h2 className="text-white font-bold">Edit payment slip</h2>
+                      <button type="button" onClick={() => !ledgerSavingPayment && setLedgerEditingPayment(null)} className="text-white/80 hover:text-white"><X size={18} /></button>
+                    </div>
+                    <div className="p-4 overflow-y-auto space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Paid at</label>
+                        <input type="datetime-local" value={ledgerEditingPayment.paid_at || ''} onChange={e => setLedgerEditingPayment({ ...ledgerEditingPayment, paid_at: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-bold text-gray-600 mb-1">Amount</label>
+                          <input type="number" step="0.01" value={ledgerEditingPayment.amount ?? ''} onChange={e => setLedgerEditingPayment({ ...ledgerEditingPayment, amount: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-gray-600 mb-1">Payment mode</label>
+                          <select value={ledgerEditingPayment.payment_mode || 'cash'} onChange={e => setLedgerEditingPayment({ ...ledgerEditingPayment, payment_mode: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none">
+                            <option value="cash">Cash</option>
+                            <option value="upi">UPI</option>
+                            <option value="card">Card</option>
+                            <option value="bank_transfer">Bank transfer</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Transaction reference</label>
+                        <input type="text" value={ledgerEditingPayment.transaction_reference || ''} onChange={e => setLedgerEditingPayment({ ...ledgerEditingPayment, transaction_reference: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Receipt number</label>
+                        <input type="text" value={ledgerEditingPayment.receipt_no || ''} onChange={e => setLedgerEditingPayment({ ...ledgerEditingPayment, receipt_no: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Status</label>
+                        <select value={ledgerEditingPayment.status || 'success'} onChange={e => setLedgerEditingPayment({ ...ledgerEditingPayment, status: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none">
+                          <option value="success">Success</option>
+                          <option value="pending">Pending</option>
+                          <option value="failed">Failed</option>
+                          <option value="cancelled">Cancelled</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="p-4 border-t border-gray-100 flex gap-2 justify-end bg-gray-50">
+                      <button type="button" onClick={() => !ledgerSavingPayment && setLedgerEditingPayment(null)} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200">Close</button>
+                      <button type="submit" disabled={ledgerSavingPayment} className="px-4 py-2 rounded-xl text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700">{ledgerSavingPayment ? 'Saving…' : 'Save'}</button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {ledgerEditingCharge && (
+                <div className="fixed inset-0 z-[660] bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !ledgerSavingCharge && setLedgerEditingCharge(null)}>
+                  <form onSubmit={handleLedgerSaveCharge} className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+                    <div className="bg-blue-600 px-4 py-3 flex items-center justify-between text-white">
+                      <h2 className="font-bold">{ledgerEditingCharge.invoice_id === 'room_rent' ? 'Edit room rent' : 'Edit charge'}</h2>
+                      <button type="button" onClick={() => !ledgerSavingCharge && setLedgerEditingCharge(null)}><X size={18} /></button>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <p className="text-xs text-gray-500 font-medium">{ledgerEditingCharge.description}</p>
+                      {ledgerEditingCharge.invoice_id === 'room_rent' && (
+                        <p className="text-[11px] text-blue-800 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 leading-snug">
+                          Edit the <span className="font-bold">bed charge for one day</span>. Total room rent is <span className="font-bold">daily rate × {ledger?.days ?? '—'}</span> day(s). Reset uses the bed&apos;s default daily rate from master data.
+                          {ledger?.room_rent_computed != null && (
+                            <span className="block mt-1 text-blue-900/90">System total (reference): ₹{parseFloat(ledger.room_rent_computed || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                          )}
+                        </p>
+                      )}
+                      {ledgerEditingCharge.invoice_id === 'room_rent' ? (
+                        <>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">Bed / room charge per day (₹)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={ledgerEditingCharge.unit_price}
+                              onChange={(e) => {
+                                const unit = e.target.value
+                                const days = Math.max(1, parseFloat(String(ledgerEditingCharge.quantity || ledger?.days || 1)) || 1)
+                                const tot = (parseFloat(unit) || 0) * days
+                                setLedgerEditingCharge({
+                                  ...ledgerEditingCharge,
+                                  unit_price: unit,
+                                  amount: Number.isFinite(tot) ? String(tot.toFixed(2)) : '',
+                                })
+                              }}
+                              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none"
+                              required
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">Stay days</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={ledgerEditingCharge.quantity}
+                              readOnly
+                              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-gray-50 text-gray-600"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">Total room rent (₹)</label>
+                            <input
+                              type="text"
+                              readOnly
+                              value={(() => {
+                                const days = Math.max(1, parseFloat(String(ledgerEditingCharge.quantity || ledger?.days || 1)) || 1)
+                                const u = parseFloat(String(ledgerEditingCharge.unit_price)) || 0
+                                return (u * days).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                              })()}
+                              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-gray-50 text-gray-800 font-semibold"
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">Line amount (₹)</label>
+                            <input type="number" step="0.01" value={ledgerEditingCharge.amount} onChange={e => setLedgerEditingCharge({ ...ledgerEditingCharge, amount: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" required />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 mb-1">Qty</label>
+                              <input type="number" step="0.01" value={ledgerEditingCharge.quantity} onChange={e => setLedgerEditingCharge({ ...ledgerEditingCharge, quantity: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" required />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 mb-1">Unit price (₹)</label>
+                              <input type="number" step="0.01" value={ledgerEditingCharge.unit_price} onChange={e => setLedgerEditingCharge({ ...ledgerEditingCharge, unit_price: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" required />
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    <div className="p-4 border-t flex flex-wrap justify-end gap-2 bg-gray-50">
+                      {ledgerEditingCharge.invoice_id === 'room_rent' && (ledger?.room_rent_override != null || ledger?.room_rent_daily_charge_override != null) && (
+                        <button
+                          type="button"
+                          onClick={clearRoomRentOverride}
+                          disabled={ledgerSavingCharge}
+                          className="px-4 py-2 rounded-xl text-sm font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-200 mr-auto"
+                        >
+                          Use calculated rent
+                        </button>
+                      )}
+                      <button type="button" onClick={() => !ledgerSavingCharge && setLedgerEditingCharge(null)} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200">Close</button>
+                      <button type="submit" disabled={ledgerSavingCharge} className="px-4 py-2 rounded-xl text-sm font-bold bg-blue-600 text-white hover:bg-blue-700">{ledgerSavingCharge ? 'Saving…' : 'Save'}</button>
+                    </div>
+                  </form>
                 </div>
               )}
 
@@ -10829,7 +11926,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                     <thead className="bg-gray-50 text-[10px] font-bold text-gray-500 uppercase tracking-wider border-b border-gray-200 sticky top-0 z-10 shadow-sm">
                       <tr>
                         <th className="px-2 py-2.5 w-8"></th>
-                        <th className="px-4 py-2.5">Date</th>
+                        <th className="px-4 py-2.5">Date &amp; time</th>
                         <th className="px-4 py-2.5">Description</th>
                         <th className="px-4 py-2.5 text-center">Qty</th>
                         <th className="px-4 py-2.5 text-right">Charges (₹)</th>
@@ -10837,7 +11934,93 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {(ledger.grouped_charges || []).map((row, idx) => {
+                      {admissionLedgerStatementParts.map((part, idx) => {
+                        if (part.kind === 'room') {
+                          const item = part.row
+                          const roomDays = Math.max(1, parseInt(String(ledger?.days ?? '1'), 10) || 1)
+                          const roomRowId = String(item.id || 'room_rent')
+                          const expanded = !!expandedChargeRows[roomRowId]
+                          const amt = parseFloat(String(item.amount || '0')) || 0
+                          const impliedDaily = roomDays > 0 ? amt / roomDays : amt
+                          return (
+                            <React.Fragment key={`room-${item.id || idx}`}>
+                              <tr className="hover:bg-blue-50/40 transition-colors">
+                                <td className="px-2 py-2.5 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleChargeRowExpand(roomRowId)}
+                                    className="text-gray-400 hover:text-blue-600 transition-colors"
+                                    aria-expanded={expanded}
+                                    aria-label={expanded ? 'Collapse room rent details' : 'Expand room rent details'}
+                                  >
+                                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                  </button>
+                                </td>
+                                <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{format(new Date(item.date), 'd/M/yy HH:mm')}</td>
+                                <td className="px-4 py-2.5">
+                                  <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                                    <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold shrink-0">RENT</span>
+                                    <span className="text-xs font-semibold text-gray-800 min-w-0">{item.description}</span>
+                                    {((ledger?.room_rent_override != null && ledger.room_rent_override !== '') ||
+                                      (ledger?.room_rent_daily_charge_override != null && ledger.room_rent_daily_charge_override !== '')) ? (
+                                      <span className="text-[9px] font-bold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">Adjusted</span>
+                                    ) : null}
+                                  </div>
+                                </td>
+                                <td className="px-4 py-2.5 text-center text-xs font-bold text-slate-700 tabular-nums">{roomDays}</td>
+                                <td className="px-4 py-2.5 text-right font-bold whitespace-nowrap text-gray-700 tabular-nums">{amt.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                                <td className="px-4 py-2.5 text-right text-gray-300">—</td>
+                              </tr>
+                              {expanded && (
+                                <tr className="bg-slate-50/70">
+                                  <td colSpan={6} className="px-4 py-3">
+                                    <div className="space-y-2 border border-slate-200 bg-white rounded-xl p-3">
+                                      <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-2 last:border-b-0 last:pb-0">
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-xs font-bold text-slate-800">{item.description}</p>
+                                          <p className="text-[11px] text-slate-500 tabular-nums mt-1">
+                                            {item.date ? formatReceiptDateTime(item.date) : '—'}
+                                            {' · '}
+                                            {roomDays} day(s)
+                                            {' · '}
+                                            Effective ₹{impliedDaily.toLocaleString('en-IN', { minimumFractionDigits: 2 })}/day
+                                            {' · '}
+                                            Total ₹{amt.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                          </p>
+                                          {(admission?.ward_name || admission?.room_name || admission?.bed_code) && (
+                                            <p className="text-[11px] text-slate-600 mt-1">
+                                              {admission.ward_name ? <span>Ward: {admission.ward_name}</span> : null}
+                                              {admission.room_name ? <span>{admission.ward_name ? ' · ' : ''}Room: {admission.room_name}</span> : null}
+                                              {admission.bed_code ? <span>{(admission.ward_name || admission.room_name) ? ' · ' : ''}Bed: {admission.bed_code}</span> : null}
+                                            </p>
+                                          )}
+                                          {ledger?.room_rent_computed != null && (
+                                            <p className="text-[11px] text-blue-700 mt-1 font-medium">
+                                              System calculation: ₹{parseFloat(ledger.room_rent_computed || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                            </p>
+                                          )}
+                                        </div>
+                                        <div className="inline-flex flex-nowrap items-center gap-1.5 shrink-0 max-w-full overflow-x-auto py-0.5">
+                                          <button
+                                            type="button"
+                                            onClick={() => openLedgerEditRoomRent(item)}
+                                            title="Edit amount"
+                                            aria-label="Edit room rent amount"
+                                            className="h-8 w-8 hover:w-[68px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-emerald-600 hover:text-white bg-emerald-50 hover:bg-emerald-600 rounded-lg transition-all duration-150 border border-emerald-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                          >
+                                            <Edit2 size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                            <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[36px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Edit</span>
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          )
+                        }
+                        const row = part.row
                         const expanded = !!expandedChargeRows[row.id]
                         const events = row.events || []
                         const latest = events[events.length - 1]
@@ -10845,19 +12028,21 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                         const totalPaid = parseFloat(row.total_paid || 0)
                         const isDiscount = totalAmount < 0
                         const isPaymentRow = totalPaid > 0 && totalAmount === 0
+                        const isCancelledChargeGroup = String(row.description || '').includes('(Cancelled)')
                         let badge = null
                         if (isDiscount) badge = { label: 'DISCOUNT', cls: 'bg-amber-100 text-amber-700' }
                         else if (isPaymentRow) badge = { label: 'PAYMENT', cls: 'bg-emerald-100 text-emerald-700' }
+                        else if (isCancelledChargeGroup) badge = { label: 'CANCELLED', cls: 'bg-red-100 text-red-700' }
                         else badge = { label: 'SERVICE', cls: 'bg-blue-100 text-blue-700' }
                         return (
                           <React.Fragment key={`grp-${row.id}-${idx}`}>
-                            <tr className={`hover:bg-blue-50/40 transition-colors ${isDiscount ? 'bg-amber-50/40' : ''}`}>
+                            <tr className={`hover:bg-blue-50/40 transition-colors ${isDiscount ? 'bg-amber-50/40' : ''} ${isCancelledChargeGroup ? 'bg-slate-50/70 opacity-90' : ''}`}>
                               <td className="px-2 py-2.5 text-center">
                                 <button onClick={() => toggleChargeRowExpand(row.id)} className="text-gray-400 hover:text-blue-600 transition-colors">
                                   {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                                 </button>
                               </td>
-                              <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{latest?.date ? format(new Date(latest.date), 'd/M/yy HH:mm') : <span className="text-gray-300">—</span>}</td>
+                              <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{latest?.date ? formatReceiptDateTime(latest.date) : <span className="text-gray-300">—</span>}</td>
                               <td className="px-4 py-2.5">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${badge.cls}`}>{badge.label}</span>
@@ -10878,12 +12063,15 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                   <div className="space-y-2 border border-slate-200 bg-white rounded-xl p-3">
                                     {events.length === 0 ? (
                                       <p className="text-xs text-gray-400">No item logs available.</p>
-                                    ) : events.map((ev, evIdx) => (
-                                      <div key={`${row.id}-event-${ev.id}-${evIdx}`} className="flex items-center justify-between gap-3 border-b border-slate-100 last:border-b-0 pb-2 last:pb-0">
+                                    ) : events.map((ev, evIdx) => {
+                                      const evInv = String(ev.invoice_status || '').toLowerCase()
+                                      const isEvInvoiceCancelled = evInv === 'cancelled'
+                                      return (
+                                      <div key={`${row.id}-event-${ev.id}-${evIdx}`} className={`flex items-center justify-between gap-3 border-b border-slate-100 last:border-b-0 pb-2 last:pb-0 ${isEvInvoiceCancelled ? 'opacity-90' : ''}`}>
                                         <div>
                                           <p className="text-xs font-bold text-slate-800">{ev.name || row.description}</p>
                                           <p className="text-[11px] text-slate-500 tabular-nums">
-                                            {format(new Date(ev.date), 'd/M/yy HH:mm')}
+                                            {formatReceiptDateTime(ev.date)}
                                             {' · '}
                                             ₹{parseFloat(ev.price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                                             {' · '}
@@ -10891,16 +12079,86 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                             {' · Paid '}
                                             ₹{parseFloat(ev.paid_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                                           </p>
+                                          {isEvInvoiceCancelled && ev.cancelled_reason ? (
+                                            <p className="text-[10px] text-red-600 mt-0.5 font-medium">Reason: {ev.cancelled_reason}</p>
+                                          ) : null}
                                         </div>
-                                        <button
-                                          type="button"
-                                          onClick={() => setReceipt({ type: 'charge', data: { amount: ev.price, mode: ev.payment_mode || 'other', invoice_no: ev.invoice_no, slip_number: ev.slip_number || '', description: ev.name || row.description } })}
-                                          className="text-[11px] bg-blue-100 text-blue-700 px-2.5 py-1 rounded-lg font-bold hover:bg-blue-200"
-                                        >
-                                          Print Slip
-                                        </button>
+                                        <div className="inline-flex flex-nowrap items-center gap-1.5 shrink-0 max-w-full overflow-x-auto py-0.5">
+                                          <button
+                                            type="button"
+                                            onClick={() => setReceipt({
+                                              viewOnly: true,
+                                              type: 'charge',
+                                              data: {
+                                                amount: ev.price,
+                                                mode: ev.payment_mode || 'other',
+                                                invoice_no: ev.invoice_no,
+                                                slip_number: ev.slip_number || '',
+                                                description: ev.name || row.description,
+                                                paid_at: ev.date,
+                                              },
+                                            })}
+                                            title="View"
+                                            aria-label="View receipt"
+                                            className="h-8 w-8 hover:w-[72px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-indigo-600 hover:text-white bg-indigo-50 hover:bg-indigo-600 rounded-lg transition-all duration-150 border border-indigo-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                          >
+                                            <Eye size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                            <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[40px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">View</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setReceipt({
+                                              viewOnly: isEvInvoiceCancelled,
+                                              type: 'charge',
+                                              data: {
+                                                amount: ev.price,
+                                                mode: ev.payment_mode || 'other',
+                                                invoice_no: ev.invoice_no,
+                                                slip_number: ev.slip_number || '',
+                                                description: ev.name || row.description,
+                                                paid_at: ev.date,
+                                              },
+                                            })}
+                                            title="Print"
+                                            aria-label="Print receipt"
+                                            className="h-8 w-8 hover:w-[74px] shrink-0 flex items-center justify-center gap-1 overflow-hidden rounded-lg transition-all duration-150 border shadow-sm hover:shadow-md active:scale-95 group text-sky-600 hover:text-white bg-sky-50 hover:bg-sky-600 border-sky-100"
+                                          >
+                                            <Printer size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                            <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[44px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Print</span>
+                                          </button>
+                                          {ev.invoice_id && evInv === 'finalized' ? (
+                                            <>
+                                              <button
+                                                type="button"
+                                                onClick={() => openLedgerEditChargeFromEvent(ev, row.description)}
+                                                title="Edit"
+                                                aria-label="Edit charge"
+                                                className="h-8 w-8 hover:w-[68px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-emerald-600 hover:text-white bg-emerald-50 hover:bg-emerald-600 rounded-lg transition-all duration-150 border border-emerald-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                              >
+                                                <Edit2 size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[36px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Edit</span>
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setLedgerCancelInvoice({
+                                                    invoice_id: ev.invoice_id,
+                                                    label: ev.invoice_no || ev.name || row.description,
+                                                  })
+                                                  setLedgerCancelInvoiceReason('')
+                                                }}
+                                                title="Cancel"
+                                                aria-label="Cancel invoice"
+                                                className="h-8 w-8 hover:w-[84px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-red-600 hover:text-white bg-red-50 hover:bg-red-600 rounded-lg transition-all duration-150 border border-red-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                              >
+                                                <X size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[52px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Cancel</span>
+                                              </button>
+                                            </>
+                                          ) : null}
+                                        </div>
                                       </div>
-                                    ))}
+                                    )})}
                                   </div>
                                 </td>
                               </tr>
@@ -10908,22 +12166,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                           </React.Fragment>
                         )
                       })}
-                      {(ledger.charges || []).filter(c => c.type === 'room_rent').map((item, i) => (
-                        <tr key={`room-${i}`} className="hover:bg-blue-50/40 transition-colors">
-                          <td className="px-2 py-2.5 text-center text-gray-300">—</td>
-                          <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{format(new Date(item.date), 'd/M/yy HH:mm')}</td>
-                          <td className="px-4 py-2.5">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold">RENT</span>
-                              <span className="text-xs font-semibold text-gray-800">{item.description}</span>
-                            </div>
-                          </td>
-                          <td className="px-4 py-2.5 text-center text-xs font-bold text-slate-700 tabular-nums">1</td>
-                          <td className="px-4 py-2.5 text-right font-bold whitespace-nowrap text-gray-700 tabular-nums">{parseFloat(item.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                          <td className="px-4 py-2.5 text-right text-gray-300">—</td>
-                        </tr>
-                      ))}
-                      {(ledger.grouped_charges || []).length === 0 && (ledger.charges || []).filter(c => c.type === 'room_rent').length === 0 && (
+                      {admissionLedgerStatementParts.length === 0 && (
                         <tr>
                           <td colSpan={6} className="px-4 py-12 text-center text-xs text-gray-400">
                             No entries yet. Use the right panel to add charges, receive payments or apply a discount.
@@ -11259,6 +12502,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
   useEffect(() => {
     const timer = setTimeout(() => {
       if (printRef.current) {
+        receptionistLastPrintKind = 'ipd_ledger'
         window.print()
       }
     }, 800)
@@ -11274,10 +12518,13 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
     }
   }, [])
 
-  const now = format(new Date(), 'd/M/yyyy (HH:mm)')
+  const now = formatReceiptDateTime(new Date())
 
   const billingItems = ledger ? (() => {
-    const raw = (ledger.charges || []).filter(c => c.type !== 'payment' && c.type !== 'pharmacy_payment')
+    const raw = (ledger.charges || []).filter(c => {
+      if (c.type === 'payment' || c.type === 'pharmacy_payment') return false
+      return String(c.invoice_status || '').toLowerCase() !== 'cancelled'
+    })
     const grouped = {}
     raw.forEach(c => {
       let desc = (c.description || 'Service').trim()
@@ -11296,12 +12543,26 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
     })
     return Object.values(grouped).sort((a, b) => a.description.localeCompare(b.description))
   })() : []
-  const payments = ledger ? [...(ledger.payments || [])].sort((a, b) => new Date(a.date) - new Date(b.date)) : []
+  const payments = ledger ? [...(ledger.payments || [])].filter(p => {
+    if (p.type === 'pharmacy_payment') return true
+    if (String(p.status || '').toLowerCase() === 'cancelled') return false
+    if (String(p.invoice_status || 'finalized').toLowerCase() === 'cancelled') return false
+    return true
+  }).sort((a, b) => new Date(a.date) - new Date(b.date)) : []
 
   const content = (
     <div id="__ipd_ledger_root" className="fixed inset-0 z-[600] bg-white overflow-y-auto print:p-0 p-4 sm:p-8 print:static print:h-auto print:overflow-visible print:bg-transparent">
       <div className="absolute top-4 right-4 print:hidden flex gap-3">
-        <button onClick={() => window.print()} className="bg-emerald-600 text-white px-6 py-2 rounded-xl font-bold shadow-lg shadow-emerald-200">Print Bill</button>
+        <button
+          type="button"
+          onClick={() => {
+            receptionistLastPrintKind = 'ipd_ledger'
+            window.print()
+          }}
+          className="bg-emerald-600 text-white px-6 py-2 rounded-xl font-bold shadow-lg shadow-emerald-200"
+        >
+          Print Bill
+        </button>
         <button onClick={onClose} className="bg-gray-100 text-gray-600 px-6 py-2 rounded-xl font-bold">Cancel</button>
       </div>
 
@@ -11330,7 +12591,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
               <div className="flex"><span className="w-28 font-bold">UHID No</span><span className="font-medium">: {admission.patient_uhid}</span></div>
               <div className="flex"><span className="w-28 font-bold">IPD No</span><span className="font-medium">: {admission.ipd_no}</span></div>
               <div className="flex"><span className="w-28 font-bold">Room / Bed</span><span className="font-medium">: {admission.room_name} / {admission.bed_code}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Bill Date</span><span className="font-medium">: {now.split(' ')[0]}</span></div>
+              <div className="flex"><span className="w-28 font-bold">{'Bill date & time'}</span><span className="font-medium">: {now}</span></div>
               <div className="flex"><span className="w-28 font-bold">Stay Period</span><span className="font-medium">: {admission.admission_date ? format(new Date(admission.admission_date), 'd/M/yy') : '—'} to {format(new Date(), 'd/M/yy')}</span></div>
             </div>
           </div>
@@ -11369,7 +12630,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
                  {payments.length > 0 ? (
                     <div className="space-y-0.5">
                       {payments.map((p, i) => (
-                        <p key={i}>R.No: {p.invoice_no || '--'} - Dt. {format(new Date(p.date), 'd/M/yy')} - Amt. {parseFloat(p.amount).toLocaleString('en-IN')}</p>
+                        <p key={i}>R.No: {p.invoice_no || '--'} - Dt. {formatReceiptDateTime(p.date)} - Amt. {parseFloat(p.amount).toLocaleString('en-IN')}</p>
                       ))}
                     </div>
                  ) : <p className="italic opacity-50">No payments recorded</p>}
@@ -11402,6 +12663,8 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
           @page { size: A4 portrait; margin: 5mm; }
           body, html { background: #fff !important; height: auto !important; overflow: visible !important; }
           body > *:not(#__ipd_ledger_root) { display: none !important; }
+          /* Ensure bill wins if another portaled print stylesheet (e.g. discharge summary) loads earlier */
+          html body > #__ipd_ledger_root { display: block !important; visibility: visible !important; }
           #__ipd_ledger_root { 
             position: static !important; display: block !important; overflow: visible !important; 
             height: auto !important; padding: 0 !important; margin: 0 !important; zoom: 1;
@@ -11623,7 +12886,7 @@ export default function ReceptionistPortal() {
             {section === 'new_admission' && <IPDSection mode="new_admission" initialAdmissionDraft={ipdAdmissionDraft} />}
             {section === 'emergency' && <EmergencySection />}
             {section === 'patients' && <PatientListSection />}
-            {section === 'opd_history' && <OpdSlipsSection onMoveToIpd={handleMoveOpdToIpd} />}
+            {section === 'opd_history' && <OpdSlipsSection onMoveToIpd={ handleMoveOpdToIpd} />}
             {section === 'register' && <RegisterPatientSection />}
             {section === 'payment_slip' && <PaymentSlipSection />}
             {section === 'payment_slip_list' && <PaymentSlipsListSection />}
@@ -11642,3 +12905,5 @@ export default function ReceptionistPortal() {
     </div>
   )
 }
+
+

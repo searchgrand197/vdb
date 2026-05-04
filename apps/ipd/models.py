@@ -65,6 +65,11 @@ class IPDAdmission(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     discharge_notes = models.TextField(blank=True, default="")
     ipd_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
 
+    # When set, ledger room rent uses this total instead of bed daily_charge × days.
+    room_rent_override = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    # When set, ledger room rent = this per-day rate × stay days (preferred over room_rent_override).
+    room_rent_daily_charge_override = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["hospital", "admission_date"]),

@@ -5,6 +5,11 @@ from apps.shared.models import Hospital, TimeStampedModel, UUIDPrimaryKeyModel
 
 
 class EmergencyCase(TimeStampedModel, UUIDPrimaryKeyModel):
+    GENDER_CHOICES = (
+        ("male", "Male"),
+        ("female", "Female"),
+        ("other", "Other"),
+    )
     TRIAGE_CHOICES = (
         ("red", "Red"),
         ("yellow", "Yellow"),
@@ -18,6 +23,7 @@ class EmergencyCase(TimeStampedModel, UUIDPrimaryKeyModel):
 
     hospital = models.ForeignKey(Hospital, on_delete=models.CASCADE, related_name="emergency_cases")
     patient_name = models.CharField(max_length=200)
+    gender = models.CharField(max_length=10, choices=GENDER_CHOICES, blank=True, default="other")
     contact = models.CharField(max_length=40, blank=True, default="")
     complaint = models.TextField(blank=True, default="")
     triage = models.CharField(max_length=10, choices=TRIAGE_CHOICES, default="yellow")

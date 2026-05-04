@@ -38,6 +38,8 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
             "status",
             "discharged_at",
             "discharge_notes",
+            "room_rent_override",
+            "room_rent_daily_charge_override",
             "created_at",
             "updated_at",
         ]
@@ -57,9 +59,13 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
 
 
 class IPDAdmissionCreateUpdateSerializer(serializers.ModelSerializer):
+    """Write serializer; `id` and `ipd_no` are read-only so create/update responses include them (e.g. for IPD slip = ledger ID)."""
+
     class Meta:
         model = IPDAdmission
         fields = [
+            "id",
+            "ipd_no",
             "patient",
             "opd_visit",
             "admission_date",
@@ -76,6 +82,7 @@ class IPDAdmissionCreateUpdateSerializer(serializers.ModelSerializer):
             "discharge_notes",
             "discharged_at",
         ]
+        read_only_fields = ("id", "ipd_no")
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

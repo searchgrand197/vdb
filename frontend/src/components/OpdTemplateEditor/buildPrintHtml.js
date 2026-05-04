@@ -55,6 +55,14 @@ export function buildPrintHtml(layout, values, withBackground) {
     return '<div class="field-box" style="left:' + left + '%;top:' + top + '%;font-size:' + fs + 'cqw;">' + text + '</div>'
   }).join('\n')
 
+  const dPrinted = new Date()
+  const pad2 = (n) => String(n).padStart(2, '0')
+  const printedAtStr = esc(
+    `${pad2(dPrinted.getDate())}/${pad2(dPrinted.getMonth() + 1)}/${dPrinted.getFullYear()} ${pad2(dPrinted.getHours())}:${pad2(dPrinted.getMinutes())}:${pad2(dPrinted.getSeconds())}`
+  )
+  const printedAtHtml =
+    '<div class="opd-printed-at">Printed at: ' + printedAtStr + '</div>'
+
   const bgTag = showBg ? '<img src="' + bgSrc + '" alt="" />' : ''
 
   const chromeDisplay = showChrome ? 'flex' : 'none'
@@ -107,6 +115,10 @@ export function buildPrintHtml(layout, values, withBackground) {
     '  position: absolute; padding: 4px 6px; color: #000;',
     '  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
     '  background: transparent; z-index: 2;',
+    '}',
+    '.opd-printed-at {',
+    '  position: absolute; bottom: 2mm; right: 3mm; font-size: 8px; color: #555;',
+    '  z-index: 6; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
     '}',
     '.opd-sheet-chrome {',
     '  display: ' + chromeDisplay + '; position: absolute; inset: 0; z-index: 0;',
@@ -215,6 +227,7 @@ export function buildPrintHtml(layout, values, withBackground) {
     '    </div>',
     '    ' + fieldBoxes,
     '    ' + noteBoxes,
+    '    ' + printedAtHtml,
     '  </div>',
     '</div>',
     '<' + 'script' + '>',

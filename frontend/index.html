@@ -80,25 +80,5 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
-    <script>
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js').then((reg) => {
-            reg.addEventListener('updatefound', () => {
-              const newWorker = reg.installing;
-              if (newWorker) {
-                newWorker.addEventListener('statechange', () => {
-                  if (newWorker.state === 'activated' && navigator.serviceWorker.controller) {
-                    if (confirm('New version available! Reload to update?')) {
-                      window.location.reload();
-                    }
-                  }
-                });
-              }
-            });
-          });
-        });
-      }
-    </script>
   </body>
 </html>

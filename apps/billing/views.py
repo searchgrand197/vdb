@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 
 from apps.billing.models import BillingInvoice, InvoiceItem, InvoiceNumberSequence
+from apps.payments.models import PaymentTransaction
 from apps.billing.serializers import (
     BillingInvoiceCreateSerializer,
     BillingInvoiceItemInputSerializer,
@@ -161,16 +162,27 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
         return success_response(data=BillingInvoiceSerializer(invoice).data, message="Invoice finalized.")
 
     @action(detail=True, methods=["post"], url_path="cancel")
+    @transaction.atomic
     def cancel(self, request, pk=None):
         invoice: BillingInvoice = self.get_object()
         reason = request.data.get("reason") or ""
         if invoice.status == BillingInvoice.Status.CANCELLED:
             return success_response(data=BillingInvoiceSerializer(invoice).data)
         before_status = invoice.status
+        ref_note = (reason or "Invoice cancelled")[:100]
+        cancel_ref = f"INV-CANCEL:{ref_note}"[:120]
+        for p in invoice.payments.filter(
+            status=PaymentTransaction.Status.SUCCESS,
+            is_deleted=False,
+        ):
+            p.status = PaymentTransaction.Status.CANCELLED
+            p.transaction_reference = cancel_ref
+            p.save(update_fields=["status", "transaction_reference"])
         invoice.status = BillingInvoice.Status.CANCELLED
         invoice.cancelled_reason = reason
         invoice.cancelled_at = timezone.now()
-        invoice.save(update_fields=["status", "cancelled_reason", "cancelled_at"])
+        invoice.amount_paid = Decimal("0.00")
+        invoice.save(update_fields=["status", "cancelled_reason", "cancelled_at", "amount_paid"])
         create_audit_log(
             request=request,
             hospital=invoice.hospital,

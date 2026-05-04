@@ -59,6 +59,13 @@ export const baseTheme = createTheme({
   },
   spacing: 8,
   components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        '*, *::before, *::after': {
+          boxSizing: 'border-box',
+        },
+      },
+    },
     MuiButton: {
       styleOverrides: {
         root: {

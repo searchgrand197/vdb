@@ -43,6 +43,28 @@ def _release_bed(bed_code: str, hospital_id):
         )
 
 
+def _ipd_ledger_grouped_row_is_cancelled(row: dict) -> bool:
+    for ev in row.get("events") or []:
+        if str(ev.get("invoice_status") or "").lower() == BillingInvoice.Status.CANCELLED:
+            return True
+    return "(cancelled)" in str(row.get("description") or "").lower()
+
+
+def _ipd_ledger_grouped_sort_key(row: dict):
+    evs = row.get("events") or []
+    dates = [e.get("date") or "" for e in evs] or [""]
+    return (1 if _ipd_ledger_grouped_row_is_cancelled(row) else 0, min(dates))
+
+
+def _ipd_ledger_payment_sort_key(p: dict):
+    if str(p.get("type") or "") == "pharmacy_payment":
+        return (0, p.get("date") or "")
+    st = str(p.get("status") or "").lower()
+    inv = str(p.get("invoice_status") or "").lower()
+    void = st == PaymentTransaction.Status.CANCELLED or inv == BillingInvoice.Status.CANCELLED
+    return (1 if void else 0, p.get("date") or "")
+
+
 class IPDAdmissionViewSet(viewsets.ModelViewSet):
     queryset = IPDAdmission.objects.all()
     filter_backends = (SearchFilter,)
@@ -292,7 +314,7 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         # Include directly linked invoices and also fallback IPD invoices/payments
         # created for the same patient during this admission window.
         invoices = BillingInvoice.objects.filter(
-            status=BillingInvoice.Status.FINALIZED,
+            status__in=[BillingInvoice.Status.FINALIZED, BillingInvoice.Status.CANCELLED],
         ).filter(
             Q(ipd_admission=admission)
             | Q(
@@ -312,11 +334,19 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
             # Paid advance invoices are deposits, not billable charges.
             if inv.invoice_no.startswith("IPDADV-") and (inv.amount_paid or Decimal("0.00")) > Decimal("0.00"):
                 continue
-            invoices_total += inv.total_amount
+            # Cancelled invoices stay visible on the ledger but do not add to active totals.
+            if inv.status == BillingInvoice.Status.FINALIZED:
+                invoices_total += inv.total_amount
             items = list(inv.items.all())
             invoice_event_refs = []
             invoice_to_event_refs[str(inv.id)] = invoice_event_refs
             invoice_payment_mode = "credit" if (inv.amount_paid or Decimal("0.00")) <= Decimal("0.00") else "cash"
+
+            # One grouped row per (invoice, charge description) so multiple CT slips on
+            # different invoices do not merge; cancelling one invoice only affects its row.
+            def _invoice_group_key(description: str) -> str:
+                base = (description or "").strip().lower()
+                return f"{base}__inv__{inv.id}"
 
             if inv.invoice_no.startswith("IPDADV-") and (inv.amount_paid or Decimal("0.00")) == Decimal("0.00"):
                 desc = "Advance (Credit / Due)"
@@ -330,16 +360,22 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "description": desc,
                     "amount": str(inv.total_amount),
                     "invoice_no": inv.invoice_no,
+                    "invoice_id": str(inv.id),
+                    "invoice_status": inv.status,
                     "quantity": str(quantity),
                     "unit_price": str(unit_price),
                     "charge_times": [charge_date],
                     "payment_mode": invoice_payment_mode,
                 })
-                group_key = (desc or "").strip().lower()
+                group_key = _invoice_group_key(desc)
                 if group_key not in grouped_charge_map:
                     grouped_charge_map[group_key] = {
                         "id": f"grp-{str(inv.id)}",
-                        "description": desc,
+                        "description": (
+                            f"{desc} (Cancelled)"
+                            if inv.status == BillingInvoice.Status.CANCELLED
+                            else desc
+                        ),
                         "quantity": Decimal("0.00"),
                         "total_amount": Decimal("0.00"),
                         "total_paid": Decimal("0.00"),
@@ -354,6 +390,9 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "price": str(inv.total_amount),
                     "quantity": str(quantity),
                     "invoice_no": inv.invoice_no,
+                    "invoice_id": str(inv.id),
+                    "invoice_status": inv.status,
+                    "cancelled_reason": inv.cancelled_reason or "",
                     "payment_mode": invoice_payment_mode,
                     "paid_amount": "0.00",
                     "slip_number": "",
@@ -378,16 +417,22 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "description": desc,
                     "amount": str(inv.total_amount),
                     "invoice_no": inv.invoice_no,
+                    "invoice_id": str(inv.id),
+                    "invoice_status": inv.status,
                     "quantity": str(quantity),
                     "unit_price": str(unit_price),
                     "charge_times": [charge_date],
                     "payment_mode": invoice_payment_mode,
                 })
-                group_key = (desc or "").strip().lower()
+                group_key = _invoice_group_key(desc)
                 if group_key not in grouped_charge_map:
                     grouped_charge_map[group_key] = {
                         "id": f"grp-{str(inv.id)}",
-                        "description": desc,
+                        "description": (
+                            f"{desc} (Cancelled)"
+                            if inv.status == BillingInvoice.Status.CANCELLED
+                            else desc
+                        ),
                         "quantity": Decimal("0.00"),
                         "total_amount": Decimal("0.00"),
                         "total_paid": Decimal("0.00"),
@@ -402,6 +447,9 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "price": str(inv.total_amount),
                     "quantity": str(quantity),
                     "invoice_no": inv.invoice_no,
+                    "invoice_id": str(inv.id),
+                    "invoice_status": inv.status,
+                    "cancelled_reason": inv.cancelled_reason or "",
                     "payment_mode": invoice_payment_mode,
                     "paid_amount": "0.00",
                     "slip_number": "",
@@ -428,17 +476,23 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "description": desc,
                     "amount": str(line_total),
                     "invoice_no": inv.invoice_no,
+                    "invoice_id": str(inv.id),
+                    "invoice_status": inv.status,
                     "quantity": str(quantity),
                     "unit_price": str(unit_price),
                     "charge_times": [charge_date],
                     "payment_mode": invoice_payment_mode,
                 })
 
-                group_key = (desc or "").strip().lower()
+                group_key = _invoice_group_key(desc)
                 if group_key not in grouped_charge_map:
                     grouped_charge_map[group_key] = {
                         "id": f"grp-{str(inv.id)}-{idx + 1}",
-                        "description": desc,
+                        "description": (
+                            f"{desc} (Cancelled)"
+                            if inv.status == BillingInvoice.Status.CANCELLED
+                            else desc
+                        ),
                         "quantity": Decimal("0.00"),
                         "total_amount": Decimal("0.00"),
                         "total_paid": Decimal("0.00"),
@@ -453,6 +507,9 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "price": str(line_total),
                     "quantity": str(quantity),
                     "invoice_no": inv.invoice_no,
+                    "invoice_id": str(inv.id),
+                    "invoice_status": inv.status,
+                    "cancelled_reason": inv.cancelled_reason or "",
                     "payment_mode": invoice_payment_mode,
                     "paid_amount": "0.00",
                     "slip_number": "",
@@ -504,30 +561,68 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     }
                 )
             
-        # 2. Dynamic Room Rent
-        room_rent = Decimal("0.00")
-        bed = Bed.objects.select_related('room').filter(bed_code=admission.bed_code, hospital_id=admission.hospital_id).first()
+        # 2. Dynamic Room Rent (optional manual override on admission)
+        bed = Bed.objects.select_related("room").filter(bed_code=admission.bed_code, hospital_id=admission.hospital_id).first()
         days = 1
         if admission.status in (IPDAdmission.Status.DISCHARGED, IPDAdmission.Status.CANCELLED) and admission.discharged_at:
             days = max(1, (admission.discharged_at.date() - admission.admission_date).days)
         else:
             days = max(1, (timezone.now().date() - admission.admission_date).days)
-            
+
+        room_rent_calc = Decimal("0.00")
+        daily = None
         if bed and bed.room and bed.room.daily_charge:
-            room_rent = bed.room.daily_charge * days
-            record_charges.append({
-                "id": "room_rent",
-                "type": "room_rent",
-                "date": timezone.now().isoformat(),
-                "description": f"Room Rent ({days} days @ ₹{bed.room.daily_charge})",
-                "amount": str(room_rent),
-                "invoice_no": "SYSTEM"
-            })
-            
+            daily = bed.room.daily_charge
+            room_rent_calc = daily * days
+
+        days_dec = Decimal(days)
+        if admission.room_rent_daily_charge_override is not None:
+            room_rent = admission.room_rent_daily_charge_override * days_dec
+        elif admission.room_rent_override is not None:
+            room_rent = admission.room_rent_override
+        else:
+            room_rent = room_rent_calc
+
+        if admission.room_rent_daily_charge_override is not None:
+            unit_for_row = admission.room_rent_daily_charge_override.quantize(Decimal("0.01"))
+        elif days_dec > 0:
+            unit_for_row = (room_rent / days_dec).quantize(Decimal("0.01"))
+        else:
+            unit_for_row = room_rent
+
+        show_room_line = (
+            room_rent > 0
+            or admission.room_rent_override is not None
+            or admission.room_rent_daily_charge_override is not None
+        )
+        if show_room_line:
+            if admission.room_rent_daily_charge_override is not None:
+                rent_desc = f"Room Rent ({days} days @ ₹{unit_for_row}/day — adjusted)"
+            elif admission.room_rent_override is not None:
+                rent_desc = f"Room Rent (adjusted · {days} day(s) basis)"
+            elif daily is not None:
+                rent_desc = f"Room Rent ({days} days @ ₹{daily})"
+            else:
+                rent_desc = "Room Rent"
+            record_charges.append(
+                {
+                    "id": "room_rent",
+                    "type": "room_rent",
+                    "date": timezone.now().isoformat(),
+                    "description": rent_desc,
+                    "amount": str(room_rent),
+                    "invoice_no": "SYSTEM",
+                    "invoice_id": "room_rent",
+                    "invoice_status": "finalized",
+                    "quantity": str(days),
+                    "unit_price": str(unit_for_row),
+                }
+            )
+
         total_charges = invoices_total + room_rent + pharmacy_total
         
-        # 3. Payments
-        payments = PaymentTransaction.objects.filter(
+        # 3. Payments (include cancelled for audit; totals count only successful + finalized)
+        payment_admission_q = (
             Q(invoice__ipd_admission=admission)
             | Q(
                 invoice__ipd_admission__isnull=True,
@@ -535,23 +630,57 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 invoice__patient=admission.patient,
                 invoice__invoice_date__gte=admission.admission_date,
                 invoice__invoice_date__lte=stay_end_date,
-            ),
-            status=PaymentTransaction.Status.SUCCESS
-        ).select_related("invoice").order_by("-created_at")
-        
+            )
+        )
+        payments_qs = (
+            PaymentTransaction.objects.filter(
+                payment_admission_q,
+                is_deleted=False,
+                status__in=[
+                    PaymentTransaction.Status.SUCCESS,
+                    PaymentTransaction.Status.CANCELLED,
+                ],
+                invoice__status__in=[
+                    BillingInvoice.Status.FINALIZED,
+                    BillingInvoice.Status.CANCELLED,
+                ],
+            )
+            .select_related("invoice")
+            .order_by("-created_at")
+        )
+
         record_payments = []
         total_paid = Decimal("0.00")
-        for p in payments:
-            total_paid += p.amount
+        for p in payments_qs:
+            if (
+                p.status == PaymentTransaction.Status.SUCCESS
+                and p.invoice.status == BillingInvoice.Status.FINALIZED
+            ):
+                total_paid += p.amount
             desc_prefix = "Advance" if "ADV" in p.invoice.invoice_no else "Payment"
-            record_payments.append({
-                "id": str(p.id),
-                "type": "payment",
-                "date": p.created_at.isoformat(),
-                "description": f"{desc_prefix} - {p.payment_mode.upper()}",
-                "amount": str(p.amount),
-                "invoice_no": p.invoice.invoice_no
-            })
+            if p.status == PaymentTransaction.Status.CANCELLED:
+                pay_desc = f"{desc_prefix} (Cancelled) - {p.payment_mode.upper()}"
+            else:
+                pay_desc = f"{desc_prefix} - {p.payment_mode.upper()}"
+            record_payments.append(
+                {
+                    "id": str(p.id),
+                    "type": "payment",
+                    "date": p.created_at.isoformat(),
+                    "description": pay_desc,
+                    "amount": str(p.amount),
+                    "invoice_no": p.invoice.invoice_no,
+                    "slip_number": p.slip_number or "",
+                    "status": p.status,
+                    "invoice_status": p.invoice.status,
+                }
+            )
+        for p in payments_qs:
+            if (
+                p.status != PaymentTransaction.Status.SUCCESS
+                or p.invoice.status != BillingInvoice.Status.FINALIZED
+            ):
+                continue
             event_refs = invoice_to_event_refs.get(str(p.invoice_id), [])
             if event_refs:
                 total_ref_amount = sum((ref["amount"] or Decimal("0.00")) for ref in event_refs) or Decimal("0.00")
@@ -575,7 +704,10 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         # Include pharmacy payments in totals so statement math stays consistent.
         total_paid += pharmacy_paid
         record_payments.extend(pharmacy_payment_rows)
-            
+        record_payments.sort(key=_ipd_ledger_payment_sort_key)
+
+        grouped_charge_rows = sorted(grouped_charge_map.values(), key=_ipd_ledger_grouped_sort_key)
+
         balance_due = total_charges - total_paid
 
         return Response({
@@ -592,11 +724,20 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                     "total_paid": str(row["total_paid"]),
                     "events": sorted(row["events"], key=lambda e: e["date"]),
                 }
-                for row in grouped_charge_map.values()
+                for row in grouped_charge_rows
             ],
             "payments": record_payments,
             "room_rent": str(room_rent),
-            "days": days
+            "room_rent_computed": str(room_rent_calc),
+            "room_rent_override": (
+                str(admission.room_rent_override) if admission.room_rent_override is not None else None
+            ),
+            "room_rent_daily_charge_override": (
+                str(admission.room_rent_daily_charge_override)
+                if admission.room_rent_daily_charge_override is not None
+                else None
+            ),
+            "days": days,
         })
 
     @action(detail=True, methods=["post"], url_path="capture-advance")
@@ -788,9 +929,65 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
         if not invoice_id:
             return Response({"error": "Invoice ID is required"}, status=400)
 
-        # 1. Find the invoice — must belong to this admission
-        if invoice_id == "room_rent":
-            return Response({"error": "Room Rent is system-calculated and cannot be edited directly"}, status=400)
+        # 1. Room rent: stored override on admission (not a billing invoice)
+        if str(invoice_id) == "room_rent":
+            clear = request.data.get("clear_room_rent_override")
+            if clear in (True, "true", "1", 1, "yes"):
+                admission.room_rent_override = None
+                admission.room_rent_daily_charge_override = None
+                admission.save(
+                    update_fields=["room_rent_override", "room_rent_daily_charge_override", "updated_at"]
+                )
+                return Response(
+                    {
+                        "success": True,
+                        "room_rent_override": None,
+                        "room_rent_daily_charge_override": None,
+                    }
+                )
+            # Prefer per-day bed rate (unit_price); total = rate × stay days (recomputed server-side).
+            if unit_price_str is not None:
+                try:
+                    daily = Decimal(str(unit_price_str))
+                except Exception:
+                    return Response({"error": "Invalid per-day rate format"}, status=400)
+                if daily < 0:
+                    return Response({"error": "Per-day rate cannot be negative"}, status=400)
+                admission.room_rent_daily_charge_override = daily
+                admission.room_rent_override = None
+                admission.save(
+                    update_fields=["room_rent_daily_charge_override", "room_rent_override", "updated_at"]
+                )
+                days = 1
+                if admission.status in (IPDAdmission.Status.DISCHARGED, IPDAdmission.Status.CANCELLED) and admission.discharged_at:
+                    days = max(1, (admission.discharged_at.date() - admission.admission_date).days)
+                else:
+                    days = max(1, (timezone.now().date() - admission.admission_date).days)
+                total_rr = daily * Decimal(days)
+                return Response(
+                    {
+                        "success": True,
+                        "room_rent_daily_charge_override": str(daily),
+                        "room_rent_override": None,
+                        "room_rent": str(total_rr),
+                        "days": days,
+                    }
+                )
+            # Legacy: total-line override only if amount sent without unit_price
+            if amount_str is not None:
+                try:
+                    amount = Decimal(str(amount_str))
+                except Exception:
+                    return Response({"error": "Invalid amount format"}, status=400)
+                if amount < 0:
+                    return Response({"error": "Amount cannot be negative"}, status=400)
+                admission.room_rent_override = amount
+                admission.room_rent_daily_charge_override = None
+                admission.save(
+                    update_fields=["room_rent_override", "room_rent_daily_charge_override", "updated_at"]
+                )
+                return Response({"success": True, "room_rent_override": str(amount), "room_rent_daily_charge_override": None})
+            return Response({"error": "Provide unit_price (per-day bed charge) or amount"}, status=400)
 
         try:
             invoice = BillingInvoice.objects.filter(

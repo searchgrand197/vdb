@@ -59,6 +59,9 @@ class Patient(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     blood_group = models.CharField(max_length=5, blank=True, default="")
 
+    # Receptionist context: why this patient was registered (visible on patient record).
+    registration_note = models.TextField(blank=True, default="")
+
     emergency_tags = models.CharField(max_length=200, blank=True, default="")
 
     family_group = models.ForeignKey(
