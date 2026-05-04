@@ -14,6 +14,7 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.contrib import admin
 from django.urls import include, path, re_path
 from django.conf import settings
 from django.conf.urls.static import static
@@ -53,6 +54,8 @@ urlpatterns = [
         name="swagger-ui",
     ),
     path("ui/field-permissions/", FieldPermissionMatrixPageView.as_view(), name="field-permissions-ui"),
+    # Django admin (not at /admin — that URL is used by the React SPA admin portal)
+    path("django-admin/", admin.site.urls),
     # API v1 — single router so GET /api/v1/ lists all ViewSet roots (see config.api_v1_router_urls)
     path("api/v1/", include("apps.accounts.api_urls")),
     path("api/v1/", include("apps.roles_permissions.api_urls")),
@@ -77,7 +80,7 @@ urlpatterns = [
     path("", include("apps.opd_templates.urls")),
     # SPA fallback: direct browser refresh/open for frontend routes should load index.html
     re_path(
-        r"^(?!api/|media/|static/|leave/|ui/|template/|icons/|sw\.js|manifest\.json|manifest-doctor\.json|manifest-staff\.json|manifest-pharmacy\.json|manifest-receptionist\.json|offline\.html).*$",
+        r"^(?!api/|media/|static/|leave/|ui/|django-admin/|template/|icons/|sw\.js|manifest\.json|manifest-doctor\.json|manifest-staff\.json|manifest-pharmacy\.json|manifest-receptionist\.json|offline\.html).*$",
         frontend_index,
         name="frontend-spa-fallback",
     ),

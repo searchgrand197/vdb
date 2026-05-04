@@ -1,1 +1,1 @@
-# Admin functionality has been removed from this project.
+# Nested package is not in INSTALLED_APPS; no admin registrations.

@@ -1,1 +1,1 @@
-# Admin functionality has been removed from this project.
+# This app has no models yet; nothing to register in Django admin.
