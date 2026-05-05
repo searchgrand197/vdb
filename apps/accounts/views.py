@@ -186,17 +186,17 @@ class PharmacyBranchListView(APIView):
     def get(self, request, *args, **kwargs):
         from apps.pharmacy.models import Pharmacy
 
-        default_hospital_name = "Default Hospital"
         branches = (
-            Pharmacy.objects.filter(is_active=True, hospital__name__iexact=default_hospital_name)
-            .order_by("display_name", "name")
-            .values("id", "name", "display_name")
+            Pharmacy.objects.filter(is_active=True)
+            .order_by("hospital__name", "display_name", "name")
+            .values("id", "name", "display_name", "hospital__name")
         )
         data = [
             {
                 "id": str(b["id"]),
                 "label": b["display_name"].strip() or b["name"],
                 "name": b["name"],
+                "hospital_name": b.get("hospital__name") or "",
             }
             for b in branches
         ]

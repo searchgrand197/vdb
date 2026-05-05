@@ -62,6 +62,23 @@ function uniqCategories(values) {
   return out
 }
 
+/** Shared tile for category grid (top-level) and sub-category grid (drilled-in). */
+function CategoryBrowseTile({ title, style, size = 'lg', onClick, details, actions }) {
+  const compact = size === 'sm'
+  return (
+    <div
+      className={`rounded-xl border transition ${compact ? 'px-2.5 py-2 min-h-[70px]' : 'px-3 py-3 min-h-[86px]'}`}
+      style={style}
+    >
+      <button type="button" onClick={onClick} className="w-full text-left">
+        <div className={`font-bold leading-tight ${compact ? 'text-sm' : 'text-base'}`}>{title}</div>
+        {details}
+      </button>
+      {actions}
+    </div>
+  )
+}
+
 function PharmacyCategoriesView() {
   const [medicines, setMedicines] = useState([])
   const [loading, setLoading] = useState(true)
@@ -192,6 +209,21 @@ function PharmacyCategoriesView() {
       return hay.includes(q)
     })
   }, [medicines, selectedCategory, medicineSearch])
+
+  const medicineCountByForm = useMemo(() => {
+    const map = new Map()
+    medicines.forEach((m) => {
+      const f = normalize(m.form)
+      if (!f) return
+      map.set(f, (map.get(f) || 0) + 1)
+    })
+    return map
+  }, [medicines])
+
+  const selectedSubcategories = useMemo(() => {
+    if (!selectedCategory) return []
+    return subcategoriesByParentName.get(normalize(selectedCategory)) || []
+  }, [selectedCategory, subcategoriesByParentName])
 
   function openCategory(name) {
     const clean = (name || '').trim()
@@ -501,27 +533,37 @@ function PharmacyCategoriesView() {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
             {visibleCategories.map((cat) => {
-              const count = medicines.filter((m) => normalize(m.form) === normalize(cat)).length
+              const count = medicineCountByForm.get(normalize(cat)) || 0
               const css = colorForText(cat)
               const isCustom = customCategories.some((c) => normalize(c.name) === normalize(cat))
               const subcats = subcategoriesByParentName.get(normalize(cat)) || []
               return (
-                <div key={cat} className="rounded-xl border px-3 py-3 min-h-[86px] transition" style={css}>
-                  <button type="button" onClick={() => openTopLevelCategory(cat)} className="w-full text-left">
-                    <div className="text-base font-bold leading-tight">{cat}</div>
-                    <div className="text-xs opacity-75 mt-1">{count} items</div>
-                    {subcats.length > 0 && <div className="text-[11px] mt-1 opacity-80">{subcats.length} sub-categories</div>}
-                  </button>
-                  {isCustom && (
-                    <button
-                      type="button"
-                      onClick={() => removeCustomCategory(cat)}
-                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-700"
-                    >
-                      <Trash2 size={12} /> Delete
-                    </button>
-                  )}
-                </div>
+                <CategoryBrowseTile
+                  key={cat}
+                  title={cat}
+                  style={css}
+                  size="lg"
+                  onClick={() => openTopLevelCategory(cat)}
+                  details={
+                    <>
+                      <div className="text-xs opacity-75 mt-1">{count} items</div>
+                      {subcats.length > 0 && (
+                        <div className="text-[11px] mt-1 opacity-80">{subcats.length} sub-categories</div>
+                      )}
+                    </>
+                  }
+                  actions={
+                    isCustom ? (
+                      <button
+                        type="button"
+                        onClick={() => removeCustomCategory(cat)}
+                        className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-700"
+                      >
+                        <Trash2 size={12} /> Delete
+                      </button>
+                    ) : null
+                  }
+                />
               )
             })}
           </div>
@@ -564,24 +606,31 @@ function PharmacyCategoriesView() {
               />
             </div>
           </div>
-          <div className="px-3 py-2 border-b border-slate-100 bg-slate-50/70">
-            <div className="text-[11px] font-semibold text-slate-600 mb-1">Sub-categories</div>
-            <div className="flex flex-wrap gap-1.5">
-              {(subcategoriesByParentName.get(normalize(selectedCategory)) || []).map((sub) => (
-                <button
-                  key={sub.id}
-                  type="button"
-                  onClick={() => openCategory(sub.name)}
-                  className="px-2 py-0.5 rounded-full text-xs border border-indigo-200 text-indigo-700 bg-indigo-50 hover:bg-indigo-100"
-                >
-                  {sub.name}
-                </button>
-              ))}
-              {(subcategoriesByParentName.get(normalize(selectedCategory)) || []).length === 0 && (
-                <span className="text-xs text-slate-500">No sub-categories yet.</span>
-              )}
-            </div>
-            <div className="mt-2 flex items-center gap-2">
+          <div className="px-3 py-2 border-b border-slate-100 bg-slate-50/70 shrink-0">
+            <div className="text-[11px] font-semibold text-slate-600 mb-2">Sub-categories</div>
+            {selectedSubcategories.length === 0 ? (
+              <p className="text-xs text-slate-500 mb-2">No sub-categories yet.</p>
+            ) : (
+              <div className="max-h-[min(40vh,280px)] overflow-y-auto pr-1 -mr-1 mb-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+                  {selectedSubcategories.map((sub) => {
+                    const subCount = medicineCountByForm.get(normalize(sub.name)) || 0
+                    const css = colorForText(sub.name)
+                    return (
+                      <CategoryBrowseTile
+                        key={sub.id}
+                        title={sub.name}
+                        style={css}
+                        size="sm"
+                        onClick={() => openCategory(sub.name)}
+                        details={<div className="text-xs opacity-75 mt-1">{subCount} items</div>}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+            <div className="mt-1 flex flex-wrap items-center gap-2">
               <input
                 value={newCategory}
                 onChange={(e) => setNewCategory(e.target.value)}

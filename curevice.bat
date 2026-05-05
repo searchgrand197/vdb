@@ -28,15 +28,17 @@ echo   2  Install dependencies ^(pip install -r requirements.txt^)
 echo   3  Apply database migrations
 echo   4  Django shell
 echo   5  Create superuser ^(interactive^)
+echo   6  Seed hospital floors / rooms / beds
 echo   0  Exit
 echo ========================================
-set /p choice=Choose [0-5]: 
+set /p choice=Choose [0-6]: 
 
 if "%choice%"=="1" goto runserver
 if "%choice%"=="2" goto install
 if "%choice%"=="3" goto migrate
 if "%choice%"=="4" goto shell
 if "%choice%"=="5" goto superuser
+if "%choice%"=="6" goto seed_beds
 if "%choice%"=="0" goto end
 
 echo Invalid choice.
@@ -69,6 +71,12 @@ goto menu
 :superuser
 echo.
 python manage.py createsuperuser
+if errorlevel 1 pause
+goto menu
+
+:seed_beds
+echo.
+python manage.py seed_beds
 if errorlevel 1 pause
 goto menu
 

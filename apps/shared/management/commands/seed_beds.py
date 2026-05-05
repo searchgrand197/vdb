@@ -26,6 +26,7 @@ STRUCTURE = [
             {"name": "General Ward B", "room_number": "G-02", "type": "ward", "is_ac": False, "charge": 500, "beds": 10},
             {"name": "Shared Room 1", "room_number": "G-03", "type": "shared", "is_ac": True, "charge": 1200, "beds": 2},
             {"name": "Shared Room 2", "room_number": "G-04", "type": "shared", "is_ac": True, "charge": 1200, "beds": 2},
+            {"name": "Extension Ward", "room_number": "G-05", "type": "ward", "is_ac": False, "charge": 500, "beds": 5},
         ],
     },
     {
