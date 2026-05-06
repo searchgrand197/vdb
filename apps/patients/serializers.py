@@ -13,6 +13,7 @@ class PatientSerializer(serializers.ModelSerializer):
     city = serializers.SerializerMethodField()
     state = serializers.SerializerMethodField()
     guardian_name = serializers.SerializerMethodField()
+    guardian_relationship = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
 
     class Meta:
@@ -27,6 +28,7 @@ class PatientSerializer(serializers.ModelSerializer):
             "last_name",
             "gender",
             "dob",
+            "preferred_salutation",
             "age",
             "phone",
             "email",
@@ -39,6 +41,7 @@ class PatientSerializer(serializers.ModelSerializer):
             "city",
             "state",
             "guardian_name",
+            "guardian_relationship",
             "created_at",
             "updated_at",
         ]
@@ -67,6 +70,12 @@ class PatientSerializer(serializers.ModelSerializer):
         except ObjectDoesNotExist:
             return ""
 
+    def get_guardian_relationship(self, obj):
+        try:
+            return (obj.guardian.relationship or "").strip()
+        except ObjectDoesNotExist:
+            return ""
+
     def get_age(self, obj):
         if not obj.dob:
             return None
@@ -84,6 +93,8 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
     city          = serializers.CharField(write_only=True, required=False, allow_blank=True, default="")
     state         = serializers.CharField(write_only=True, required=False, allow_blank=True, default="")
     guardian_name = serializers.CharField(write_only=True, required=False, allow_blank=True, default="")
+    guardian_relationship = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    preferred_salutation = serializers.CharField(required=False, allow_blank=True, default="")
     age           = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     # last_name is optional — single-name patients are valid
     last_name = serializers.CharField(required=False, allow_blank=True, default="")
@@ -103,6 +114,7 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
             "last_name",
             "gender",
             "dob",
+            "preferred_salutation",
             "age",
             "phone",
             "email",
@@ -115,6 +127,7 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
             "city",
             "state",
             "guardian_name",
+            "guardian_relationship",
             "link_with_existing_phone_patients",
         ]
 
@@ -130,16 +143,17 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def _pop_write_only_extras(self, validated_data: dict):
-        """Remove non-Patient keys; return (age, address parts) for side effects."""
+        """Remove non-Patient keys; return (age, address parts, guardian) for side effects."""
         age = validated_data.pop("age", None)
         address_line1 = validated_data.pop("address_line1", None)
         city = validated_data.pop("city", None)
         state = validated_data.pop("state", None)
         guardian_name = validated_data.pop("guardian_name", None)
-        return age, address_line1, city, state, guardian_name
+        guardian_relationship = validated_data.pop("guardian_relationship", None)
+        return age, address_line1, city, state, guardian_name, guardian_relationship
 
     def create(self, validated_data):
-        age, al, ct, st, gn = self._pop_write_only_extras(validated_data)
+        age, al, ct, st, gn, gr = self._pop_write_only_extras(validated_data)
         link = validated_data.pop("link_with_existing_phone_patients", False)
         patient = super().create(validated_data)
 
@@ -160,8 +174,13 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
                 state=st or "",
             )
 
-        if gn:
-            PatientGuardian.objects.create(patient=patient, name=gn)
+        # Avoid creating an empty guardian row when both name and relationship are blank.
+        if ((gn or "").strip()) or (gr is not None and (gr or "").strip()):
+            PatientGuardian.objects.create(
+                patient=patient,
+                name=(gn or "").strip(),
+                relationship=(gr or "").strip() if gr is not None else "",
+            )
 
         if link:
             from apps.patients.services.phone_family import ensure_family_group_for_shared_phone
@@ -172,7 +191,7 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         validated_data.pop("link_with_existing_phone_patients", None)
-        age, al, ct, st, gn = self._pop_write_only_extras(validated_data)
+        age, al, ct, st, gn, gr = self._pop_write_only_extras(validated_data)
         if age is not None:
             try:
                 validated_data["dob"] = date(date.today().year - int(age), 1, 1)
@@ -192,9 +211,15 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
                 addr.state = st
             addr.save()
 
-        if gn is not None:
-            g, _ = PatientGuardian.objects.get_or_create(patient=inst, defaults={"name": ""})
-            g.name = gn
+        if gn is not None or gr is not None:
+            g, _ = PatientGuardian.objects.get_or_create(
+                patient=inst,
+                defaults={"name": "", "relationship": ""},
+            )
+            if gn is not None:
+                g.name = gn
+            if gr is not None:
+                g.relationship = (gr or "").strip()
             g.save()
 
         return inst

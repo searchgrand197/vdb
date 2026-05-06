@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from apps.shared.models import Hospital, TimeStampedModel, UUIDPrimaryKeyModel
 
@@ -42,6 +43,10 @@ class LeaveApprover(TimeStampedModel, UUIDPrimaryKeyModel):
 
 
 class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
+    class OpdFeeMode(models.TextChoices):
+        DOCTOR = "doctor", "Doctor charges currently following"
+        SLOT = "slot", "Slots wise"
+
     hospital = models.OneToOneField(
         Hospital,
         on_delete=models.CASCADE,
@@ -64,6 +69,57 @@ class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     email = models.CharField(max_length=120, blank=True, default="info@vardraanhospital.com")
     website = models.CharField(max_length=200, blank=True, default="www.vardraanhospital.com")
     print_with_background = models.BooleanField(default=True)
+    opd_fee_mode = models.CharField(
+        max_length=10,
+        choices=OpdFeeMode.choices,
+        default=OpdFeeMode.DOCTOR,
+    )
+    opd_fee_slots = models.JSONField(blank=True, default=list)
+
+    @staticmethod
+    def _time_to_minutes(hhmm: str):
+        s = str(hhmm or "").strip()
+        try:
+            hh, mm = s.split(":")[:2]
+            h = int(hh)
+            m = int(mm)
+        except Exception:
+            return None
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            return None
+        return h * 60 + m
+
+    def get_current_opd_slot(self):
+        if self.opd_fee_mode != self.OpdFeeMode.SLOT:
+            return None
+        slots = self.opd_fee_slots or []
+        if not isinstance(slots, list) or not slots:
+            return None
+        now_local = timezone.localtime(timezone.now()).time()
+        mins_now = now_local.hour * 60 + now_local.minute
+        for row in slots:
+            if not isinstance(row, dict):
+                continue
+            start = self._time_to_minutes(row.get("start"))
+            end = self._time_to_minutes(row.get("end"))
+            try:
+                amount = float(row.get("amount", None))
+            except Exception:
+                continue
+            if start is None or end is None or amount < 0:
+                continue
+            in_range = (mins_now >= start and mins_now < end) if start <= end else (mins_now >= start or mins_now < end)
+            if in_range:
+                return {
+                    "start": str(row.get("start") or "")[:5],
+                    "end": str(row.get("end") or "")[:5],
+                    "amount": round(amount, 2),
+                }
+        return None
+
+    def get_current_opd_slot_fee(self):
+        slot = self.get_current_opd_slot()
+        return None if slot is None else slot["amount"]
 
     def __str__(self) -> str:
         return f"Reception settings ({self.hospital_id})"

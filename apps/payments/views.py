@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from apps.auditlogs.services import create_audit_log
 from apps.billing.models import BillingInvoice
 from apps.opd.models import OPDVisit
-from apps.payments.models import CashHandover, PaymentQuickService, PaymentTransaction
+from apps.payments.models import CashHandover, PaymentQuickCategory, PaymentQuickService, PaymentTransaction
 from apps.payments.serializers import PaymentTransactionCreateSerializer, PaymentTransactionSerializer
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.shared.response import success_response
@@ -479,21 +479,33 @@ def verify_handover(request):
 @permission_classes([permissions.IsAuthenticated])
 @transaction.atomic
 def payment_quick_services(request):
+    def _normalize_category(value) -> str:
+        category = str(value or "").strip()
+        return (category or "Custom")[:80]
+
     hospital_id = getattr(request.user, "hospital_id", None)
     if not hospital_id:
         return Response({"success": False, "detail": "Hospital context required."}, status=400)
 
     if request.method == "GET":
-        rows = (
+        service_rows = (
             PaymentQuickService.objects.filter(hospital_id=hospital_id, is_active=True)
+            .order_by("category", "sort_order", "created_at")
+        )
+        category_rows = (
+            PaymentQuickCategory.objects.filter(hospital_id=hospital_id, is_active=True)
             .order_by("sort_order", "created_at")
         )
-        data = [{"label": r.label, "price": float(r.price)} for r in rows]
-        return success_response(data=data)
+        services = [{"label": r.label, "category": r.category or "Custom", "price": float(r.price)} for r in service_rows]
+        categories = [r.name for r in category_rows]
+        return success_response(data={"services": services, "categories": categories})
 
     services = request.data.get("services")
     if not isinstance(services, list):
         return Response({"success": False, "errors": {"services": ["Must be a list."]}}, status=400)
+    category_names = request.data.get("categories")
+    if category_names is not None and not isinstance(category_names, list):
+        return Response({"success": False, "errors": {"categories": ["Must be a list."]}}, status=400)
 
     PaymentQuickService.objects.filter(hospital_id=hospital_id).delete()
     create_rows = []
@@ -501,6 +513,7 @@ def payment_quick_services(request):
         label = str((row or {}).get("label") or "").strip()
         if not label:
             continue
+        category = _normalize_category((row or {}).get("category"))
         try:
             price = Decimal(str((row or {}).get("price") or "0"))
         except Exception:
@@ -511,6 +524,7 @@ def payment_quick_services(request):
             PaymentQuickService(
                 hospital_id=hospital_id,
                 label=label[:120],
+                category=category,
                 price=price,
                 sort_order=idx,
                 is_active=True,
@@ -518,5 +532,32 @@ def payment_quick_services(request):
         )
     if create_rows:
         PaymentQuickService.objects.bulk_create(create_rows)
-    data = [{"label": r.label, "price": float(r.price)} for r in create_rows]
-    return success_response(data=data)
+
+    normalized_categories = []
+    if isinstance(category_names, list):
+        for idx, name in enumerate(category_names):
+            normalized = _normalize_category(name)
+            if normalized and normalized not in normalized_categories:
+                normalized_categories.append(normalized)
+    for row in create_rows:
+        normalized = _normalize_category(row.category)
+        if normalized and normalized not in normalized_categories:
+            normalized_categories.append(normalized)
+    if "Custom" not in normalized_categories:
+        normalized_categories.insert(0, "Custom")
+
+    PaymentQuickCategory.objects.filter(hospital_id=hospital_id).delete()
+    PaymentQuickCategory.objects.bulk_create(
+        [
+            PaymentQuickCategory(
+                hospital_id=hospital_id,
+                name=name,
+                sort_order=idx,
+                is_active=True,
+            )
+            for idx, name in enumerate(normalized_categories)
+        ]
+    )
+
+    services_data = [{"label": r.label, "category": r.category or "Custom", "price": float(r.price)} for r in create_rows]
+    return success_response(data={"services": services_data, "categories": normalized_categories})

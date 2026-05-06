@@ -128,7 +128,7 @@ class UnitViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         unit = serializer.save(pharmacy_id=pharmacy.id)
         create_audit_log(
             request=self.request,
-            pharmacy=unit.pharmacy,
+            hospital=unit.pharmacy.hospital,
             module="inventory",
             action="create_unit",
             obj=unit,
@@ -223,7 +223,7 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
         create_audit_log(
             request=self.request,
-            pharmacy=medicine.pharmacy,
+            hospital=medicine.pharmacy.hospital,
             module="inventory",
             action="create_medicine",
             obj=medicine,
@@ -336,7 +336,7 @@ class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         batch = serializer.save(pharmacy_id=pharmacy.id)
         create_audit_log(
             request=self.request,
-            pharmacy=batch.pharmacy,
+            hospital=batch.pharmacy.hospital,
             module="inventory",
             action="create_batch",
             obj=batch,
@@ -371,7 +371,7 @@ class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         )
         create_audit_log(
             request=request,
-            pharmacy=instance.pharmacy,
+            hospital=instance.pharmacy.hospital,
             module="inventory",
             action="delete_batch",
             obj=instance,
@@ -470,7 +470,7 @@ class StockLedgerViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
         create_audit_log(
             request=self.request,
-            pharmacy=pharmacy,
+            hospital=pharmacy.hospital,
             module="inventory",
             action="create_stock_ledger",
             obj=entry,

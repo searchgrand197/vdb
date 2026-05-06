@@ -15,6 +15,7 @@ from apps.opd.services import resolve_opd_doctor_name
 from apps.patients.models import Patient
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
+from apps.settings_management.models import ReceptionPortalSettings
 from apps.shared.response import success_response
 
 
@@ -72,6 +73,12 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
             raise ValidationError({"patient": ["Patient does not belong to your hospital."]})
         visit_date = serializer.validated_data.get("visit_date")
 
+        settings_obj, _ = ReceptionPortalSettings.objects.get_or_create(
+            hospital_id=patient.hospital_id,
+            defaults={"default_city": "Jind", "default_state": "Haryana"},
+        )
+        slot_fee = settings_obj.get_current_opd_slot_fee()
+
         # Auto-assign queue number per hospital + visit_date (global daily counter, resets each day).
         qs = OPDVisit.objects.filter(
             hospital_id=patient.hospital_id,
@@ -82,7 +89,8 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
         visit = serializer.save(
             hospital_id=patient.hospital_id, 
             queue_number=next_queue,
-            created_by=self.request.user
+            created_by=self.request.user,
+            **({"amount": slot_fee} if slot_fee is not None else {}),
         )
         create_audit_log(
             request=self.request,
