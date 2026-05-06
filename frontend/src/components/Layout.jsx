@@ -20,9 +20,9 @@ const GRADIENT_MAP = {
 export default function Layout({ title, subtitle, color = 'blue', children, tabs, activeTab, onTab, headerExtra, noScroll }) {
   const nav = useNavigate()
 
-  async function logout() {
-    await useAuthStore.getState().logout()
-    nav('/login')
+  function logout() {
+    useAuthStore.getState().logoutSilent()
+    window.location.replace('/login')
   }
 
   const handleTabChange = (_, newValue) => {

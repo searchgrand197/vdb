@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import axios from 'axios';
 import api from '@/api';
 
 function readBootAuthState() {
@@ -197,16 +198,14 @@ export const useAuthStore = create(
         return { user, tokens: { access: accessToken, refresh: refreshToken } };
       },
 
-      /** Logout: clear state + attempt server-side token invalidation */
+      /**
+       * Logout: clear local session immediately (so redirects cannot race stale tokens),
+       * then best-effort server-side refresh invalidation using captured tokens.
+       */
       logout: async () => {
         const { tokens } = get();
-        try {
-          if (tokens.refresh) {
-            await api.post('/auth/logout/', { refresh_token: tokens.refresh });
-          }
-        } catch {
-          // Still clear local session even if server logout fails
-        }
+        const refreshToken = tokens.refresh;
+        const accessToken = tokens.access;
         const clearedState = {
           user: null,
           tokens: { access: null, refresh: null },
@@ -216,6 +215,44 @@ export const useAuthStore = create(
         };
         set(clearedState);
         syncToLegacyKeys(clearedState);
+        if (refreshToken) {
+          try {
+            await axios.post(
+              '/api/v1/auth/logout/',
+              { refresh_token: refreshToken },
+              accessToken ? { headers: { Authorization: `Bearer ${accessToken}` } } : undefined
+            );
+          } catch {
+            // ignore — session already cleared locally
+          }
+        }
+      },
+
+      /**
+       * Silent logout: wipes localStorage WITHOUT calling set(), so no React
+       * subscriber is notified and no re-render occurs.  The caller must
+       * immediately do window.location.replace('/login') so the page reloads
+       * and Zustand re-hydrates from the now-empty storage as unauthenticated.
+       * Also fires a best-effort server-side refresh invalidation.
+       */
+      logoutSilent: () => {
+        const { tokens } = get();
+        // Clear the Zustand persist key and all legacy keys directly.
+        // No set() → no Zustand subscriber notification → no React re-render.
+        const KEYS = [
+          'hms-auth',
+          'access', 'refresh', 'role', 'user',
+          'pharmacy_branch_id', 'pharmacy_branch_label',
+        ];
+        KEYS.forEach((k) => localStorage.removeItem(k));
+        // Best-effort server-side invalidation (fire-and-forget)
+        if (tokens.refresh) {
+          axios.post(
+            '/api/v1/auth/logout/',
+            { refresh_token: tokens.refresh },
+            tokens.access ? { headers: { Authorization: `Bearer ${tokens.access}` } } : undefined
+          ).catch(() => {});
+        }
       },
 
       /** Update tokens (used by api.js interceptors for token refresh) */

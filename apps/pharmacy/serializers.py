@@ -23,6 +23,8 @@ class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
             "website",
             "default_gst_percent",
             "default_sale_discount_percent",
+            "b2b_enabled",
+            "low_stock_threshold",
             "created_at",
             "updated_at",
         )
@@ -100,8 +102,19 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
     patient_details = PatientSerializer(source="patient", read_only=True)
     doctor_details = DoctorProfileSerializer(source="referred_by", read_only=True)
     due_amount = serializers.SerializerMethodField()
+    party_name = serializers.CharField(source="party.name", read_only=True, default="")
 
     def validate(self, attrs: dict) -> dict:
+        # Require either patient or party (but not both absent)
+        patient = attrs.get("patient", getattr(self.instance, "patient", None))
+        party = attrs.get("party", getattr(self.instance, "party", None))
+        if patient is None and party is None:
+            raise serializers.ValidationError({"detail": ["Either a patient or a B2B party must be provided."]})
+
+        # Snapshot party name at save time
+        if party is not None:
+            attrs.setdefault("party_name_snapshot", getattr(party, "name", "") or "")
+
         gst_on = attrs.get("gst_enabled")
         if gst_on is None and self.instance is not None:
             gst_on = self.instance.gst_enabled
@@ -135,6 +148,9 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "id",
             "patient",
             "patient_details",
+            "party",
+            "party_name",
+            "party_name_snapshot",
             "referred_by",
             "doctor_details",
             "invoice_no",
@@ -157,6 +173,8 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             # Generated in PharmacyInvoiceViewSet.perform_create if omitted.
             "invoice_no": {"required": False, "allow_blank": True},
+            "patient": {"allow_null": True},
+            "party": {"allow_null": True},
         }
 
 

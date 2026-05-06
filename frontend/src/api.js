@@ -51,8 +51,8 @@ api.interceptors.response.use(
       originalRequest._retry = true;
       const { tokens } = useAuthStore.getState();
       if (!tokens.refresh) {
-        useAuthStore.getState().logout();
-        window.location.href = '/login';
+        useAuthStore.getState().logoutSilent();
+        window.location.replace('/login');
         return Promise.reject(err);
       }
 
@@ -69,8 +69,8 @@ api.interceptors.response.use(
             return access;
           })
           .catch(refreshErr => {
-            useAuthStore.getState().logout();
-            window.location.href = '/login';
+            useAuthStore.getState().logoutSilent();
+            window.location.replace('/login');
             return Promise.reject(refreshErr);
           })
           .finally(() => {

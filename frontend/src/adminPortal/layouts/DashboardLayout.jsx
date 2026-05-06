@@ -17,6 +17,7 @@ import MenuIcon from '@mui/icons-material/Menu';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
 import { NAV_ITEMS } from '@/constants/navigation';
 import { useAuth } from '@admin/context/AuthContext';
+import { useAuthStore } from '@/stores/authStore';
 import { userHasRole } from '@/utils/roleUtils';
 import { AppButton } from '@/components/AppButton';
 
@@ -28,9 +29,9 @@ export function DashboardLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const handleLogout = async () => {
-    await logout();
-    navigate('/login');
+  const handleLogout = () => {
+    useAuthStore.getState().logoutSilent();
+    window.location.replace('/login');
   };
 
   const visibleNav = NAV_ITEMS.filter((item) => userHasRole(user, item.roles));

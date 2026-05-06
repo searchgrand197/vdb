@@ -95,9 +95,9 @@ export default function LabPortal() {
     }
   }
 
-  async function handleLogout() {
-    await useAuthStore.getState().logout()
-    window.location.href = '/login'
+  function handleLogout() {
+    useAuthStore.getState().logoutSilent()
+    window.location.replace('/login')
   }
 
   return (

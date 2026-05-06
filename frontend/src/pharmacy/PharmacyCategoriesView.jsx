@@ -1,46 +1,70 @@
 import React, { memo, useEffect, useMemo, useState } from 'react'
-import { Search, Plus, Pill, Trash2, ArrowLeft, Package } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Search, Plus, Pill, Trash2, ArrowLeft, Folder, Pencil, CheckCircle2, X, ChevronRight } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../api'
-import {
-  CATEGORY_RULE_REFERENCE,
-  presetRuleForForm,
-  normalizeCategoryName,
-  DEFAULT_CATEGORY_RULE,
-} from './categoryRulePresets'
-
-const RULE_TYPE_OPTIONS = [
-  { value: 'strip_based', label: 'Strip-based (allow loose sale)' },
-  { value: 'liquid', label: 'Liquid (no loose sale)' },
-  { value: 'flexible', label: 'Flexible (outer + retail + base)' },
-  { value: 'unit_only', label: 'Unit only' },
-]
-
-const DEFAULT_CATEGORIES = [
-  'Tablet', 'Syrup', 'Capsule', 'Injection', 'Cream', 'Powder', 'Drops', 'Surgicals', 'Liquid', 'Gel',
-  'Suspension', 'Lotion', 'Diaper', 'Soap', 'Oil', 'Ointment', 'Kit', 'Bandage', 'Device', 'Spray',
-  'Shampoo', 'Sachet', 'Facewash', 'Packet', 'Bottle', 'Solution', 'Condom', 'Sanitary Pad', 'Unit', 'Infusion',
-  'Box', 'Elixir', 'Paste', 'Bolus', 'Balm', 'Respule', 'Toothpaste', 'Inhaler', 'Toothbrush', 'Serum',
-  'Syringe', 'Paint', 'Churna', 'Granules', 'Face Mask', 'Jelly', 'Deodorant', 'Strip', 'Plaster', 'Wipe',
-  'Roll On', 'Gummies', 'Chyawanprash', 'Mouthwash', 'Tube', 'Pouch', 'Wash', 'Rotacap', 'Vaccine', 'Suppository',
-  'Patch', 'Jar', 'Water', 'Card', 'Expectorant', 'Razor', 'Lozenges', 'Honey', 'Thermometer', 'Tincture',
-  'Conditioner', 'Bar', 'Nebulisers', 'Handwash', 'Liniment', 'Foam', 'Gargle', 'Vial', 'Moisturiser', 'Gum',
-  'Scrub', 'Ampules', 'Cleanser', 'Particles', 'Adhesive', 'Lozenge', 'Diskette', 'Pen', 'Pastilles', 'Soflets',
-  'Transcap', 'Tonic', 'Grains', 'Linctus', 'Pellet', 'Respicap', 'Pessaries', 'Cartrige', 'Husk', 'Emulsion',
-  'Pessary', 'Enema', 'Gummy', 'Lacquer', 'Rotahaler', 'Instacap', 'Captabs', 'Aerosol', 'Film', 'Redicap',
-  'Novocart', 'Opticops', 'Solvent', 'Tabcaps', 'Particle', 'Rapitab', 'Caplets', 'Intrauterine System', 'Transpule',
-  'Transhaler', 'Vegicaps', 'Aquanase', 'Autopen', 'Multihaler', 'Oxipule', 'Autohaler', 'Alicaps', 'Rheocap',
-  'Nexcaps', 'Oxycaps',
-]
+import { presetRuleForForm, normalizeCategoryName } from './categoryRulePresets'
+import { mergeCategoryNames } from './pharmacyCategoryNames'
 
 function colorForText(text) {
   let hash = 0
   for (let i = 0; i < text.length; i += 1) hash = text.charCodeAt(i) + ((hash << 5) - hash)
   const hue = Math.abs(hash) % 360
   return {
-    backgroundColor: `hsl(${hue} 85% 94%)`,
-    borderColor: `hsl(${hue} 70% 76%)`,
-    color: `hsl(${hue} 60% 30%)`,
+    backgroundColor: `hsl(${hue} 88% 78%)`,
+    borderColor: `hsl(${hue} 78% 52%)`,
+    color: `hsl(${hue} 58% 20%)`,
+  }
+}
+
+function hueForText(text) {
+  let hash = 0
+  const source = String(text || '')
+  for (let i = 0; i < source.length; i += 1) hash = source.charCodeAt(i) + ((hash << 5) - hash)
+  return Math.abs(hash) % 360
+}
+
+function hslToHex(h, s, l) {
+  const sat = s / 100
+  const light = l / 100
+  const c = (1 - Math.abs(2 * light - 1)) * sat
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = light - c / 2
+  let r = 0
+  let g = 0
+  let b = 0
+  if (h < 60) [r, g, b] = [c, x, 0]
+  else if (h < 120) [r, g, b] = [x, c, 0]
+  else if (h < 180) [r, g, b] = [0, c, x]
+  else if (h < 240) [r, g, b] = [0, x, c]
+  else if (h < 300) [r, g, b] = [x, 0, c]
+  else [r, g, b] = [c, 0, x]
+  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, '0')
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase()
+}
+
+function defaultHexColorForText(text) {
+  return hslToHex(hueForText(text), 78, 52)
+}
+
+function normalizeHexColor(value) {
+  const raw = (value || '').trim().toUpperCase()
+  if (!raw) return ''
+  if (!/^#[0-9A-F]{6}$/.test(raw)) return ''
+  return raw
+}
+
+function colorForCategory(cat) {
+  const custom = normalizeHexColor(cat?.color)
+  if (!custom) return colorForText(cat?.name || '')
+  const r = Number.parseInt(custom.slice(1, 3), 16)
+  const g = Number.parseInt(custom.slice(3, 5), 16)
+  const b = Number.parseInt(custom.slice(5, 7), 16)
+  return {
+    backgroundColor: `rgba(${r}, ${g}, ${b}, 0.22)`,
+    borderColor: custom,
+    // Keep text dark because the folder body is intentionally pastel/light.
+    color: '#0F172A',
   }
 }
 
@@ -48,62 +72,177 @@ function normalize(v) {
   return (v || '').trim().toLowerCase()
 }
 
-function uniqCategories(values) {
-  const out = []
-  const seen = new Set()
-  values.forEach((v) => {
-    const raw = (v || '').trim()
-    if (!raw) return
-    const key = raw.toLowerCase()
-    if (seen.has(key)) return
-    seen.add(key)
-    out.push(raw)
-  })
-  return out
+function parseApiErrorMessage(error, fallbackMessage) {
+  const data = error?.response?.data
+  const errors = data?.errors
+  const detail = errors?.detail || data?.detail
+  if (Array.isArray(detail)) return detail[0] || fallbackMessage
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (typeof errors === 'string' && errors.trim()) return errors
+  return fallbackMessage
 }
 
 /** Shared tile for category grid (top-level) and sub-category grid (drilled-in). */
-function CategoryBrowseTile({ title, style, size = 'lg', onClick, details, actions }) {
+function CategoryBrowseTile({ title, style, size = 'lg', onClick, details, actions, selectable = false, selected = false, onSelect }) {
   const compact = size === 'sm'
+  const folderBg = style?.backgroundColor || '#eef2ff'
+  const folderText = style?.color || '#1e293b'
+  const folderBorder = style?.borderColor || '#c7d2fe'
   return (
-    <div
-      className={`rounded-xl border transition ${compact ? 'px-2.5 py-2 min-h-[70px]' : 'px-3 py-3 min-h-[86px]'}`}
-      style={style}
-    >
-      <button type="button" onClick={onClick} className="w-full text-left">
-        <div className={`font-bold leading-tight ${compact ? 'text-sm' : 'text-base'}`}>{title}</div>
-        {details}
-      </button>
-      {actions}
+    <div className={`relative ${compact ? 'min-h-[120px]' : 'min-h-[138px]'} transition`}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onClick?.()
+          }
+        }}
+        className="w-full text-left group cursor-pointer"
+      >
+        <div className={`relative ${compact ? 'h-20' : 'h-24'}`}>
+          <div
+            className={`absolute left-1.5 top-0 rounded-t-md border-2 border-b-0 ${compact ? 'w-12 h-3.5' : 'w-14 h-4'}`}
+            style={{ backgroundColor: folderBg, borderColor: folderBorder }}
+          />
+          <div
+            className={`absolute inset-x-0 bottom-0 rounded-md border-2 ${compact ? 'h-16' : 'h-20'} group-hover:brightness-95`}
+            style={{ backgroundColor: folderBg, borderColor: folderBorder }}
+          />
+          {selectable && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSelect?.()
+              }}
+              className={`absolute z-20 left-2 bottom-2 w-5 h-5 rounded-full border-2 shadow-sm flex items-center justify-center ${
+                selected
+                  ? 'border-emerald-600 bg-white text-emerald-600'
+                  : 'border-slate-300 bg-white text-transparent hover:border-slate-400'
+              }`}
+              title={selected ? 'Selected' : 'Select'}
+            >
+              <CheckCircle2 size={13} />
+            </button>
+          )}
+          <div className={`absolute left-2.5 ${compact ? 'top-4.5' : 'top-5'} opacity-70`} style={{ color: folderText }}>
+            <Folder size={compact ? 13 : 15} />
+          </div>
+        </div>
+        <div className={`${compact ? 'mt-0.5 px-0.5' : 'mt-1 px-0.5'} overflow-hidden`} style={{ color: folderText }}>
+          <div className={`font-bold leading-tight truncate ${compact ? 'text-[12px]' : 'text-[13px]'}`}>{title}</div>
+          <div className={`opacity-90 leading-tight ${compact ? 'text-[11px] mt-0.5' : 'text-[12px] mt-0.5'}`}>{details}</div>
+        </div>
+      </div>
+      {actions && <div className="mt-1">{actions}</div>}
     </div>
   )
 }
 
-function PharmacyCategoriesView() {
+/** Recursive tree rows — mirrors CategoryPickerTreeRows in PharmacyPortal */
+function CatTreeRows({ nodes, depth, childrenOf, expandedIds, onToggle, onSelect }) {
+  if (!nodes?.length) return null
+  return nodes.map((r) => {
+    const id = String(r.id)
+    const kids = childrenOf.get(id) || []
+    const hasKids = kids.length > 0
+    const expanded = expandedIds.has(id)
+    return (
+      <div key={id}>
+        <div className="flex items-center min-h-[28px] pr-1" style={{ paddingLeft: `${8 + depth * 12}px` }}>
+          <div className="w-6 shrink-0 flex items-center justify-center">
+            {hasKids ? (
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={(e) => { e.stopPropagation(); onToggle(id) }}
+                className="p-0.5 rounded hover:bg-slate-100 text-slate-600"
+              >
+                <ChevronRight
+                  size={14}
+                  className="text-slate-500 transition-transform duration-150"
+                  style={{ transform: expanded ? 'rotate(90deg)' : 'none' }}
+                />
+              </button>
+            ) : (
+              <span className="inline-block w-4 shrink-0" />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => onSelect(r)}
+            className="flex-1 text-left text-[11px] py-1 px-1 rounded hover:bg-slate-50 text-slate-800 truncate min-w-0"
+          >
+            {r.name}
+          </button>
+        </div>
+        {hasKids && expanded && (
+          <CatTreeRows
+            nodes={kids}
+            depth={depth + 1}
+            childrenOf={childrenOf}
+            expandedIds={expandedIds}
+            onToggle={onToggle}
+            onSelect={onSelect}
+          />
+        )}
+      </div>
+    )
+  })
+}
+
+function PharmacyCategoriesView({ batches = [] }) {
   const [medicines, setMedicines] = useState([])
   const [loading, setLoading] = useState(true)
   const [categoriesLoading, setCategoriesLoading] = useState(true)
   const [categorySearch, setCategorySearch] = useState('')
   const [medicineSearch, setMedicineSearch] = useState('')
-  const [categoryStack, setCategoryStack] = useState([])
+  const [categoryPath, setCategoryPath] = useState([])
   const [customCategories, setCustomCategories] = useState([])
   const [newCategory, setNewCategory] = useState('')
-  const [newCategoryParentId, setNewCategoryParentId] = useState('')
-  const [rulesCategory, setRulesCategory] = useState('')
-  const [rulesDraft, setRulesDraft] = useState({ ...DEFAULT_CATEGORY_RULE })
-  const [rulesSaving, setRulesSaving] = useState(false)
+  const [actionMode, setActionMode] = useState('none') // none | edit | delete
+  const [deleteSelection, setDeleteSelection] = useState([])
+  const [editModalOpen, setEditModalOpen] = useState(false)
+  const [editingCategory, setEditingCategory] = useState(null)
+  const [editName, setEditName] = useState('')
+  const [editColor, setEditColor] = useState('')
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [medicineSelection, setMedicineSelection] = useState([])
+  const [moveModalOpen, setMoveModalOpen] = useState(false)
+  const [moveToCategory, setMoveToCategory] = useState('')
+  const [moving, setMoving] = useState(false)
+  const [deletingMeds, setDeletingMeds] = useState(false)
 
-  const selectedCategory = categoryStack[categoryStack.length - 1] || ''
+  // Tree picker state for Move modal
+  const [moveCatPickerOpen, setMoveCatPickerOpen] = useState(false)
+  const [moveCatSearch, setMoveCatSearch] = useState('')
+  const [moveCatExpandedIds, setMoveCatExpandedIds] = useState(() => new Set())
+
+  const selectedCategoryNode = categoryPath[categoryPath.length - 1] || null
+  const selectedCategory = selectedCategoryNode?.name || ''
+
+  const fetchCategories = useMemo(
+    () => () =>
+      api
+        .get('/medicine-categories/?limit=1000')
+        .then((res) => {
+          const list = res.data?.data || res.data?.results || []
+          setCustomCategories(Array.isArray(list) ? list : [])
+          return Array.isArray(list) ? list : []
+        }),
+    [],
+  )
 
   useEffect(() => {
     let cancelled = false
     setCategoriesLoading(true)
-    api
-      .get('/medicine-categories/?limit=1000')
+    fetchCategories()
       .then((res) => {
         if (cancelled) return
-        const list = res.data?.data || res.data?.results || []
-        setCustomCategories(Array.isArray(list) ? list : [])
+        setCustomCategories(Array.isArray(res) ? res : [])
       })
       .catch(() => {
         if (!cancelled) toast.error('Failed to load categories')
@@ -114,24 +253,7 @@ function PharmacyCategoriesView() {
     return () => {
       cancelled = true
     }
-  }, [])
-
-  useEffect(() => {
-    if (!rulesCategory) {
-      setRulesDraft({ ...DEFAULT_CATEGORY_RULE })
-      return
-    }
-    const preset = presetRuleForForm(rulesCategory)
-    const row = customCategories.find((c) => normalizeCategoryName(c.name) === normalizeCategoryName(rulesCategory))
-    setRulesDraft({
-      rule_type: row?.rule_type || preset.rule_type,
-      allow_loose_sale:
-        typeof row?.allow_loose_sale === 'boolean' ? row.allow_loose_sale : preset.allow_loose_sale,
-      base_unit_label: (row?.base_unit_label || '').trim() || preset.base_unit_label,
-      retail_pack_label: (row?.retail_pack_label ?? preset.retail_pack_label) || '',
-      outer_pack_label: (row?.outer_pack_label ?? preset.outer_pack_label) || '',
-    })
-  }, [rulesCategory, customCategories])
+  }, [fetchCategories])
 
   useEffect(() => {
     let cancelled = false
@@ -154,19 +276,16 @@ function PharmacyCategoriesView() {
     }
   }, [])
 
-  const categories = useMemo(() => {
-    const fromMedicines = medicines.map((m) => m.form).filter(Boolean)
-    const fromApi = customCategories
-      .filter((c) => !c.parent)
-      .map((c) => c.name)
-      .filter(Boolean)
-    return uniqCategories([...DEFAULT_CATEGORIES, ...fromMedicines, ...fromApi])
-  }, [medicines, customCategories])
+  const categories = useMemo(() => mergeCategoryNames(medicines, customCategories), [medicines, customCategories])
 
-  const topLevelCustomCategories = useMemo(
-    () => customCategories.filter((c) => !c.parent),
-    [customCategories],
-  )
+  const categoriesById = useMemo(() => {
+    const map = new Map()
+    customCategories.forEach((cat) => {
+      if (cat?.id == null) return
+      map.set(String(cat.id), cat)
+    })
+    return map
+  }, [customCategories])
 
   const subcategoriesByParentName = useMemo(() => {
     const map = new Map()
@@ -180,17 +299,101 @@ function PharmacyCategoriesView() {
     return map
   }, [customCategories])
 
-  const categoryByName = useMemo(() => {
+  const subcategoriesByParentId = useMemo(() => {
     const map = new Map()
     customCategories.forEach((cat) => {
-      const key = normalize(cat.name)
-      if (!key || map.has(key)) return
-      map.set(key, cat)
+      if (!cat.parent) return
+      const key = String(cat.parent)
+      if (!map.has(key)) map.set(key, [])
+      map.get(key).push(cat)
     })
     return map
   }, [customCategories])
 
-  const selectedCategoryRow = selectedCategory ? categoryByName.get(normalize(selectedCategory)) : null
+  const selectedCategoryRow = useMemo(() => {
+    if (!selectedCategoryNode?.id) return null
+    return categoriesById.get(String(selectedCategoryNode.id)) || null
+  }, [selectedCategoryNode, categoriesById])
+  const categoryBreadcrumb = useMemo(
+    () => categoryPath.map((node) => node?.name || '').filter(Boolean).join(' / '),
+    [categoryPath],
+  )
+  const managedMoveCategoryOptions = useMemo(() => {
+    const getLabel = (row) => {
+      const parts = [row.name]
+      let parentId = row.parent ? String(row.parent) : ''
+      while (parentId) {
+        const p = categoriesById.get(parentId)
+        if (!p) break
+        parts.unshift(p.name)
+        parentId = p.parent ? String(p.parent) : ''
+      }
+      return parts.join(' / ')
+    }
+    return customCategories
+      .map((row) => ({ value: `id:${row.id}`, label: getLabel(row), id: String(row.id) }))
+      .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+  }, [customCategories, categoriesById])
+
+  // Tree structure for the picker
+  const { treeRoots, treeChildrenOf, treeIdToRow } = useMemo(() => {
+    const idToRow = new Map()
+    customCategories.forEach((c) => { if (c?.id) idToRow.set(String(c.id), c) })
+    const childrenOf = new Map()
+    const roots = []
+    customCategories.forEach((c) => {
+      if (!c?.id) return
+      if (c.parent) {
+        const pk = String(c.parent)
+        if (!childrenOf.has(pk)) childrenOf.set(pk, [])
+        childrenOf.get(pk).push(c)
+      } else {
+        roots.push(c)
+      }
+    })
+    return { treeRoots: roots, treeChildrenOf: childrenOf, treeIdToRow: idToRow }
+  }, [customCategories])
+
+  const moveCatSelectedRow = useMemo(() => {
+    if (!moveToCategory.startsWith('id:')) return null
+    return treeIdToRow.get(moveToCategory.slice(3)) || null
+  }, [moveToCategory, treeIdToRow])
+
+  const moveCatBreadcrumb = useMemo(() => {
+    if (!moveCatSelectedRow) return ''
+    const parts = [moveCatSelectedRow.name]
+    let parentId = moveCatSelectedRow.parent ? String(moveCatSelectedRow.parent) : ''
+    while (parentId) {
+      const p = treeIdToRow.get(parentId)
+      if (!p) break
+      parts.unshift(p.name)
+      parentId = p.parent ? String(p.parent) : ''
+    }
+    return parts.join(' › ')
+  }, [moveCatSelectedRow, treeIdToRow])
+
+  const moveCatFilteredOptions = useMemo(() => {
+    const q = moveCatSearch.trim().toLowerCase()
+    return managedMoveCategoryOptions.filter(
+      (o) => !q || o.label.toLowerCase().includes(q),
+    )
+  }, [managedMoveCategoryOptions, moveCatSearch])
+
+  function selectMoveCatRow(row) {
+    if (!row?.id) return
+    setMoveToCategory(`id:${row.id}`)
+    setMoveCatPickerOpen(false)
+    setMoveCatSearch('')
+  }
+
+  function toggleMoveCatExpand(id) {
+    setMoveCatExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(String(id))) next.delete(String(id))
+      else next.add(String(id))
+      return next
+    })
+  }
 
   const visibleCategories = useMemo(() => {
     const q = normalize(categorySearch)
@@ -202,13 +405,16 @@ function PharmacyCategoriesView() {
     const q = normalize(medicineSearch)
     if (!selectedCategory) return []
     return medicines.filter((m) => {
-      const inCategory = normalize(m.form) === normalize(selectedCategory)
+      if (m?.is_active === false) return false
+      const inCategory = selectedCategoryRow?.id
+        ? String(m.category || '') === String(selectedCategoryRow.id)
+        : normalize(m.form) === normalize(selectedCategory)
       if (!inCategory) return false
       if (!q) return true
       const hay = `${m.name || ''} ${m.sku || ''} ${m.pack_info || ''} ${m.hsn_code || ''}`.toLowerCase()
       return hay.includes(q)
     })
-  }, [medicines, selectedCategory, medicineSearch])
+  }, [medicines, selectedCategory, selectedCategoryRow, medicineSearch])
 
   const medicineCountByForm = useMemo(() => {
     const map = new Map()
@@ -222,22 +428,68 @@ function PharmacyCategoriesView() {
 
   const selectedSubcategories = useMemo(() => {
     if (!selectedCategory) return []
+    if (selectedCategoryRow?.id) {
+      return subcategoriesByParentId.get(String(selectedCategoryRow.id)) || []
+    }
     return subcategoriesByParentName.get(normalize(selectedCategory)) || []
-  }, [selectedCategory, subcategoriesByParentName])
+  }, [selectedCategory, selectedCategoryRow, subcategoriesByParentId, subcategoriesByParentName])
 
-  function openCategory(name) {
-    const clean = (name || '').trim()
-    if (!clean) return
-    setCategoryStack((prev) => {
-      if (normalize(prev[prev.length - 1] || '') === normalize(clean)) return prev
-      return [...prev, clean]
+  function childCountForCategoryName(name) {
+    const normalizedName = normalize(name)
+    if (!normalizedName) return 0
+    // Prefer exact parent-id based counting for managed categories.
+    const candidateRows = customCategories.filter((c) => normalize(c.name) === normalizedName)
+    if (candidateRows.length > 0) {
+      const seen = new Set()
+      candidateRows.forEach((row) => {
+        const list = subcategoriesByParentId.get(String(row.id)) || []
+        list.forEach((sub) => seen.add(String(sub.id)))
+      })
+      return seen.size
+    }
+    // Fallback for default/non-managed categories.
+    return (subcategoriesByParentName.get(normalizedName) || []).length
+  }
+
+  function childCountForTopLevelTile(tileName, topLevelRow) {
+    if (topLevelRow?.id) {
+      return (subcategoriesByParentId.get(String(topLevelRow.id)) || []).length
+    }
+    return childCountForCategoryName(tileName)
+  }
+
+  const topLevelRowByName = useMemo(() => {
+    const map = new Map()
+    customCategories.forEach((cat) => {
+      if (cat?.parent) return
+      const key = normalize(cat.name)
+      if (!key || map.has(key)) return
+      map.set(key, cat)
+    })
+    return map
+  }, [customCategories])
+
+  function openCategory(row, fallbackName = '') {
+    const cleanName = (row?.name || fallbackName || '').trim()
+    if (!cleanName) return
+    setCategoryPath((prev) => {
+      const last = prev[prev.length - 1]
+      const nextNode = { id: row?.id ? String(row.id) : null, name: cleanName }
+      if (
+        last &&
+        String(last.id || '') === String(nextNode.id || '') &&
+        normalize(last.name) === normalize(nextNode.name)
+      ) {
+        return prev
+      }
+      return [...prev, nextNode]
     })
   }
 
-  function openTopLevelCategory(name) {
-    const clean = (name || '').trim()
+  function openTopLevelCategory(row, fallbackName = '') {
+    const clean = (row?.name || fallbackName || '').trim()
     if (!clean) return
-    setCategoryStack([clean])
+    setCategoryPath([{ id: row?.id ? String(row.id) : null, name: clean }])
   }
 
   async function addCategory({ parentId = null, parentName = '' } = {}) {
@@ -245,8 +497,9 @@ function PharmacyCategoriesView() {
     if (!raw) return
     const duplicate = customCategories.some((c) => {
       if (normalize(c.name) !== normalize(raw)) return false
+      if (parentId) return String(c.parent || '') === String(parentId)
       const cParentName = normalize(c.parent_name || '')
-      return cParentName === normalize(parentName)
+      return !c.parent && cParentName === normalize(parentName)
     })
     if (duplicate || (!parentId && categories.some((c) => normalize(c) === normalize(raw)))) {
       toast('Category already exists')
@@ -257,18 +510,49 @@ function PharmacyCategoriesView() {
     try {
       const res = await api.post('/medicine-categories/', payload)
       const created = res.data?.data || res.data
-      setCustomCategories((prev) => [...prev, created])
+      // POST response may omit derived fields like parent_name; enrich so UI can
+      // immediately show the new node in sub-category tiles without refresh.
+      const createdNormalized = {
+        ...created,
+        name: (created?.name || raw).trim(),
+        parent: created?.parent ?? parentId ?? null,
+        parent_name: (created?.parent_name || parentName || '').trim(),
+      }
+      setCustomCategories((prev) => [...prev, createdNormalized])
+      if (!createdNormalized?.id) {
+        // Some create responses may omit id fields; refresh to keep new folders editable.
+        const latest = await fetchCategories()
+        setCustomCategories(Array.isArray(latest) ? latest : [])
+      }
       setNewCategory('')
-      setNewCategoryParentId('')
-      if (parentName) {
-        setCategoryStack([parentName, raw])
+      const createdId = createdNormalized?.id ? String(createdNormalized.id) : null
+      const createdName = (createdNormalized?.name || raw).trim()
+      if (parentId) {
+        setCategoryPath((prev) => {
+          if (prev[prev.length - 1] && String(prev[prev.length - 1].id || '') === String(parentId)) {
+            return [...prev, { id: createdId, name: createdName }]
+          }
+          return [
+            { id: String(parentId), name: parentName || selectedCategory || 'Category' },
+            { id: createdId, name: createdName },
+          ]
+        })
       } else {
-        setCategoryStack([raw])
+        setCategoryPath([{ id: createdId, name: createdName }])
       }
       toast.success(parentId ? 'Sub-category added' : 'Category added')
       return created
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Failed to add category')
+      const errors = e?.response?.data?.errors
+      const detail = errors?.detail || e?.response?.data?.detail
+      const nameErr = errors?.name
+      const parentErr = errors?.parent
+      const msg =
+        (Array.isArray(nameErr) ? nameErr[0] : nameErr) ||
+        (Array.isArray(parentErr) ? parentErr[0] : parentErr) ||
+        (Array.isArray(detail) ? detail[0] : detail) ||
+        'Failed to add category'
+      toast.error(msg)
       return null
     }
   }
@@ -276,6 +560,9 @@ function PharmacyCategoriesView() {
   async function ensureParentCategory(parentName) {
     const cleanName = (parentName || '').trim()
     if (!cleanName) return null
+    if (selectedCategory && normalize(selectedCategory) === normalize(cleanName) && selectedCategoryRow?.id) {
+      return selectedCategoryRow
+    }
     const existing = customCategories.find((c) => normalize(c.name) === normalize(cleanName))
     if (existing?.id) return existing
     try {
@@ -294,26 +581,162 @@ function PharmacyCategoriesView() {
       setCustomCategories((prev) => [...prev, created])
       return created
     } catch (e) {
-      toast.error(e?.response?.data?.detail || 'Could not save parent category')
+      const errors = e?.response?.data?.errors
+      const detail = errors?.detail || e?.response?.data?.detail
+      const nameErr = errors?.name
+      const msg =
+        (Array.isArray(nameErr) ? nameErr[0] : nameErr) ||
+        (Array.isArray(detail) ? detail[0] : detail) ||
+        'Could not save parent category'
+      toast.error(msg)
       return null
     }
   }
 
-  function removeCustomCategory(cat) {
-    const row = customCategories.find((c) => normalize(c.name) === normalize(cat))
+  async function resolveCurrentParentRow() {
+    if (!selectedCategory) return null
+    if (selectedCategoryRow?.id) return selectedCategoryRow
+    return ensureParentCategory(selectedCategory)
+  }
+
+  function openEditModal(row) {
+    if (!row?.id) {
+      toast('Only managed categories can be edited')
+      return
+    }
+    setEditingCategory(row)
+    setEditName((row.name || '').trim())
+    setEditColor(normalizeHexColor(row.color) || defaultHexColorForText(row.name))
+    setEditModalOpen(true)
+  }
+
+  async function saveCategoryEdit() {
+    if (!editingCategory?.id || savingEdit) return
+    const cleanName = (editName || '').trim()
+    const cleanColor = normalizeHexColor(editColor)
+    if (!cleanName) {
+      toast.error('Category name is required')
+      return
+    }
+    if (!cleanColor) {
+      toast.error('Pick a valid color')
+      return
+    }
+    setSavingEdit(true)
+    try {
+      const { data } = await api.patch(`/medicine-categories/${editingCategory.id}/`, {
+        name: cleanName,
+        color: cleanColor,
+      })
+      const updated = data?.data || data?.entity || data || {}
+      const nextName = (updated.name || cleanName).trim()
+      const nextColor = normalizeHexColor(updated.color) || cleanColor
+      setCustomCategories((prev) =>
+        prev.map((c) =>
+          String(c.id) === String(editingCategory.id)
+            ? { ...c, ...updated, name: nextName, color: nextColor }
+            : c,
+        ),
+      )
+      setCategoryPath((prev) =>
+        prev.map((node) =>
+          String(node.id || '') === String(editingCategory.id)
+            ? { ...node, id: String(editingCategory.id), name: nextName }
+            : node,
+        ),
+      )
+      setEditModalOpen(false)
+      setEditingCategory(null)
+      setActionMode('none')
+      toast.success('Category updated')
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || e?.response?.data?.errors?.detail || 'Failed to update category')
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
+  async function deleteCategoriesByIds(ids) {
+    if (!ids?.length) return
+    const selectedIdSet = new Set(ids.map(String))
+    const rows = customCategories.filter((c) => selectedIdSet.has(String(c.id)))
+    if (!rows.length) {
+      toast('Only managed categories can be deleted')
+      return
+    }
+
+    // Block parent deletion when it still has subcategories.
+    const blockedParents = rows.filter((row) =>
+      customCategories.some((c) => String(c.parent || '') === String(row.id)),
+    )
+    if (blockedParents.length > 0) {
+      const sampleNames = blockedParents
+        .slice(0, 3)
+        .map((r) => r.name)
+        .filter(Boolean)
+        .join(', ')
+      toast.error(
+        blockedParents.length === 1
+          ? `Delete sub-categories first for "${blockedParents[0].name}".`
+          : `Delete sub-categories first for: ${sampleNames}${blockedParents.length > 3 ? '…' : ''}`,
+      )
+      return
+    }
+
+    const confirmed = window.confirm(
+      rows.length === 1
+        ? `Delete category "${rows[0].name}"?`
+        : `Delete ${rows.length} categories?`,
+    )
+    if (!confirmed) return
+    try {
+      for (const r of rows) {
+        // sequential keeps failures easy to reason about for users
+        // eslint-disable-next-line no-await-in-loop
+        await api.delete(`/medicine-categories/${r.id}/`)
+      }
+
+      const deletedSet = new Set([...selectedIdSet])
+      setCustomCategories((prev) => prev.filter((c) => !deletedSet.has(String(c.id))))
+      setCategoryPath((prev) => prev.filter((node) => !deletedSet.has(String(node.id || ''))))
+      setDeleteSelection([])
+      setActionMode('none')
+      toast.success(rows.length === 1 ? `Deleted category: ${rows[0].name}` : `Deleted ${rows.length} categories`)
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || e?.response?.data?.errors?.detail || 'Failed to delete category')
+    }
+  }
+
+  function toggleDeleteSelection(row) {
     if (!row?.id) return
-    api
-      .delete(`/medicine-categories/${row.id}/`)
-      .then(() => {
-        setCustomCategories((prev) => prev.filter((c) => c.id !== row.id))
-        if (normalize(selectedCategory) === normalize(cat)) {
-          setCategoryStack([])
-        }
-        toast.success(`Deleted category: ${cat}`)
-      })
-      .catch((e) => {
-        toast.error(e?.response?.data?.detail || 'Failed to delete category')
-      })
+    const id = String(row.id)
+    setDeleteSelection((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  async function handleCategoryTileClick(name, row) {
+    if (actionMode === 'edit') {
+      openEditModal(row)
+      setActionMode('none')
+      return
+    }
+    if (actionMode === 'delete') {
+      toggleDeleteSelection(row)
+      return
+    }
+    openTopLevelCategory(row, name)
+  }
+
+  async function handleSubcategoryTileClick(sub) {
+    if (actionMode === 'edit') {
+      openEditModal(sub)
+      setActionMode('none')
+      return
+    }
+    if (actionMode === 'delete') {
+      toggleDeleteSelection(sub)
+      return
+    }
+    openCategory(sub)
   }
 
   function assignCategory(medicineId, categoryName) {
@@ -329,46 +752,142 @@ function PharmacyCategoriesView() {
       })
   }
 
-  async function saveCategoryRules() {
-    const name = (rulesCategory || '').trim()
-    if (!name) {
-      toast.error('Choose a category first')
+
+  function toggleMedicineSelection(med) {
+    const id = String(med?.id || '')
+    if (!id) return
+    setMedicineSelection((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  const visibleMedicineIds = useMemo(
+    () => visibleMeds.map((m) => String(m.id)).filter(Boolean),
+    [visibleMeds],
+  )
+  const allVisibleSelected = useMemo(() => {
+    if (!visibleMedicineIds.length) return false
+    const selected = new Set(medicineSelection.map(String))
+    return visibleMedicineIds.every((id) => selected.has(id))
+  }, [visibleMedicineIds, medicineSelection])
+  const someVisibleSelected = useMemo(() => {
+    if (!visibleMedicineIds.length) return false
+    const selected = new Set(medicineSelection.map(String))
+    return visibleMedicineIds.some((id) => selected.has(id)) && !allVisibleSelected
+  }, [visibleMedicineIds, medicineSelection, allVisibleSelected])
+
+  function toggleSelectAllVisibleMedicines() {
+    setMedicineSelection((prev) => {
+      const selected = new Set(prev.map(String))
+      if (visibleMedicineIds.every((id) => selected.has(id))) {
+        visibleMedicineIds.forEach((id) => selected.delete(id))
+      } else {
+        visibleMedicineIds.forEach((id) => selected.add(id))
+      }
+      return [...selected]
+    })
+  }
+
+  async function deleteSelectedMedicines() {
+    if (deletingMeds) return
+    if (!medicineSelection.length) return
+    const confirmed = window.confirm(
+      medicineSelection.length === 1 ? 'Delete this medicine?' : `Delete ${medicineSelection.length} medicines?`,
+    )
+    if (!confirmed) return
+    setDeletingMeds(true)
+    const deletedIds = []
+    const failedItems = []
+    for (const id of medicineSelection) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await api.delete(`/medicines/${id}/`)
+        deletedIds.push(String(id))
+      } catch (e) {
+        failedItems.push({
+          id: String(id),
+          message: parseApiErrorMessage(e, 'Failed to delete'),
+          status: e?.response?.status,
+        })
+      }
+    }
+    if (deletedIds.length) {
+      const deletedSet = new Set(deletedIds)
+      setMedicines((prev) => prev.filter((m) => !deletedSet.has(String(m.id))))
+    }
+    if (failedItems.length) {
+      setMedicineSelection(failedItems.map((x) => x.id))
+      setActionMode('delete')
+    } else {
+      setMedicineSelection([])
+      setActionMode('none')
+    }
+    if (deletedIds.length && !failedItems.length) {
+      toast.success(deletedIds.length === 1 ? 'Medicine deleted' : `Deleted ${deletedIds.length} medicines`)
+    } else if (deletedIds.length && failedItems.length) {
+      const sample = failedItems[0]?.message || 'Some deletions failed'
+      toast.error(`Deleted ${deletedIds.length}, failed ${failedItems.length}. ${sample}`)
+    } else {
+      const sample = failedItems[0]?.message || 'Failed to delete medicines'
+      toast.error(`No medicines deleted. ${sample}`)
+    }
+    setDeletingMeds(false)
+  }
+
+  function openMoveMedicinesModal() {
+    if (!medicineSelection.length) {
+      toast('Select medicines first')
       return
     }
-    setRulesSaving(true)
-    const payload = {
-      name,
-      is_active: true,
-      rule_type: rulesDraft.rule_type,
-      allow_loose_sale: !!rulesDraft.allow_loose_sale,
-      base_unit_label: (rulesDraft.base_unit_label || 'unit').trim().slice(0, 40),
-      retail_pack_label: (rulesDraft.retail_pack_label || '').trim().slice(0, 40),
-      outer_pack_label: (rulesDraft.outer_pack_label || '').trim().slice(0, 40),
+    if (selectedCategoryRow?.id) setMoveToCategory(`id:${selectedCategoryRow.id}`)
+    else setMoveToCategory(`name:${selectedCategory || ''}`)
+    setMoveModalOpen(true)
+  }
+
+  async function moveSelectedMedicines() {
+    const targetRaw = (moveToCategory || '').trim()
+    if (!targetRaw) {
+      toast.error('Choose a category')
+      return
     }
+    let targetForm = ''
+    let targetCategoryId = ''
+    if (targetRaw.startsWith('id:')) {
+      targetCategoryId = targetRaw.slice(3)
+      const row = categoriesById.get(String(targetCategoryId))
+      targetForm = (row?.name || '').trim()
+    } else if (targetRaw.startsWith('name:')) {
+      targetForm = targetRaw.slice(5).trim()
+    } else {
+      targetForm = targetRaw
+    }
+    if (!targetForm) {
+      toast.error('Choose a valid category')
+      return
+    }
+    if (moving) return
+    setMoving(true)
     try {
-      const row = customCategories.find((c) => normalizeCategoryName(c.name) === normalizeCategoryName(name))
-      if (row?.id) {
-        const { data } = await api.patch(`/medicine-categories/${row.id}/`, payload)
-        const updated = data?.data || data?.entity || data
-        setCustomCategories((prev) =>
-          prev.map((c) => (String(c.id) === String(row.id) ? { ...c, ...updated } : c)),
-        )
-        toast.success('Category rules updated')
-      } else {
-        const { data } = await api.post('/medicine-categories/', payload)
-        const created = data?.data || data?.entity || data
-        if (created?.id) {
-          setCustomCategories((prev) => {
-            const next = [...prev.filter((c) => normalizeCategoryName(c.name) !== normalizeCategoryName(name)), created]
-            return next.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-          })
-        }
-        toast.success('Managed category saved — rules apply when adding medicines')
+      for (const id of medicineSelection) {
+        // eslint-disable-next-line no-await-in-loop
+        await api.patch(`/medicines/${id}/`, {
+          form: targetForm,
+          ...(targetCategoryId ? { category: targetCategoryId } : { category: null }),
+        })
       }
+      setMedicines((prev) =>
+        prev.map((m) =>
+          medicineSelection.includes(String(m.id))
+            ? { ...m, form: targetForm, category: targetCategoryId || null }
+            : m,
+        ),
+      )
+      setMoveModalOpen(false)
+      setMedicineSelection([])
+      setActionMode('none')
+      toast.success('Medicines moved')
     } catch (e) {
-      toast.error(e?.response?.data?.detail || e?.response?.data?.errors?.detail || 'Could not save rules')
+      toast.error(parseApiErrorMessage(e, 'Failed to move medicines'))
     } finally {
-      setRulesSaving(false)
+      setMoving(false)
     }
   }
 
@@ -389,29 +908,97 @@ function PharmacyCategoriesView() {
           <input
             value={newCategory}
             onChange={(e) => setNewCategory(e.target.value)}
-            placeholder="Add category"
+            placeholder={selectedCategory ? `Add under ${selectedCategory}` : 'Add category'}
             className="px-3 py-1.5 text-sm rounded border border-slate-200 bg-white"
           />
-          <select
-            value={newCategoryParentId}
-            onChange={(e) => setNewCategoryParentId(e.target.value)}
-            className="px-2 py-1.5 text-sm rounded border border-slate-200 bg-white"
-          >
-            <option value="">Main category</option>
-            {topLevelCustomCategories.map((cat) => (
-              <option key={cat.id} value={cat.id}>
-                Sub of {cat.name}
-              </option>
-            ))}
-          </select>
           <button
             type="button"
             onClick={() => {
-              const parentRow = customCategories.find((c) => String(c.id) === String(newCategoryParentId))
-              addCategory({
-                parentId: newCategoryParentId || null,
-                parentName: parentRow?.name || '',
-              })
+              setDeleteSelection([])
+              if (selectedCategory) {
+                // Inside a category: Edit applies to medicines (move/edit location).
+                if (actionMode !== 'edit') {
+                  setMedicineSelection([])
+                  setActionMode('edit')
+                  setMoveModalOpen(false)
+                  return
+                }
+                openMoveMedicinesModal()
+                return
+              }
+              setActionMode((m) => (m === 'edit' ? 'none' : 'edit'))
+            }}
+            className="px-2.5 py-1.5 rounded border border-slate-200 text-xs font-semibold text-slate-700 inline-flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50"
+            title={selectedCategory ? 'Click then select medicines to edit location' : 'Click then choose folder to edit'}
+          >
+            <Pencil size={12} />{' '}
+            {selectedCategory
+              ? actionMode === 'edit'
+                ? `Edit selected (${medicineSelection.length})`
+                : 'Edit'
+              : actionMode === 'edit'
+                ? 'Pick folder...'
+                : 'Edit'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (selectedCategory) {
+                // Inside a category: Delete applies to medicines.
+                if (actionMode !== 'delete') {
+                  setMedicineSelection([])
+                  setActionMode('delete')
+                  return
+                }
+                deleteSelectedMedicines()
+                return
+              }
+              if (actionMode !== 'delete') {
+                setActionMode('delete')
+                setDeleteSelection([])
+                return
+              }
+              deleteCategoriesByIds(deleteSelection)
+            }}
+            className="px-2.5 py-1.5 rounded border border-rose-200 text-xs font-semibold text-rose-700 inline-flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-rose-50"
+            title={selectedCategory ? 'Click then select medicines to delete' : 'Click then tick folders to delete'}
+          >
+            <Trash2 size={12} />{' '}
+            {selectedCategory
+              ? actionMode === 'delete'
+                ? `Delete selected (${medicineSelection.length})`
+                : 'Delete'
+              : actionMode === 'delete'
+                ? `Delete selected (${deleteSelection.length})`
+                : 'Delete'}
+          </button>
+          {actionMode === 'delete' && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteSelection([])
+                  setMedicineSelection([])
+                  setActionMode('none')
+                  setMoveModalOpen(false)
+                }}
+                className="px-2.5 py-1.5 rounded border border-slate-200 text-xs font-semibold text-slate-700 inline-flex items-center gap-1"
+                title="Cancel delete selection"
+              >
+                <X size={12} /> Cancel
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={async () => {
+              if (selectedCategory) {
+                const parentRow = await resolveCurrentParentRow()
+                if (!parentRow?.id) return
+                await addCategory({ parentId: parentRow.id, parentName: parentRow.name })
+                return
+              }
+              await addCategory()
             }}
             className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm font-semibold inline-flex items-center gap-1"
           >
@@ -421,147 +1008,30 @@ function PharmacyCategoriesView() {
       </div>
 
       {!selectedCategory ? (
-        <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl bg-white p-3 space-y-3">
-          <div className="rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/90 to-white p-3 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <Package className="text-indigo-600 shrink-0" size={18} />
-              <h3 className="text-sm font-bold text-slate-900">📦 Category rules (auto apply)</h3>
-            </div>
-            <p className="text-[11px] text-slate-600 mb-3">
-              Set unit names and sale style per category. When you add a medicine and pick this form, conversion labels
-              (e.g. 1 strip = 10 tablets) use these names with your <strong>Units / Pack</strong> number.
-            </p>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div className="rounded-lg border border-slate-200 bg-white/80 p-2 max-h-56 overflow-y-auto text-[11px] text-slate-700 space-y-2">
-                <p className="font-bold text-[10px] text-slate-500 uppercase tracking-wide">Reference</p>
-                {CATEGORY_RULE_REFERENCE.map((grp) => (
-                  <div key={grp.title}>
-                    <div className="font-semibold text-indigo-900 text-[11px]">{grp.title}</div>
-                    <ul className="list-disc pl-4 mt-0.5 text-slate-600">
-                      {grp.lines.map((line) => (
-                        <li key={line}>{line}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-white p-2 space-y-2">
-                <label className="block">
-                  <span className="text-[10px] font-semibold text-slate-700">Category to configure</span>
-                  <select
-                    value={rulesCategory}
-                    onChange={(e) => setRulesCategory(e.target.value)}
-                    className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm bg-white"
-                  >
-                    <option value="">Select category…</option>
-                    {visibleCategories.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                        {customCategories.some((c) => normalizeCategoryName(c.name) === normalizeCategoryName(cat))
-                          ? ' · saved'
-                          : ' · preset until saved'}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {!!rulesCategory && (
-                  <>
-                    <label className="block">
-                      <span className="text-[10px] font-semibold text-slate-700">Rule type</span>
-                      <select
-                        value={rulesDraft.rule_type}
-                        onChange={(e) => setRulesDraft((d) => ({ ...d, rule_type: e.target.value }))}
-                        className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm bg-white"
-                      >
-                        {RULE_TYPE_OPTIONS.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={!!rulesDraft.allow_loose_sale}
-                        onChange={(e) => setRulesDraft((d) => ({ ...d, allow_loose_sale: e.target.checked }))}
-                        className="rounded border-slate-300"
-                      />
-                      <span className="text-[11px] text-slate-700 font-medium">Allow loose sale (fractional base units)</span>
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <label className="block">
-                        <span className="text-[10px] font-semibold text-slate-700">Base unit label</span>
-                        <input
-                          value={rulesDraft.base_unit_label}
-                          onChange={(e) => setRulesDraft((d) => ({ ...d, base_unit_label: e.target.value }))}
-                          placeholder="e.g. tablet"
-                          className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-sm"
-                        />
-                      </label>
-                      <label className="block">
-                        <span className="text-[10px] font-semibold text-slate-700">Retail pack label</span>
-                        <input
-                          value={rulesDraft.retail_pack_label}
-                          onChange={(e) => setRulesDraft((d) => ({ ...d, retail_pack_label: e.target.value }))}
-                          placeholder="e.g. strip, bottle"
-                          className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-sm"
-                        />
-                      </label>
-                      <label className="block">
-                        <span className="text-[10px] font-semibold text-slate-700">Outer pack (optional)</span>
-                        <input
-                          value={rulesDraft.outer_pack_label}
-                          onChange={(e) => setRulesDraft((d) => ({ ...d, outer_pack_label: e.target.value }))}
-                          placeholder="e.g. box"
-                          className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-sm"
-                        />
-                      </label>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={rulesSaving}
-                      onClick={saveCategoryRules}
-                      className="w-full sm:w-auto px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-50"
-                    >
-                      {rulesSaving ? 'Saving…' : 'Save rules for this category'}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
+        <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-xl bg-white p-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-x-3 gap-y-2.5">
             {visibleCategories.map((cat) => {
               const count = medicineCountByForm.get(normalize(cat)) || 0
-              const css = colorForText(cat)
-              const isCustom = customCategories.some((c) => normalize(c.name) === normalize(cat))
-              const subcats = subcategoriesByParentName.get(normalize(cat)) || []
+              const row = topLevelRowByName.get(normalize(cat))
+              const css = colorForCategory(row || { name: cat })
+              const childSubCount = childCountForTopLevelTile(cat, row)
               return (
                 <CategoryBrowseTile
                   key={cat}
                   title={cat}
                   style={css}
                   size="lg"
-                  onClick={() => openTopLevelCategory(cat)}
+                  onClick={() => handleCategoryTileClick(cat, row)}
+                  selectable={actionMode === 'delete' && !!row?.id}
+                  selected={!!row?.id && deleteSelection.includes(String(row.id))}
+                  onSelect={() => toggleDeleteSelection(row)}
                   details={
                     <>
                       <div className="text-xs opacity-75 mt-1">{count} items</div>
-                      {subcats.length > 0 && (
-                        <div className="text-[11px] mt-1 opacity-80">{subcats.length} sub-categories</div>
+                      {childSubCount > 0 && (
+                        <div className="text-[11px] mt-1 opacity-80">{childSubCount} sub-categories</div>
                       )}
                     </>
-                  }
-                  actions={
-                    isCustom ? (
-                      <button
-                        type="button"
-                        onClick={() => removeCustomCategory(cat)}
-                        className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-700"
-                      >
-                        <Trash2 size={12} /> Delete
-                      </button>
-                    ) : null
                   }
                 />
               )
@@ -575,7 +1045,7 @@ function PharmacyCategoriesView() {
               <button
                 type="button"
                 onClick={() => {
-                  setCategoryStack((prev) => prev.slice(0, -1))
+                  setCategoryPath((prev) => prev.slice(0, -1))
                   setMedicineSearch('')
                 }}
                 className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 text-sm text-slate-700 hover:bg-slate-50"
@@ -587,7 +1057,7 @@ function PharmacyCategoriesView() {
                   {selectedCategory} Medicines ({visibleMeds.length})
                 </span>
                 <span className="text-xs text-slate-500 font-medium">
-                  {categoryStack.join(' / ')}
+                  {categoryBreadcrumb}
                 </span>
                 {!!selectedCategoryRow?.parent_name && (
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
@@ -596,14 +1066,16 @@ function PharmacyCategoriesView() {
                 )}
               </div>
             </div>
-            <div className="relative">
-              <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                value={medicineSearch}
-                onChange={(e) => setMedicineSearch(e.target.value)}
-                placeholder="Search medicine..."
-                className="pl-8 pr-3 py-1 text-sm rounded border border-slate-200"
-              />
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={medicineSearch}
+                  onChange={(e) => setMedicineSearch(e.target.value)}
+                  placeholder="Search medicine..."
+                  className="pl-8 pr-3 py-1 text-sm rounded border border-slate-200"
+                />
+              </div>
             </div>
           </div>
           <div className="px-3 py-2 border-b border-slate-100 bg-slate-50/70 shrink-0">
@@ -612,43 +1084,35 @@ function PharmacyCategoriesView() {
               <p className="text-xs text-slate-500 mb-2">No sub-categories yet.</p>
             ) : (
               <div className="max-h-[min(40vh,280px)] overflow-y-auto pr-1 -mr-1 mb-2">
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-x-3 gap-y-2.5">
                   {selectedSubcategories.map((sub) => {
                     const subCount = medicineCountByForm.get(normalize(sub.name)) || 0
-                    const css = colorForText(sub.name)
+                    const childSubCount = subcategoriesByParentId.get(String(sub.id))?.length || 0
+                    const css = colorForCategory(sub)
                     return (
                       <CategoryBrowseTile
                         key={sub.id}
                         title={sub.name}
                         style={css}
-                        size="sm"
-                        onClick={() => openCategory(sub.name)}
-                        details={<div className="text-xs opacity-75 mt-1">{subCount} items</div>}
+                        size="lg"
+                        onClick={() => handleSubcategoryTileClick(sub)}
+                        selectable={actionMode === 'delete'}
+                        selected={deleteSelection.includes(String(sub.id))}
+                        onSelect={() => toggleDeleteSelection(sub)}
+                        details={
+                          <>
+                            <div className="text-xs opacity-75 mt-1">{subCount} items</div>
+                            {childSubCount > 0 && (
+                              <div className="text-[11px] mt-1 opacity-80">{childSubCount} sub-categories</div>
+                            )}
+                          </>
+                        }
                       />
                     )
                   })}
                 </div>
               </div>
             )}
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <input
-                value={newCategory}
-                onChange={(e) => setNewCategory(e.target.value)}
-                placeholder={`Add sub-category under ${selectedCategory}`}
-                className="px-2 py-1 text-sm rounded border border-slate-200 bg-white"
-              />
-              <button
-                type="button"
-                onClick={async () => {
-                  const parentRow = await ensureParentCategory(selectedCategory)
-                  if (!parentRow?.id) return
-                  await addCategory({ parentId: parentRow.id, parentName: parentRow.name })
-                }}
-                className="px-2.5 py-1 rounded bg-indigo-600 text-white text-xs font-semibold inline-flex items-center gap-1"
-              >
-                <Plus size={12} /> Add sub-category
-              </button>
-            </div>
           </div>
           <div className="flex-1 min-h-0 overflow-auto">
             {loading || categoriesLoading ? (
@@ -662,33 +1126,73 @@ function PharmacyCategoriesView() {
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-slate-100 text-slate-600">
                   <tr>
+                    {actionMode !== 'none' && (
+                      <th className="w-10 px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          ref={(el) => {
+                            if (el) el.indeterminate = someVisibleSelected
+                          }}
+                          onChange={toggleSelectAllVisibleMedicines}
+                          title={allVisibleSelected ? 'Unselect all' : 'Select all'}
+                        />
+                      </th>
+                    )}
                     <th className="text-left px-3 py-2">Medicine</th>
+                    <th className="text-left px-3 py-2 w-[110px]">Stock</th>
+                    <th className="text-left px-3 py-2 w-[80px]">MRP</th>
+                    <th className="text-left px-3 py-2 w-[80px]">Rate</th>
                     <th className="text-left px-3 py-2">Category</th>
-                    <th className="text-left px-3 py-2">Pack</th>
-                    <th className="text-left px-3 py-2">HSN</th>
-                    <th className="text-left px-3 py-2">Assign Category</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleMeds.map((m) => (
                     <tr key={m.id} className="border-t border-slate-100 hover:bg-slate-50">
-                      <td className="px-3 py-2 font-medium">{m.name}</td>
-                      <td className="px-3 py-2 text-slate-600">{m.form || '—'}</td>
-                      <td className="px-3 py-2 text-slate-600">{m.pack_info || '—'}</td>
-                      <td className="px-3 py-2 text-slate-600">{m.hsn_code || '—'}</td>
+                      {actionMode !== 'none' && (
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={medicineSelection.includes(String(m.id))}
+                            onChange={() => toggleMedicineSelection(m)}
+                          />
+                        </td>
+                      )}
                       <td className="px-3 py-2">
-                        <select
-                          value={m.form || ''}
-                          onChange={(e) => assignCategory(m.id, e.target.value)}
-                          className="w-full border border-slate-200 rounded px-2 py-1 text-sm bg-white"
-                        >
-                          <option value="">Uncategorized</option>
-                          {categories.map((cat) => (
-                            <option key={cat} value={cat}>
-                              {cat}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="font-medium text-slate-900">{m.name}</div>
+                        <div className="text-[11px] text-slate-400">{m.pack_info || ''}{m.hsn_code ? ` · HSN ${m.hsn_code}` : ''}</div>
+                      </td>
+                      {(() => {
+                        const medBatches = batches.filter((b) => String(b.medicine) === String(m.id))
+                        const totalStock = medBatches.reduce((s, b) => s + Number(b.quantity ?? 0), 0)
+                        const topBatch = medBatches.sort((a, b2) => Number(b2.quantity ?? 0) - Number(a.quantity ?? 0))[0]
+                        return (
+                          <>
+                            <td className="px-3 py-2 tabular-nums text-sm">
+                              <span className={`font-semibold ${totalStock <= 0 ? 'text-rose-600' : totalStock < 10 ? 'text-amber-600' : 'text-slate-800'}`}>
+                                {totalStock}
+                              </span>
+                              <span className="text-[10px] text-slate-400 ml-1">units</span>
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-sm text-slate-600">
+                              {topBatch ? `₹${Number(topBatch.mrp ?? 0).toFixed(2)}` : '—'}
+                            </td>
+                            <td className="px-3 py-2 tabular-nums text-sm text-slate-600">
+                              {topBatch ? `₹${Number(topBatch.sale_rate ?? 0).toFixed(2)}` : '—'}
+                            </td>
+                          </>
+                        )
+                      })()}
+                      <td className="px-3 py-2 text-[11px] text-slate-600">
+                        {(() => {
+                          const catId = m.category ? String(m.category) : ''
+                          const cat = catId ? categoriesById.get(catId) : null
+                          if (!cat) return <span className="text-slate-400">—</span>
+                          const parentCat = cat.parent ? categoriesById.get(String(cat.parent)) : null
+                          return parentCat
+                            ? <><span className="text-slate-400">{parentCat.name}</span> / <span className="font-medium">{cat.name}</span></>
+                            : <span className="font-medium">{cat.name}</span>
+                        })()}
                       </td>
                     </tr>
                   ))}
@@ -698,6 +1202,235 @@ function PharmacyCategoriesView() {
           </div>
         </div>
       )}
+      {moveModalOpen && (
+        <div className="fixed inset-0 z-[330] bg-slate-900/45 flex items-center justify-center p-4" role="presentation">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Move medicines</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (moving) return
+                  setMoveModalOpen(false)
+                }}
+                className="p-1 rounded text-slate-500 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-4 py-3 space-y-3">
+              <div className="text-xs text-slate-600">
+                Selected: <span className="font-bold text-slate-900">{medicineSelection.length}</span>
+              </div>
+              <div>
+                <span className="text-xs font-semibold text-slate-700">Move to category</span>
+                <button
+                  type="button"
+                  onClick={() => setMoveCatPickerOpen(true)}
+                  className="mt-1 w-full flex items-center justify-between gap-2 min-h-9 border border-slate-300 rounded px-2.5 text-sm text-left bg-white hover:bg-slate-50 outline-none focus:border-blue-500"
+                >
+                  <span className="truncate text-slate-800">{moveCatBreadcrumb || 'Browse categories…'}</span>
+                  <ChevronRight size={14} className="text-slate-400 shrink-0" style={{ transform: 'rotate(90deg)' }} />
+                </button>
+                {moveCatBreadcrumb && (
+                  <button
+                    type="button"
+                    onClick={() => setMoveToCategory('')}
+                    className="mt-0.5 text-[10px] text-rose-500 hover:underline"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="px-4 py-3 border-t border-slate-100 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (moving) return
+                  setMoveModalOpen(false)
+                }}
+                className="px-3 py-1.5 rounded border border-slate-200 text-sm font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={moveSelectedMedicines}
+                disabled={moving}
+                className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm font-semibold disabled:opacity-60"
+              >
+                {moving ? 'Moving...' : 'Move'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Category tree picker portal for Move modal */}
+      {moveCatPickerOpen && createPortal(
+        <div
+          className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-900/45"
+          onClick={() => setMoveCatPickerOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="flex h-[min(85vh,32rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
+              <h4 className="text-sm font-bold text-slate-900">Select category</h4>
+              <button type="button" onClick={() => setMoveCatPickerOpen(false)} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="shrink-0 border-b border-slate-100 p-2">
+              <input
+                type="text"
+                value={moveCatSearch}
+                onChange={(e) => setMoveCatSearch(e.target.value)}
+                placeholder="Search all names or browse lists below…"
+                className="h-7 w-full rounded border border-slate-200 px-2 text-[11px]"
+                autoFocus
+              />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto py-1">
+              {moveCatSearch.trim() ? (
+                moveCatFilteredOptions.length === 0 ? (
+                  <div className="px-3 py-4 text-[11px] text-slate-500">No matches</div>
+                ) : (
+                  moveCatFilteredOptions.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => selectMoveCatRow(treeIdToRow.get(opt.id))}
+                      className="w-full border-b border-slate-50 px-3 py-1.5 text-left text-[11px] text-slate-800 last:border-b-0 hover:bg-slate-50"
+                    >
+                      <span className="block truncate" title={opt.label}>{opt.label}</span>
+                    </button>
+                  ))
+                )
+              ) : (
+                <div className="flex flex-col gap-0">
+                  {treeRoots.length > 0 && (
+                    <>
+                      <div className="px-3 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">Nested folders</div>
+                      <CatTreeRows
+                        nodes={treeRoots}
+                        depth={0}
+                        childrenOf={treeChildrenOf}
+                        expandedIds={moveCatExpandedIds}
+                        onToggle={toggleMoveCatExpand}
+                        onSelect={selectMoveCatRow}
+                      />
+                      <div className="mx-2 my-2 border-t border-slate-100" />
+                    </>
+                  )}
+                  <div className="px-3 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                    All category names (presets · medicines · folders)
+                  </div>
+                  {managedMoveCategoryOptions.length === 0 ? (
+                    <div className="px-3 py-2 text-[11px] text-slate-500">No categories yet</div>
+                  ) : (
+                    managedMoveCategoryOptions.map((opt) => (
+                      <button
+                        key={`flat-${opt.id}`}
+                        type="button"
+                        onClick={() => selectMoveCatRow(treeIdToRow.get(opt.id))}
+                        className="w-full border-b border-slate-50 px-3 py-1.5 text-left text-[11px] text-slate-800 last:border-b-0 hover:bg-slate-50"
+                      >
+                        <span className="block truncate" title={opt.label}>{opt.label}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {editModalOpen && (
+        <div className="fixed inset-0 z-[320] bg-slate-900/45 flex items-center justify-center p-4" role="presentation">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Edit category</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (savingEdit) return
+                  setEditModalOpen(false)
+                  setEditingCategory(null)
+                }}
+                className="p-1 rounded text-slate-500 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-4 py-3 space-y-3">
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-700">Category name</span>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="mt-1 w-full h-9 rounded border border-slate-300 px-2.5 text-sm outline-none focus:border-blue-500"
+                  placeholder="Category name"
+                  autoFocus
+                />
+              </label>
+              <div className="flex items-end gap-3">
+                <label className="block">
+                  <span className="text-xs font-semibold text-slate-700">Folder color</span>
+                  <input
+                    type="color"
+                    value={editColor || '#6366F1'}
+                    onChange={(e) => setEditColor(e.target.value)}
+                    className="mt-1 h-9 w-12 rounded border border-slate-300 bg-white p-1 cursor-pointer"
+                  />
+                </label>
+                <label className="block flex-1">
+                  <span className="text-xs font-semibold text-slate-700">Hex</span>
+                  <input
+                    type="text"
+                    value={editColor}
+                    onChange={(e) => setEditColor((e.target.value || '').toUpperCase())}
+                    maxLength={7}
+                    placeholder="#6366F1"
+                    className="mt-1 w-full h-9 rounded border border-slate-300 px-2.5 text-sm outline-none focus:border-blue-500"
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="px-4 py-3 border-t border-slate-100 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (savingEdit) return
+                  setEditModalOpen(false)
+                  setEditingCategory(null)
+                }}
+                className="px-3 py-1.5 rounded border border-slate-200 text-sm font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveCategoryEdit}
+                disabled={savingEdit}
+                className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm font-semibold disabled:opacity-60"
+              >
+                {savingEdit ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

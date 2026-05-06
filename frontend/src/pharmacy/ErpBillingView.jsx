@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Search, Trash2 } from 'lucide-react'
+import { PurchaseSupplierPicker } from './PurchaseSupplierPicker'
 import api from '../api'
 import toast from 'react-hot-toast'
 import { format, isValid, parseISO } from 'date-fns'
@@ -235,6 +236,9 @@ function ErpBillingViewInner({
   const [rows, setRows] = useState(() => normalizeRows(Array.from({ length: MIN_ROWS }, () => createNewRow()), createNewRow))
   const [activeRow, setActiveRow] = useState(0)
   const [activeField, setActiveField] = useState('product')
+  const b2bEnabled = !!outletSettings?.b2b_enabled
+  const [partyId, setPartyId] = useState(null)
+  const [partyName, setPartyName] = useState('')
   const [ptSearch, setPtSearch] = useState('')
   const debouncedPtSearch = useDebouncedValue(ptSearch, 320)
   const [ptResults, setPtResults] = useState([])
@@ -478,6 +482,39 @@ function ErpBillingViewInner({
     }
   }, [linkedAdmission, paymentMethod])
 
+  // Broadcast current bill to sales-display tab via localStorage
+  React.useEffect(() => {
+    const activeLines = rows.filter((r) => r.medicine && Number(r.qty) > 0)
+    if (!activeLines.length && !selectedPt && !partyId) {
+      localStorage.removeItem('pharmacy_bill_display')
+      return
+    }
+    localStorage.setItem('pharmacy_bill_display', JSON.stringify({
+      pharmacyName: outletSettings?.business_name || 'Pharmacy',
+      customerName: b2bEnabled
+        ? partyName
+        : selectedPt ? `${selectedPt.first_name} ${selectedPt.last_name}` : '',
+      lines: activeLines.map((r) => {
+        const netAmount = Math.round(Number(r.qty) * Number(r.rate) * 100) / 100
+        const mrp = Number(r.batch?.mrp) || null
+        const discPct = Number(r.line_discount) || 0
+        return {
+          name: r.medicine?.name || '',
+          qty: r.qty,
+          mrp: mrp,
+          rate: r.rate,
+          discountPct: discPct,
+          amount: netAmount,
+        }
+      }),
+      subtotal: taxableSubtotal,
+      cgst,
+      sgst,
+      grandTotal: netGrandTotal,
+      updatedAt: Date.now(),
+    }))
+  }, [rows, selectedPt, partyId, partyName, netGrandTotal, taxableSubtotal, cgst, sgst, outletSettings, b2bEnabled])
+
   React.useEffect(() => {
     if (!replacingRowId) return
     const t = window.setTimeout(() => {
@@ -503,7 +540,9 @@ function ErpBillingViewInner({
   React.useEffect(() => {
     if (!draftInvoiceToLoad) return
 
-    // ── Auto-select patient ──────────────────────────────────────────────────
+    // ── Auto-select patient or party from draft ──────────────────────────────
+    setPartyId(null)
+    setPartyName('')
     const pd = draftInvoiceToLoad.patient_details
     if (pd && pd.id) {
       setSelectedPt({
@@ -515,6 +554,11 @@ function ErpBillingViewInner({
         gender: pd.gender || '',
         ...pd,
       })
+    }
+    // Load party if the draft was a B2B invoice
+    if (draftInvoiceToLoad.party) {
+      setPartyId(draftInvoiceToLoad.party)
+      setPartyName(draftInvoiceToLoad.party_name || draftInvoiceToLoad.party_name_snapshot || '')
     }
 
     // ── Map inline items (already in invoice serializer response) ────────────
@@ -728,8 +772,8 @@ function ErpBillingViewInner({
   }
 
   async function handleSave() {
-    if (!selectedPt) {
-      toast.error('Select Patient')
+    if (b2bEnabled ? !partyId : !selectedPt) {
+      toast.error(b2bEnabled ? 'Select Party' : 'Select Patient')
       return
     }
     const valid = rows.filter((r) => r.medicine && r.batch && Number(r.qty) > 0)
@@ -754,10 +798,11 @@ function ErpBillingViewInner({
       }
 
       const { data: invData } = await api.post('/pharmacy/invoices/', {
-        patient: selectedPt.id,
-        ipd_admission: linkedAdmission?.id || null,
+        patient: b2bEnabled ? null : selectedPt.id,
+        party: b2bEnabled ? partyId : null,
+        ipd_admission: b2bEnabled ? null : (linkedAdmission?.id || null),
         // IPD assigned_doctor is a User id; invoice referred_by expects DoctorProfile id.
-        referred_by: doctorProfileIdByUserId[String(linkedAdmission?.assigned_doctor || '')] || null,
+        referred_by: b2bEnabled ? null : (doctorProfileIdByUserId[String(linkedAdmission?.assigned_doctor || '')] || null),
         invoice_no: invoiceNo || undefined,
         date: invoiceDate || undefined,
         gst_enabled: gstEnabled,
@@ -856,7 +901,8 @@ function ErpBillingViewInner({
         ...invForPrint,
         gst_enabled: gstEnabled,
         items: builtItems,
-        patient_details: invForPrint.patient_details || selectedPt,
+        patient_details: invForPrint.patient_details || (b2bEnabled ? null : selectedPt),
+        party_name: invForPrint.party_name || (b2bEnabled ? partyName : ''),
         subtotal: taxableSubtotal,
         cgst,
         sgst,
@@ -867,10 +913,13 @@ function ErpBillingViewInner({
       })
       setRows(normalizeRows(Array.from({ length: MIN_ROWS }, () => createNewRow()), createNewRow))
       setSelectedPt(null)
+      setPartyId(null)
+      setPartyName('')
       setLinkedAdmission(null)
       setPaymentMethod('cash')
       setPaidAmount('')
       setBillDiscountPercent('')
+      localStorage.removeItem('pharmacy_bill_display')
       setInvoices((prev) => [invoice, ...prev])
       fetchInitialData()
       refreshInvoiceNo()
@@ -898,63 +947,81 @@ function ErpBillingViewInner({
         <div className="relative z-[220] bg-white/95 border border-slate-200/80 px-3 py-2 rounded-xl shadow-sm flex flex-wrap items-center justify-between gap-2 shrink-0 backdrop-blur-sm">
           <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
             <div className="min-w-0 flex-1 max-w-md">
-              <p className="text-[8px] font-bold text-slate-500 uppercase mb-0.5">Patient</p>
-              {selectedPt ? (
-                <div className="flex items-center justify-between bg-blue-50 border border-blue-200 px-2 py-0.5 rounded text-[11px] font-semibold">
-                  <span className="truncate text-blue-800">
-                    {selectedPt.first_name} {selectedPt.last_name} ({selectedPt.uhid})
-                  </span>
-                  <button type="button" onClick={() => setSelectedPt(null)} className="text-blue-500 shrink-0 ml-1">
-                    ×
-                  </button>
-                </div>
+              <p className="text-[8px] font-bold text-slate-500 uppercase mb-0.5">{b2bEnabled ? 'Party' : 'Patient'}</p>
+              {b2bEnabled ? (
+                <PurchaseSupplierPicker
+                  supplierId={partyId}
+                  supplierName={partyName}
+                  onChange={(id, name) => { setPartyId(id); setPartyName(name) }}
+                  required
+                />
               ) : (
-                <div className="relative">
-                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-300" size={12} />
-                  <input
-                    type="text"
-                    placeholder="NAME / UHID / MOBILE"
-                    value={ptSearch}
-                    onChange={(e) => setPtSearch(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 pl-7 pr-2 py-0.5 rounded text-[11px] font-medium focus:bg-white focus:border-blue-500 outline-none uppercase"
-                  />
-                  {ptSearch.length > 2 && (
-                    <div className="absolute top-full left-0 right-0 mt-0.5 bg-white border border-slate-200 shadow-lg z-[260] max-h-40 overflow-y-auto text-left">
-                      {ptResults.length > 0 ? (
-                        ptResults.map((p) => (
-                          <button
-                            key={p.id}
-                            type="button"
-                            onClick={() => {
-                              setSelectedPt(p)
-                              setLinkedAdmission(activeAdmissionByPatientId[String(p.id)] || null)
-                              setPtResults([])
-                              setPtSearch('')
-                            }}
-                            className="w-full text-left px-2 py-1 hover:bg-slate-50 text-[11px]"
-                          >
-                            <div className="font-semibold text-slate-900">
-                              {p.first_name} {p.last_name}
-                            </div>
-                            <div className="text-[9px] text-slate-400 flex items-center gap-1.5">
-                              <span>{p.phone} | {p.uhid}</span>
-                              {activeAdmissionByPatientId[String(p.id)] ? (
-                                <span className="px-1 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 font-semibold">
-                                  Admitted · {activeAdmissionByPatientId[String(p.id)]?.bed_code || 'IPD'}
-                                </span>
-                              ) : (
-                                <span className="px-1 py-0.5 rounded border border-slate-200 bg-slate-50 text-slate-500">
-                                  Not admitted
-                                </span>
-                              )}
-                            </div>
-                          </button>
-                        ))
-                      ) : (
-                        <div className="p-2 text-center text-[10px] text-slate-600">
-                          <button type="button" onClick={() => setShowAddPatient(true)} className="text-blue-600 font-medium">
-                            + Add patient
-                          </button>
+                <div className="space-y-1">
+                  {selectedPt ? (
+                    <div className="flex items-center justify-between bg-blue-50 border border-blue-200 px-2 py-0.5 rounded text-[11px] font-semibold">
+                      <span className="truncate text-blue-800">
+                        {selectedPt.first_name} {selectedPt.last_name} ({selectedPt.uhid})
+                      </span>
+                      <button type="button" onClick={() => setSelectedPt(null)} className="text-blue-500 shrink-0 ml-1">
+                        ×
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-300" size={12} />
+                      <input
+                        type="text"
+                        placeholder="NAME / UHID / MOBILE"
+                        value={ptSearch}
+                        onChange={(e) => setPtSearch(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 pl-7 pr-2 py-0.5 rounded text-[11px] font-medium focus:bg-white focus:border-blue-500 outline-none uppercase"
+                      />
+                      {ptSearch.length > 2 && (
+                        <div className="absolute top-full left-0 right-0 mt-0.5 bg-white border border-slate-200 shadow-lg z-[260] text-left">
+                          <div className="max-h-40 overflow-y-auto">
+                            {ptResults.length > 0 ? (
+                              ptResults.map((p) => (
+                                <button
+                                  key={p.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedPt(p)
+                                    setLinkedAdmission(activeAdmissionByPatientId[String(p.id)] || null)
+                                    setPtResults([])
+                                    setPtSearch('')
+                                  }}
+                                  className="w-full text-left px-2 py-1 hover:bg-slate-50 text-[11px]"
+                                >
+                                  <div className="font-semibold text-slate-900">
+                                    {p.first_name} {p.last_name}
+                                  </div>
+                                  <div className="text-[9px] text-slate-400 flex items-center gap-1.5">
+                                    <span>{p.phone} | {p.uhid}</span>
+                                    {activeAdmissionByPatientId[String(p.id)] ? (
+                                      <span className="px-1 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 font-semibold">
+                                        Admitted · {activeAdmissionByPatientId[String(p.id)]?.bed_code || 'IPD'}
+                                      </span>
+                                    ) : (
+                                      <span className="px-1 py-0.5 rounded border border-slate-200 bg-slate-50 text-slate-500">
+                                        Not admitted
+                                      </span>
+                                    )}
+                                  </div>
+                                </button>
+                              ))
+                            ) : (
+                              <div className="p-2 text-center text-[10px] text-slate-600">No matches found.</div>
+                            )}
+                          </div>
+                          <div className="border-t border-slate-100 p-1.5 bg-slate-50/70">
+                            <button
+                              type="button"
+                              onClick={() => setShowAddPatient(true)}
+                              className="w-full text-left text-[10px] font-semibold text-blue-600 hover:text-blue-700"
+                            >
+                              + Add patient
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1474,6 +1541,7 @@ function ErpBillingViewInner({
             onClick={() => {
               setRows(normalizeRows(Array.from({ length: MIN_ROWS }, () => createNewRow()), createNewRow))
               setBillDiscountPercent('')
+              localStorage.removeItem('pharmacy_bill_display')
             }}
             className="w-full border border-slate-200 py-1.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
           >

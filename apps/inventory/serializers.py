@@ -22,6 +22,7 @@ class UnitCreateUpdateSerializer(serializers.ModelSerializer):
 class MedicineSerializer(serializers.ModelSerializer):
     pharmacy_id = serializers.UUIDField(read_only=True)
     unit_name = serializers.CharField(source="unit.name", read_only=True)
+    category_name = serializers.CharField(source="category.name", read_only=True)
 
     class Meta:
         model = Medicine
@@ -32,6 +33,8 @@ class MedicineSerializer(serializers.ModelSerializer):
             "name",
             "company_name",
             "form",
+            "category",
+            "category_name",
             "composition",
             "strength",
             "unit",
@@ -48,6 +51,37 @@ class MedicineSerializer(serializers.ModelSerializer):
 
 
 class MedicineCreateUpdateSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        request = self.context.get("request")
+        request_pharmacy = getattr(request, "pharmacy", None) if request is not None else None
+        request_pharmacy_id = getattr(request_pharmacy, "id", None)
+
+        raw_sku = attrs.get("sku", getattr(self.instance, "sku", ""))
+        sku = (raw_sku or "").strip()
+        if not sku:
+            raise serializers.ValidationError({"sku": "SKU is required."})
+        attrs["sku"] = sku
+
+        raw_name = attrs.get("name", getattr(self.instance, "name", ""))
+        name = (raw_name or "").strip()
+        if not name:
+            raise serializers.ValidationError({"name": "Medicine name is required."})
+        attrs["name"] = name
+
+        # Enforce SKU uniqueness per pharmacy branch. We can't rely on DRF's
+        # UniqueTogetherValidator because pharmacy_id is set in perform_create.
+        if request_pharmacy_id:
+            existing = Medicine.objects.filter(pharmacy_id=request_pharmacy_id, sku__iexact=sku)
+            if self.instance:
+                existing = existing.exclude(id=self.instance.id)
+            if existing.exists():
+                raise serializers.ValidationError({"sku": "A medicine with this SKU already exists."})
+            category = attrs.get("category", getattr(self.instance, "category", None))
+            if category is not None and str(getattr(category, "pharmacy_id", "")) != str(request_pharmacy_id):
+                raise serializers.ValidationError({"category": "Category must belong to selected pharmacy branch."})
+
+        return attrs
+
     class Meta:
         model = Medicine
         fields = [
@@ -56,6 +90,7 @@ class MedicineCreateUpdateSerializer(serializers.ModelSerializer):
             "name",
             "company_name",
             "form",
+            "category",
             "composition",
             "strength",
             "unit",
@@ -83,6 +118,7 @@ class MedicineCategorySerializer(serializers.ModelSerializer):
             "id",
             "pharmacy_id",
             "name",
+            "color",
             "parent",
             "parent_name",
             "is_active",
@@ -98,22 +134,52 @@ class MedicineCategorySerializer(serializers.ModelSerializer):
 
 class MedicineCategoryCreateUpdateSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
-        parent = attrs.get("parent")
-        if not parent:
-            return attrs
         request = self.context.get("request")
         request_pharmacy = getattr(request, "pharmacy", None) if request is not None else None
         request_pharmacy_id = getattr(request_pharmacy, "id", None)
-        if request_pharmacy_id and str(parent.pharmacy_id) != str(request_pharmacy_id):
-            raise serializers.ValidationError({"parent": "Parent category must belong to selected pharmacy branch."})
-        if self.instance and str(parent.id) == str(self.instance.id):
-            raise serializers.ValidationError({"parent": "A category cannot be its own parent."})
+        parent = attrs.get("parent", getattr(self.instance, "parent", None))
+        raw_name = attrs.get("name", getattr(self.instance, "name", ""))
+        name = (raw_name or "").strip()
+        if not name:
+            raise serializers.ValidationError({"name": "Category name is required."})
+        attrs["name"] = name
+        if "color" in attrs:
+            color = (attrs.get("color") or "").strip()
+            if color and (not color.startswith("#") or len(color) != 7):
+                raise serializers.ValidationError({"color": "Color must be in #RRGGBB format."})
+            if color:
+                try:
+                    int(color[1:], 16)
+                except ValueError as exc:
+                    raise serializers.ValidationError({"color": "Color must be in #RRGGBB format."}) from exc
+            attrs["color"] = color.upper()
+
+        if parent is not None:
+            if request_pharmacy_id and str(parent.pharmacy_id) != str(request_pharmacy_id):
+                raise serializers.ValidationError({"parent": "Parent category must belong to selected pharmacy branch."})
+            if self.instance and str(parent.id) == str(self.instance.id):
+                raise serializers.ValidationError({"parent": "A category cannot be its own parent."})
+
+        # Keep top-level categories unique per pharmacy by name, while allowing
+        # sub-categories with same name under different parents.
+        if request_pharmacy_id:
+            existing = MedicineCategory.objects.filter(
+                pharmacy_id=request_pharmacy_id,
+                parent=parent,
+                name__iexact=name,
+            )
+            if self.instance:
+                existing = existing.exclude(id=self.instance.id)
+            if existing.exists():
+                raise serializers.ValidationError({"name": "Category already exists under this parent."})
         return attrs
 
     class Meta:
         model = MedicineCategory
         fields = [
+            "id",
             "name",
+            "color",
             "parent",
             "is_active",
             "rule_type",
@@ -122,6 +188,7 @@ class MedicineCategoryCreateUpdateSerializer(serializers.ModelSerializer):
             "retail_pack_label",
             "outer_pack_label",
         ]
+        read_only_fields = ["id"]
 
 
 class MedicineBatchSerializer(serializers.ModelSerializer):

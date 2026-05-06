@@ -159,6 +159,8 @@ class PharmacyOutletSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     website = models.CharField(max_length=200, blank=True, default="")
     default_gst_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
     default_sale_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    b2b_enabled = models.BooleanField(default=False, help_text="When enabled, sales are made to business parties instead of patients.")
+    low_stock_threshold = models.PositiveIntegerField(default=10, help_text="Medicines with total stock below this value are flagged as low stock.")
 
     def __str__(self) -> str:
         return f"Pharmacy settings ({self.pharmacy_id})"
@@ -171,7 +173,21 @@ class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
         CANCELLED = "cancelled", "Cancelled"
 
     pharmacy = models.ForeignKey(Pharmacy, on_delete=models.PROTECT, related_name="pharmacy_invoices")
-    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="pharmacy_invoices")
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, null=True, blank=True, related_name="pharmacy_invoices")
+    party = models.ForeignKey(
+        "PharmacySupplier",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="sale_invoices",
+        help_text="B2B sale party (used when B2B mode is enabled instead of patient).",
+    )
+    party_name_snapshot = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Party name captured at invoice time, preserved if the party is later deleted.",
+    )
     ipd_admission = models.ForeignKey(
         "ipd.IPDAdmission",
         on_delete=models.SET_NULL,
@@ -199,7 +215,8 @@ class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_pharmacy_invoices")
 
     def __str__(self):
-        return f"Invoice {self.invoice_no} - {self.patient.first_name}"
+        name = self.party_name_snapshot or (self.patient.first_name if self.patient_id else "—")
+        return f"Invoice {self.invoice_no} - {name}"
 
 class PharmacyInvoiceItem(TimeStampedModel, UUIDPrimaryKeyModel):
     invoice = models.ForeignKey(PharmacyInvoice, on_delete=models.CASCADE, related_name="items")

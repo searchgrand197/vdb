@@ -116,13 +116,13 @@ function PurchaseHistoryDashboardInner() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Supplier, medicine, batch…"
+              placeholder="Party, medicine, batch…"
               className="w-full border border-slate-200 rounded pl-8 pr-2 py-1.5 text-xs"
             />
           </div>
         </label>
         <label className="flex flex-col w-[9rem]">
-          <span className="text-[9px] font-bold text-slate-500 uppercase mb-0.5">Supplier</span>
+          <span className="text-[9px] font-bold text-slate-500 uppercase mb-0.5">Party</span>
           <select
             value={supplierId}
             onChange={(e) => setSupplierId(e.target.value)}

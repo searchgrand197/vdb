@@ -27,6 +27,13 @@ class Medicine(TimeStampedModel, UUIDPrimaryKeyModel):
     name = models.CharField(max_length=250)
     company_name = models.CharField(max_length=200, blank=True, default="")
     form = models.CharField(max_length=100, blank=True, default="")
+    category = models.ForeignKey(
+        "MedicineCategory",
+        on_delete=models.PROTECT,
+        related_name="medicines",
+        null=True,
+        blank=True,
+    )
     composition = models.CharField(max_length=250, blank=True, default="")
     strength = models.CharField(max_length=100, blank=True, default="")
     unit = models.ForeignKey(Unit, on_delete=models.PROTECT, related_name="medicines")
@@ -55,6 +62,14 @@ class MedicineCategory(TimeStampedModel, UUIDPrimaryKeyModel):
 
     pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="medicine_categories")
     name = models.CharField(max_length=120)
+    color = models.CharField(max_length=7, blank=True, default="")
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        related_name="subcategories",
+        null=True,
+        blank=True,
+    )
     is_active = models.BooleanField(default=True)
     rule_type = models.CharField(
         max_length=20,
@@ -68,8 +83,11 @@ class MedicineCategory(TimeStampedModel, UUIDPrimaryKeyModel):
     outer_pack_label = models.CharField(max_length=40, blank=True, default="")
 
     class Meta:
-        unique_together = [("pharmacy", "name")]
-        indexes = [models.Index(fields=["pharmacy", "name"])]
+        unique_together = [("pharmacy", "parent", "name")]
+        indexes = [
+            models.Index(fields=["pharmacy", "name"]),
+            models.Index(fields=["pharmacy", "parent"], name="inventory_m_pharmac_parent_idx"),
+        ]
 
     def __str__(self) -> str:
         return self.name
