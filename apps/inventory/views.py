@@ -15,6 +15,7 @@ from django.db import transaction
 
 from apps.auditlogs.services import create_audit_log
 from apps.inventory.models import Medicine, MedicineBatch, MedicineCategory, StockLedger, Unit
+from apps.pharmacy.models import PharmacyOutletSettings
 from apps.inventory.serializers import (
     MedicineBatchCreateUpdateSerializer,
     MedicineBatchRatesUpdateSerializer,
@@ -30,6 +31,7 @@ from apps.inventory.serializers import (
 )
 from apps.inventory.services.stock_service import get_batch_available_qty
 from apps.roles_permissions.permissions import HasRequiredPermission
+from apps.shared.pagination import LargeLimitOffsetPagination
 from apps.shared.response import success_response
 def _resolve_request_pharmacy(request):
     """Resolve active pharmacy branch strictly from middleware context."""
@@ -138,6 +140,7 @@ class UnitViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
 class MedicineCategoryViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = MedicineCategory.objects.all().order_by("name")
+    pagination_class = LargeLimitOffsetPagination
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("name",)
     permission_classes = [permissions.IsAuthenticated, HasRequiredPermission]
@@ -197,6 +200,13 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     def get_permissions(self):
         self.required_permission = self.get_required_permission()
         return super().get_permissions()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # Medicine/category screens should only show active medicines.
+        if getattr(self, "action", None) in {"list", "retrieve", "search"}:
+            return qs.filter(is_active=True)
+        return qs
 
     def perform_create(self, serializer):
         pharmacy = _resolve_request_pharmacy(self.request)
@@ -297,6 +307,64 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
         out.sort(key=sort_key)
         return success_response(out[:80])
+
+    @action(detail=False, methods=["get"], url_path="low-stock")
+    def low_stock(self, request):
+        """
+        Returns medicines whose total stock (sum across all batches) is below the
+        pharmacy's low_stock_threshold setting.
+        GET /api/v1/medicines/low-stock/
+        """
+        pharmacy = _resolve_request_pharmacy(request)
+        pid = getattr(pharmacy, "id", None)
+        if not pid:
+            return Response({"success": False, "detail": "Pharmacy context required."}, status=400)
+
+        # Resolve threshold from settings (default 10)
+        threshold = 10
+        try:
+            settings_obj = PharmacyOutletSettings.objects.get(pharmacy_id=pid)
+            threshold = int(settings_obj.low_stock_threshold)
+        except (PharmacyOutletSettings.DoesNotExist, TypeError, ValueError):
+            pass
+
+        medicines = (
+            Medicine.objects.filter(pharmacy_id=pid, is_active=True)
+            .select_related("unit")
+            .order_by("name")
+        )
+
+        out = []
+        for med in medicines:
+            batches = MedicineBatch.objects.filter(medicine_id=med.id, pharmacy_id=pid)
+            total_stock = sum(float(get_batch_available_qty(b)) for b in batches)
+            if total_stock < threshold:
+                batch_list = []
+                for b in batches:
+                    qty = float(get_batch_available_qty(b))
+                    st, days = _expiry_status(b.expiry_date)
+                    batch_list.append({
+                        "id": str(b.id),
+                        "batch_no": b.batch_no,
+                        "expiry_date": b.expiry_date.isoformat() if b.expiry_date else None,
+                        "mrp": str(b.mrp),
+                        "sale_rate": str(b.sale_rate),
+                        "quantity": qty,
+                        "expiry_status": st,
+                        "days_to_expiry": days,
+                    })
+                out.append({
+                    "id": str(med.id),
+                    "name": med.name,
+                    "sku": med.sku or "",
+                    "pack_info": med.pack_info or "",
+                    "unit_name": med.unit.name if med.unit_id else "",
+                    "total_stock": total_stock,
+                    "threshold": threshold,
+                    "batches": batch_list,
+                })
+
+        return success_response(out)
 
 
 class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):

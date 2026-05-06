@@ -161,7 +161,7 @@ function PurchaseChallanPanelInner({ onPosted, outletSettings }) {
 
   async function submit() {
     if (!supplierId) {
-      toast.error('Select supplier')
+      toast.error('Select party')
       return
     }
     if (!(invoiceNo || '').trim()) {
@@ -263,7 +263,7 @@ function PurchaseChallanPanelInner({ onPosted, outletSettings }) {
     <div className="h-full flex flex-col gap-3 overflow-hidden p-3 text-slate-800 text-[14px] bg-gradient-to-br from-slate-50 via-white to-emerald-50/40 rounded-xl">
       <div className="shrink-0 flex flex-wrap items-end gap-x-2 gap-y-1 bg-white/95 border border-slate-200/80 rounded-xl px-3 py-2 shadow-sm">
         <div className="flex flex-col min-w-[10rem] flex-1">
-          <span className="text-[10px] font-semibold text-slate-500 uppercase">Supplier *</span>
+          <span className="text-[10px] font-semibold text-slate-500 uppercase">Party *</span>
           <PurchaseSupplierPicker supplierId={supplierId} supplierName={supplierName} onChange={setSupplier} required />
         </div>
         <label className="flex flex-col w-[7.5rem]">

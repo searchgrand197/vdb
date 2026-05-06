@@ -38,6 +38,7 @@ import {
   TrendingDown as TrendingDownMuiIcon,
   TrendingUp as TrendingUpMuiIcon,
   Groups as GroupsIcon,
+  Folder as FolderIcon,
   Science as ScienceIcon,
   Visibility as VisibilityIcon,
   Edit as EditIcon,
@@ -73,6 +74,7 @@ export const Pill = asLucide(MedicationIcon)
 export const Trash2 = asLucide(DeleteIcon)
 export const ArrowLeft = asLucide(ArrowBackIcon)
 export const Package = asLucide(Inventory2Icon)
+export const Folder = asLucide(FolderIcon)
 export const CheckCircle2 = asLucide(CheckCircleMuiIcon)
 export const CheckCircleIconCompat = asLucide(CheckCircleMuiIcon)
 export const CheckCircle = CheckCircleIconCompat
@@ -89,6 +91,7 @@ export const Printer = asLucide(PrintIcon)
 export const Beaker = asLucide(ScienceIcon)
 export const ChevronDown = asLucide(ExpandMoreIcon)
 export const ChevronUp = asLucide(ExpandLessIcon)
+export const ChevronRight = asLucide(ChevronRightIcon)
 export const Wind = asLucide(WavesIcon)
 export const Fan = asLucide(SettingsIcon)
 export const Bed = asLucide(BedMuiIcon)

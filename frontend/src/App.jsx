@@ -21,6 +21,7 @@ const TVDisplay = lazy(() => import('./pages/TVDisplay'))
 const LabPortal = lazy(() => import('./pages/LabPortal'))
 const PrintSlipPage = lazy(() => import('./pages/PrintSlipPage'))
 const PharmacyPortal = lazy(() => import('./pages/PharmacyPortal'))
+const PharmacySalesDisplay = lazy(() => import('./pages/PharmacySalesDisplay'))
 
 const ROLE_PATHS = {
   staff: '/staff',
@@ -31,14 +32,32 @@ const ROLE_PATHS = {
   admin: '/admin',
 }
 
+/** Pharmacy API requires X-Pharmacy-Branch; without it every request fails and must not auto-bounce from /login */
+function pharmacyPortalReady(role, pharmacyBranchId) {
+  return role !== 'pharmacy' || Boolean(pharmacyBranchId)
+}
+
 function PrivateRoute({ children }) {
   const isAuthenticated = useAuthStore((s) => Boolean(s.tokens.access))
   return isAuthenticated ? children : <Navigate to="/login" replace />
 }
 
+function PharmacyRequiresBranch({ children }) {
+  const role = useAuthStore((s) => s.role)
+  const pharmacyBranchId = useAuthStore((s) => s.pharmacyBranchId)
+  if (role === 'pharmacy' && !pharmacyBranchId) {
+    return <Navigate to="/login" replace />
+  }
+  return children
+}
+
 function HomeRedirect() {
   const hasAccess = useAuthStore((s) => Boolean(s.tokens.access))
   const role = useAuthStore((s) => s.role) || 'staff'
+  const pharmacyBranchId = useAuthStore((s) => s.pharmacyBranchId)
+  if (hasAccess && !pharmacyPortalReady(role, pharmacyBranchId)) {
+    return <Navigate to="/login" replace />
+  }
   if (hasAccess) {
     return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
   }
@@ -48,8 +67,9 @@ function HomeRedirect() {
 function LoginRoute() {
   const hasAccess = useAuthStore((s) => Boolean(s.tokens.access))
   const role = useAuthStore((s) => s.role) || 'staff'
+  const pharmacyBranchId = useAuthStore((s) => s.pharmacyBranchId)
 
-  if (hasAccess) {
+  if (hasAccess && pharmacyPortalReady(role, pharmacyBranchId)) {
     return <Navigate to={ROLE_PATHS[role] || '/staff'} replace />
   }
   return <Login />
@@ -274,7 +294,9 @@ export default function App() {
             path="/pharmacy"
             element={
               <PrivateRoute>
-                <PharmacyPortal />
+                <PharmacyRequiresBranch>
+                  <PharmacyPortal />
+                </PharmacyRequiresBranch>
               </PrivateRoute>
             }
           />
@@ -288,6 +310,7 @@ export default function App() {
           />
           <Route path="/tv/:roomCode" element={<TVDisplay />} />
           <Route path="/print-slip" element={<PrintSlipPage />} />
+          <Route path="/pharmacy-display" element={<PharmacySalesDisplay />} />
           <Route path="/" element={<HomeRedirect />} />
         </Routes>
       </Suspense>

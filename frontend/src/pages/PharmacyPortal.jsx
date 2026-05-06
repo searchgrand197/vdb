@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ShoppingBag as ShoppingBagIcon,
   Search as SearchIcon,
@@ -11,6 +12,7 @@ import {
   Inventory2 as Inventory2Icon,
   LocalShipping as LocalShippingIcon,
   Visibility as VisibilityIcon,
+  ChevronRight as ChevronRightIcon,
   Edit as EditIcon,
   Tune as TuneIcon,
   Delete as DeleteIcon,
@@ -18,8 +20,9 @@ import {
   KeyboardDoubleArrowLeft as KeyboardDoubleArrowLeftIcon,
   KeyboardDoubleArrowRight as KeyboardDoubleArrowRightIcon,
   Sell as SellIcon,
+  Groups as GroupsIcon,
 } from '@mui/icons-material'
-import api from '../api'
+import api, { getHospitalId } from '../api'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '../stores/authStore'
 import { format } from 'date-fns'
@@ -30,6 +33,7 @@ import PurchaseChallanPanel from '../pharmacy/PurchaseChallanPanel'
 import PurchaseHistoryDashboard from '../pharmacy/PurchaseHistoryDashboard'
 import PharmacyDashboard from '../pharmacy/PharmacyDashboard'
 import PharmacyCategoriesView from '../pharmacy/PharmacyCategoriesView'
+import PartiesView from '../pharmacy/PartiesView'
 import DraftsView from '../pharmacy/DraftsView'
 import { parseApiError } from '../pharmacy/pharmacyCalculations'
 import {
@@ -37,7 +41,9 @@ import {
   packFieldLabel,
   baseFieldLabel,
   conversionHintLines,
+  normalizeCategoryName,
 } from '../pharmacy/categoryRulePresets'
+import { mergeCategoryNames } from '../pharmacy/pharmacyCategoryNames'
 
 function asMuiIcon(IconComponent) {
   return function IconBridge({ size, className, sx, ...rest }) {
@@ -63,6 +69,8 @@ const LayoutDashboard = asMuiIcon(DashboardIcon)
 const PanelLeftClose = asMuiIcon(KeyboardDoubleArrowLeftIcon)
 const PanelLeftOpen = asMuiIcon(KeyboardDoubleArrowRightIcon)
 const Tags = asMuiIcon(SellIcon)
+const ChevronRight = asMuiIcon(ChevronRightIcon)
+const Groups = asMuiIcon(GroupsIcon)
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -154,9 +162,9 @@ export default function PharmacyPortal() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  async function handleLogout() {
-    await useAuthStore.getState().logout()
-    window.location.href = '/login'
+  function handleLogout() {
+    useAuthStore.getState().logoutSilent()
+    window.location.replace('/login')
   }
 
   const brand = outletSettings?.business_name?.trim() || 'Pharmacy'
@@ -182,11 +190,12 @@ export default function PharmacyPortal() {
             { id: 'drafts', label: 'Drafts', icon: FileText },
             { id: 'billing', label: 'Sales', icon: ShoppingBag },
             { id: 'purchase', label: 'Purchase', icon: Truck },
+            outletSettings?.b2b_enabled ? { id: 'parties', label: 'Parties', icon: Groups } : null,
             { id: 'inventory', label: 'Inventory', icon: Package },
             { id: 'categories', label: 'Categories', icon: Tags },
             { id: 'history', label: 'Register', icon: FileText },
             { id: 'settings', label: 'Settings', icon: Settings },
-          ].map((item) => (
+          ].filter(Boolean).map((item) => (
             <button
               key={item.id}
               type="button"
@@ -310,11 +319,15 @@ export default function PharmacyPortal() {
                     batches={batches}
                     setShowAddMedicine={setShowAddMedicine}
                     fetchInitialData={fetchInitialData}
+                    outletSettings={outletSettings}
                   />
                 )}
               </ErrorBoundary>
+              <ErrorBoundary componentName="PartiesView">
+                {view === 'parties' && <PartiesView />}
+              </ErrorBoundary>
               <ErrorBoundary componentName="PharmacyCategoriesView">
-                {view === 'categories' && <PharmacyCategoriesView />}
+                {view === 'categories' && <PharmacyCategoriesView batches={batches} />}
               </ErrorBoundary>
               <ErrorBoundary componentName="HistoryView">
                 {view === 'history' && <HistoryView invoices={invoices} setPrintingInvoice={setPrintingInvoice} />}
@@ -371,12 +384,10 @@ function expiryRowClass(expiryDate) {
   return 'text-slate-600'
 }
 
-function isLowStockRow(qty, stripSize) {
+function isLowStockRow(qty, threshold) {
   const q = Number(qty) || 0
-  const sp = Number(stripSize) || 0
-  if (q <= 0) return true
-  if (sp > 1) return q < sp * 2
-  return q < 15
+  const t = Number(threshold) > 0 ? Number(threshold) : 10
+  return q < t
 }
 
 /** Prefer box > carton > strip; label matches JSON key (e.g. strip, box). */
@@ -467,8 +478,11 @@ function formatStockLedgerLabel(r) {
   return r.reason || '—'
 }
 
-function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialData }) {
+function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialData, outletSettings }) {
   const [q, setQ] = useState('')
+  const [invTab, setInvTab] = useState('all')
+  const [lowStockItems, setLowStockItems] = useState([])
+  const [lowStockLoading, setLowStockLoading] = useState(false)
   const [allowNegative, setAllowNegative] = useState(() => localStorage.getItem(INV_ALLOW_NEG_KEY) === '1')
   const [detailBatch, setDetailBatch] = useState(null)
   const [rateBatch, setRateBatch] = useState(null)
@@ -479,7 +493,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
   useEffect(() => {
     let cancelled = false
     api
-      .get('/medicine-categories/?limit=500')
+      .get('/medicine-categories/?limit=5000')
       .then((res) => {
         if (cancelled) return
         const rows = res.data?.data || res.data?.results || []
@@ -500,6 +514,22 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
       /* ignore */
     }
   }, [allowNegative])
+
+  useEffect(() => {
+    if (invTab !== 'low_stock') return
+    let cancelled = false
+    setLowStockLoading(true)
+    api
+      .get('/medicines/low-stock/')
+      .then((res) => {
+        if (cancelled) return
+        const rows = res.data?.data || res.data?.results || res.data || []
+        setLowStockItems(Array.isArray(rows) ? rows : [])
+      })
+      .catch(() => { if (!cancelled) setLowStockItems([]) })
+      .finally(() => { if (!cancelled) setLowStockLoading(false) })
+    return () => { cancelled = true }
+  }, [invTab])
 
   const qLower = q.toLowerCase()
   const medicineById = new Map(medicines.map((m) => [String(m.id), m]))
@@ -557,6 +587,24 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
           <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
             {totalRows} items
           </span>
+          {/* Tab bar */}
+          <div className="flex items-center gap-0.5 ml-2 bg-slate-100 rounded-lg p-0.5">
+            <button
+              type="button"
+              onClick={() => setInvTab('all')}
+              className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-colors ${invTab === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => setInvTab('low_stock')}
+              className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-colors flex items-center gap-1 ${invTab === 'low_stock' ? 'bg-white text-amber-700 shadow-sm' : 'text-slate-500 hover:text-amber-600'}`}
+            >
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500" />
+              Low Stock
+            </button>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-[10px] text-slate-600 cursor-pointer">
@@ -576,6 +624,68 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
           </button>
         </div>
       </div>
+
+      {/* Low Stock Tab */}
+      {invTab === 'low_stock' && (
+        <div className="flex-1 bg-white border border-slate-200 rounded overflow-hidden flex flex-col min-h-0 min-w-0">
+          {lowStockLoading ? (
+            <div className="flex items-center justify-center h-full text-xs text-slate-400">Loading…</div>
+          ) : lowStockItems.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-400">
+              <span className="text-2xl">✓</span>
+              <p className="text-xs font-semibold">No medicines below the low stock threshold ({outletSettings?.low_stock_threshold ?? 10} units)</p>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
+              <table className="w-full text-left text-[11px] table-fixed border-collapse">
+                <thead className="bg-slate-100 sticky top-0 z-10 font-bold text-slate-600 uppercase">
+                  <tr>
+                    <th className="px-2 py-1.5 w-[30%]">Medicine</th>
+                    <th className="px-2 py-1.5 w-[12%]">SKU</th>
+                    <th className="px-2 py-1.5 w-[10%] text-right">Total Stock</th>
+                    <th className="px-2 py-1.5 w-[10%] text-right">Threshold</th>
+                    <th className="px-2 py-1.5">Batches</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {lowStockItems.map((item) => (
+                    <tr key={item.id} className="bg-amber-50/40 hover:bg-amber-50">
+                      <td className="px-2 py-2 align-top font-semibold text-slate-900">
+                        {item.name}
+                        {item.pack_info ? <span className="ml-1 text-[10px] text-slate-400 font-normal">{item.pack_info}</span> : null}
+                      </td>
+                      <td className="px-2 py-2 align-top text-slate-500 font-mono">{item.sku || '—'}</td>
+                      <td className="px-2 py-2 align-top text-right tabular-nums font-bold text-amber-700">
+                        {item.total_stock}
+                      </td>
+                      <td className="px-2 py-2 align-top text-right tabular-nums text-slate-500">
+                        {item.threshold}
+                      </td>
+                      <td className="px-2 py-2 align-top">
+                        <div className="flex flex-wrap gap-1">
+                          {item.batches.length === 0 ? (
+                            <span className="text-slate-400">No batches</span>
+                          ) : item.batches.map((b) => (
+                            <span key={b.id} className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${b.expiry_status === 'expired' ? 'bg-rose-50 border-rose-200 text-rose-700' : b.expiry_status === 'expiring' ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
+                              <span className="font-mono">{b.batch_no}</span>
+                              <span>·</span>
+                              <span>{b.quantity}</span>
+                              {b.expiry_date && <span className="opacity-70">{b.expiry_date.slice(0,7)}</span>}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* All Inventory Tab */}
+      {invTab === 'all' && (
       <div className="flex-1 bg-white border border-slate-200 rounded overflow-hidden flex flex-col min-h-0 min-w-0">
         <div className="px-3 py-2 border-b border-slate-100 flex items-center gap-2 bg-slate-50/70 shrink-0">
           <Search size={14} className="text-slate-400 shrink-0" />
@@ -606,7 +716,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
                 const { baseLabel, packLabel, perPack } = inventoryQtyLabels(med, medicineCategoryRows)
                 const qty = Number(b.quantity ?? 0)
                 const stockLabel = formatPackAndBaseStock(qty, perPack, packLabel, baseLabel)
-                const low = isLowStockRow(qty, perPack)
+                const low = isLowStockRow(qty, outletSettings?.low_stock_threshold)
                 const expCls = expiryRowClass(b.expiry_date)
                 return (
                   <tr
@@ -720,6 +830,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
           </table>
         </div>
       </div>
+      )}
 
       {detailBatch && (
         <InventoryBatchDetailModal
@@ -733,6 +844,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
         <InventoryEditRateModal
           batch={rateBatch.batch}
           medicine={rateBatch.medicine}
+          customCategories={medicineCategoryRows}
           onClose={() => setRateBatch(null)}
           onSaved={() => {
             setRateBatch(null)
@@ -858,10 +970,84 @@ function InventoryBatchDetailModal({ batch, medicine, medicineCategoryRows = [],
   )
 }
 
-function InventoryEditRateModal({ batch, medicine, onClose, onSaved }) {
+function InventoryEditRateModal({ batch, medicine, customCategories = [], onClose, onSaved }) {
   const [mrp, setMrp] = useState(String(batch.mrp ?? ''))
   const [sale, setSale] = useState(String(batch.sale_rate ?? ''))
   const [saving, setSaving] = useState(false)
+
+  // Category picker state — mirrors AddMedicineModal
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickerSearch, setPickerSearch] = useState('')
+  const [expandedCatIds, setExpandedCatIds] = useState(() => new Set())
+
+  const { idToRow, childrenOf, roots } = React.useMemo(
+    () => buildMedicineCategoryLookups(customCategories),
+    [customCategories],
+  )
+
+  const [categoryPathIds, setCategoryPathIds] = useState(() => {
+    const catId = medicine?.category ? String(medicine.category) : ''
+    if (!catId) return []
+    return categoryAncestorsPath(catId, (() => {
+      const m = new Map()
+      customCategories.forEach((c) => { if (c?.id) m.set(String(c.id), c) })
+      return m
+    })())
+  })
+
+  const breadcrumb = React.useMemo(
+    () => categoryPathIds.map((id) => idToRow.get(id)?.name || '').filter(Boolean).join(' › '),
+    [categoryPathIds, idToRow],
+  )
+
+  // Sorted flat list with full path labels for "ALL CATEGORY NAMES" section
+  const allFlatOptions = React.useMemo(() => {
+    return customCategories
+      .map((row) => ({
+        id: String(row.id),
+        label: categoryPathLabel(row.id, idToRow) || row.name || '',
+        name: row.name || '',
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+  }, [customCategories, idToRow])
+
+  const filteredOptions = React.useMemo(() => {
+    const q = pickerSearch.trim().toLowerCase()
+    if (!q) return allFlatOptions
+    return allFlatOptions.filter((o) => o.label.toLowerCase().includes(q))
+  }, [allFlatOptions, pickerSearch])
+
+  useEffect(() => {
+    if (!pickerOpen) return undefined
+    function onKey(e) { if (e.key === 'Escape') setPickerOpen(false) }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [pickerOpen])
+
+  useEffect(() => {
+    if (!pickerOpen) return
+    setExpandedCatIds(() => {
+      const next = new Set()
+      categoryPathIds.slice(0, -1).forEach((id) => next.add(String(id)))
+      return next
+    })
+  }, [pickerOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function selectCatRow(row) {
+    if (!row?.id) return
+    setCategoryPathIds(categoryAncestorsPath(row.id, idToRow))
+    setPickerOpen(false)
+    setPickerSearch('')
+  }
+
+  function toggleCatExpand(id) {
+    setExpandedCatIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(String(id))) next.delete(String(id))
+      else next.add(String(id))
+      return next
+    })
+  }
 
   async function save() {
     setSaving(true)
@@ -870,7 +1056,9 @@ function InventoryEditRateModal({ batch, medicine, onClose, onSaved }) {
         mrp: Number(mrp) || 0,
         sale_rate: Number(sale) || 0,
       })
-      toast.success('Rates updated')
+      const leafId = categoryPathIds.length ? categoryPathIds[categoryPathIds.length - 1] : null
+      await api.patch(`/medicines/${medicine.id}/`, { category: leafId || null })
+      toast.success('Updated')
       onSaved?.()
     } catch (e) {
       toast.error(parseApiError(e))
@@ -882,42 +1070,70 @@ function InventoryEditRateModal({ batch, medicine, onClose, onSaved }) {
   return (
     <div className="fixed inset-0 bg-slate-900/40 z-[200] flex items-center justify-center p-4" onClick={onClose} role="presentation">
       <div
-        className="bg-white rounded-lg shadow-xl w-full max-w-sm border border-slate-200 p-3"
+        className="bg-white rounded-lg shadow-xl w-full max-w-sm border border-slate-200 p-3 space-y-3"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="Edit rates"
+        aria-label="Edit medicine"
       >
-        <div className="flex justify-between items-center mb-2">
-          <h3 className="text-xs font-bold text-slate-800">Edit rate</h3>
+        <div className="flex justify-between items-center">
+          <h3 className="text-xs font-bold text-slate-800">Edit medicine</h3>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700">
             <X size={16} />
           </button>
         </div>
-        <p className="text-[9px] text-slate-500 mb-2 truncate" title={medicine?.name}>
+        <p className="text-[9px] text-slate-500 truncate" title={medicine?.name}>
           {medicine?.name} · <span className="font-mono">{batch.batch_no}</span>
         </p>
-        <p className="text-[9px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-1.5 py-1 mb-2">
-          Only MRP and sale rate can be changed. Stock, batch, expiry, and purchase cost come from purchase / system.
-        </p>
-        <label className="block mb-2">
-          <span className="text-[9px] font-semibold text-slate-600">MRP (₹)</span>
-          <input
-            value={mrp}
-            onChange={(e) => setMrp(e.target.value)}
-            className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs tabular-nums"
-            inputMode="decimal"
-          />
-        </label>
-        <label className="block mb-3">
-          <span className="text-[9px] font-semibold text-slate-600">Sale rate (₹)</span>
-          <input
-            value={sale}
-            onChange={(e) => setSale(e.target.value)}
-            className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs tabular-nums"
-            inputMode="decimal"
-          />
-        </label>
-        <div className="flex gap-2">
+
+        {/* Rates */}
+        <div>
+          <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">Rates</p>
+          <p className="text-[9px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-1.5 py-1 mb-2">
+            Stock, batch, expiry and purchase cost come from purchase / system.
+          </p>
+          <label className="block mb-2">
+            <span className="text-[9px] font-semibold text-slate-600">MRP (₹)</span>
+            <input
+              value={mrp}
+              onChange={(e) => setMrp(e.target.value)}
+              className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs tabular-nums"
+              inputMode="decimal"
+            />
+          </label>
+          <label className="block">
+            <span className="text-[9px] font-semibold text-slate-600">Sale rate (₹)</span>
+            <input
+              value={sale}
+              onChange={(e) => setSale(e.target.value)}
+              className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs tabular-nums"
+              inputMode="decimal"
+            />
+          </label>
+        </div>
+
+        {/* Category — same popup as Add Medicine */}
+        <div>
+          <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">Category</p>
+          <button
+            type="button"
+            onClick={() => setPickerOpen((o) => !o)}
+            className="w-full flex items-center justify-between gap-2 min-h-8 border border-slate-300 rounded px-2 py-1 text-[11px] text-left bg-white hover:bg-slate-50 outline-none focus:border-blue-500"
+          >
+            <span className="truncate text-slate-800">{breadcrumb || 'Browse categories…'}</span>
+            <ChevronRight size={14} className="text-slate-400 shrink-0" sx={{ transform: 'rotate(90deg)' }} />
+          </button>
+          {breadcrumb && (
+            <button
+              type="button"
+              onClick={() => setCategoryPathIds([])}
+              className="mt-0.5 text-[9px] text-rose-500 hover:underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 py-1.5 rounded border border-slate-200 text-[10px] font-semibold">
             Cancel
           </button>
@@ -931,6 +1147,93 @@ function InventoryEditRateModal({ batch, medicine, onClose, onSaved }) {
           </button>
         </div>
       </div>
+
+      {/* Category picker popup — same as Add Medicine */}
+      {pickerOpen && createPortal(
+        <div
+          className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-900/45"
+          onClick={() => setPickerOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="flex h-[min(85vh,32rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="inv-cat-picker-title"
+          >
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
+              <h4 id="inv-cat-picker-title" className="text-sm font-bold text-slate-900">Select category</h4>
+              <button type="button" onClick={() => setPickerOpen(false)} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="shrink-0 border-b border-slate-100 p-2">
+              <input
+                type="text"
+                value={pickerSearch}
+                onChange={(e) => setPickerSearch(e.target.value)}
+                placeholder="Search all names or browse lists below…"
+                className="h-7 w-full rounded border border-slate-200 px-2 text-[11px]"
+                autoFocus
+              />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto py-1">
+              {pickerSearch.trim() ? (
+                filteredOptions.length === 0 ? (
+                  <div className="px-3 py-4 text-[11px] text-slate-500">No matches</div>
+                ) : (
+                  filteredOptions.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => selectCatRow(idToRow.get(opt.id))}
+                      className="w-full border-b border-slate-50 px-3 py-1.5 text-left text-[11px] text-slate-800 last:border-b-0 hover:bg-slate-50"
+                    >
+                      <span className="block truncate" title={opt.label}>{opt.label}</span>
+                    </button>
+                  ))
+                )
+              ) : (
+                <div className="flex flex-col gap-0">
+                  {roots.length > 0 && (
+                    <>
+                      <div className="px-3 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">Nested folders</div>
+                      <CategoryPickerTreeRows
+                        nodes={roots}
+                        depth={0}
+                        childrenOf={childrenOf}
+                        expandedIds={expandedCatIds}
+                        onToggleExpand={toggleCatExpand}
+                        onSelectRow={selectCatRow}
+                      />
+                      <div className="mx-2 my-2 border-t border-slate-100" />
+                    </>
+                  )}
+                  <div className="px-3 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                    All category names (presets · medicines · folders)
+                  </div>
+                  {allFlatOptions.length === 0 ? (
+                    <div className="px-3 py-2 text-[11px] text-slate-500">No labels loaded</div>
+                  ) : (
+                    allFlatOptions.map((opt) => (
+                      <button
+                        key={`flat-${opt.id}`}
+                        type="button"
+                        onClick={() => selectCatRow(idToRow.get(opt.id))}
+                        className="w-full border-b border-slate-50 px-3 py-1.5 text-left text-[11px] text-slate-800 last:border-b-0 hover:bg-slate-50"
+                      >
+                        <span className="block truncate" title={opt.label}>{opt.label}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }
@@ -1785,6 +2088,154 @@ function uniqText(values) {
   return out
 }
 
+const CATEGORY_TREE_ROOT = '__root__'
+
+/** Parent FK may be a UUID string or a nested object from some serializers. */
+function normalizeCategoryParentKey(row) {
+  const p = row?.parent
+  if (p == null || p === '') return CATEGORY_TREE_ROOT
+  if (typeof p === 'object' && p !== null && 'id' in p) return String(p.id)
+  return String(p)
+}
+
+/** One row per id (API/payload can repeat the same id). */
+function dedupeCategoryRowsById(rows) {
+  const m = new Map()
+  ;(rows || []).forEach((r) => {
+    if (r && r.id) m.set(String(r.id), r)
+  })
+  return Array.from(m.values())
+}
+
+/**
+ * Under the same parent, (pharmacy, parent, name) should be unique; bad/legacy data can still repeat.
+ * Match the Categories tab: one visible entry per name among siblings (keeps first by sort order).
+ */
+function dedupeSiblingsByNormalizedName(rows) {
+  const out = []
+  const seen = new Set()
+  const sorted = [...(rows || [])].sort((a, b) =>
+    String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }),
+  )
+  for (const r of sorted) {
+    const key = normalizeCategoryName(r.name)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
+}
+
+/**
+ * Build parent→children maps for Add Medicine. Includes inactive rows.
+ * Orphan rows (parent id missing from payload) are attached under root so they stay visible.
+ */
+function buildMedicineCategoryLookups(rows) {
+  const list = dedupeCategoryRowsById((rows || []).filter((r) => r && r.id))
+  const idToRow = new Map()
+  list.forEach((r) => idToRow.set(String(r.id), r))
+
+  const childrenOf = new Map()
+  list.forEach((r) => {
+    let pk = normalizeCategoryParentKey(r)
+    if (pk !== CATEGORY_TREE_ROOT && !idToRow.has(pk)) {
+      pk = CATEGORY_TREE_ROOT
+    }
+    if (!childrenOf.has(pk)) childrenOf.set(pk, [])
+    childrenOf.get(pk).push(r)
+  })
+  for (const [parentKey, arr] of childrenOf.entries()) {
+    const unique = dedupeSiblingsByNormalizedName(arr)
+    unique.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+    childrenOf.set(parentKey, unique)
+  }
+  const roots = childrenOf.get(CATEGORY_TREE_ROOT) || []
+  return { idToRow, childrenOf, roots }
+}
+
+/** Breadcrumb path of ids from root to leaf for tree picker sync. */
+function categoryAncestorsPath(leafId, idToRow) {
+  const path = []
+  let cur = idToRow.get(String(leafId))
+  const seen = new Set()
+  while (cur && !seen.has(String(cur.id))) {
+    seen.add(String(cur.id))
+    path.unshift(String(cur.id))
+    const pk = normalizeCategoryParentKey(cur)
+    if (pk === CATEGORY_TREE_ROOT) break
+    cur = idToRow.get(pk)
+  }
+  return path
+}
+
+/** Display path like Parent › Child › Name for search results. */
+function categoryPathLabel(leafId, idToRow) {
+  const path = categoryAncestorsPath(leafId, idToRow)
+  return path.map((id) => idToRow.get(id)?.name || '').filter(Boolean).join(' › ')
+}
+
+/** Recursive tree for category picker: chevron only when row has children; separate expand vs select. */
+function CategoryPickerTreeRows({ nodes, depth, childrenOf, expandedIds, onToggleExpand, onSelectRow }) {
+  if (!nodes?.length) return null
+  return nodes.map((r) => {
+    const id = String(r.id)
+    const kids = childrenOf.get(id) || []
+    const hasKids = kids.length > 0
+    const expanded = expandedIds.has(id)
+    return (
+      <div key={id}>
+        <div
+          className="flex items-center min-h-[28px] pr-1"
+          style={{ paddingLeft: `${8 + depth * 12}px` }}
+        >
+          <div className="w-6 shrink-0 flex items-center justify-center">
+            {hasKids ? (
+              <button
+                type="button"
+                aria-expanded={expanded}
+                tabIndex={-1}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onToggleExpand(id)
+                }}
+                className="p-0.5 rounded hover:bg-slate-100 text-slate-600"
+              >
+                <ChevronRight
+                  size={14}
+                  className="text-slate-500"
+                  sx={{
+                    transform: expanded ? 'rotate(90deg)' : 'none',
+                    transition: 'transform 0.15s ease',
+                  }}
+                />
+              </button>
+            ) : (
+              <span className="inline-block w-4 shrink-0" aria-hidden />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => onSelectRow(r)}
+            className="flex-1 text-left text-[11px] py-1 px-1 rounded hover:bg-slate-50 text-slate-800 truncate min-w-0"
+          >
+            {r.name}
+          </button>
+        </div>
+        {hasKids && expanded ? (
+          <CategoryPickerTreeRows
+            nodes={kids}
+            depth={depth + 1}
+            childrenOf={childrenOf}
+            expandedIds={expandedIds}
+            onToggleExpand={onToggleExpand}
+            onSelectRow={onSelectRow}
+          />
+        ) : null}
+      </div>
+    )
+  })
+}
+
 /** Unit-level MRP, sale rate, cost, and discount % for Add Medicine (matches pack vs unit input mode). */
 function discountPercentFromMrpAndRate(mrp, rate) {
   const m = Number(mrp) || 0
@@ -1854,6 +2305,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
     name: '',
     company_name: '',
     form: '',
+    category: '',
     composition: '',
     mrp: '',
     selling_price: '',
@@ -1876,13 +2328,19 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
   const [forms, setForms] = useState([])
   const [batchOptions, setBatchOptions] = useState([])
   const [submitting, setSubmitting] = useState(false)
-  const [showFormOptions, setShowFormOptions] = useState(false)
+  /** Selected category ids from root → leaf for cascading dropdowns */
+  const [categoryPathIds, setCategoryPathIds] = useState([])
   const [creatingForm, setCreatingForm] = useState(false)
   const [openingStockEditedBy, setOpeningStockEditedBy] = useState('units')
   const [medicineCategoryRows, setMedicineCategoryRows] = useState([])
   const [pricingEditedBy, setPricingEditedBy] = useState(
     Number(fallbackDiscountStr || 0) > 0 ? 'discount' : 'selling',
   )
+  const [bootstrapMedicines, setBootstrapMedicines] = useState([])
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false)
+  const [categorySearch, setCategorySearch] = useState('')
+  /** Expanded folder ids in the nested tree (chevron toggles). */
+  const [expandedCategoryIds, setExpandedCategoryIds] = useState(() => new Set())
 
   const unitPricingPreview = useMemo(() => {
     const unitsPerPack =
@@ -1897,7 +2355,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
     let cancelled = false
     Promise.all([
       api.get('/units/?limit=100').catch(() => ({ data: [] })),
-      api.get('/medicine-categories/?limit=500').catch(() => ({ data: [] })),
+      api.get('/medicine-categories/?limit=5000').catch(() => ({ data: [] })),
       api.get('/medicines/?limit=2000').catch(() => ({ data: [] })),
       api.get('/batches/?limit=1000').catch(() => ({ data: [] })),
     ])
@@ -1913,6 +2371,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
 
         const medRows = mRes.data?.data || mRes.data?.results || []
         const medForms = Array.isArray(medRows) ? medRows.map((m) => m.form) : []
+        setBootstrapMedicines(Array.isArray(medRows) ? medRows : [])
 
         setForms(uniqText([...catNames, ...medForms, ...DEFAULT_PRODUCT_FORMS]))
         const bRows = bRes.data?.data || bRes.data?.results || []
@@ -1922,6 +2381,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
         if (cancelled) return
         setUnits([])
         setMedicineCategoryRows([])
+        setBootstrapMedicines([])
         setForms(DEFAULT_PRODUCT_FORMS)
         setBatchOptions([])
       })
@@ -1929,6 +2389,98 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
       cancelled = true
     }
   }, [])
+
+  const { idToRow, childrenOf, roots } = useMemo(
+    () => buildMedicineCategoryLookups(medicineCategoryRows),
+    [medicineCategoryRows],
+  )
+  const allFlatCategoryNames = useMemo(
+    () => mergeCategoryNames(bootstrapMedicines, medicineCategoryRows),
+    [bootstrapMedicines, medicineCategoryRows],
+  )
+  const filteredFlatNames = useMemo(() => {
+    const q = categorySearch.trim().toLowerCase()
+    if (!q) return allFlatCategoryNames
+    return allFlatCategoryNames.filter((n) => n.toLowerCase().includes(q))
+  }, [allFlatCategoryNames, categorySearch])
+
+  const sortedAllFlatCategoryNames = useMemo(
+    () =>
+      [...allFlatCategoryNames].sort((a, b) =>
+        String(a || '').localeCompare(String(b || ''), undefined, { sensitivity: 'base' }),
+      ),
+    [allFlatCategoryNames],
+  )
+
+  const categoryBreadcrumb = useMemo(() => {
+    if (!categoryPathIds.length) return ''
+    return categoryPathIds
+      .map((id) => idToRow.get(id)?.name || '')
+      .filter(Boolean)
+      .join(' › ')
+  }, [categoryPathIds, idToRow])
+
+  useEffect(() => {
+    if (!categoryPickerOpen) return undefined
+    function handleEscape(e) {
+      if (e.key === 'Escape') setCategoryPickerOpen(false)
+    }
+    document.addEventListener('keydown', handleEscape)
+    return () => document.removeEventListener('keydown', handleEscape)
+  }, [categoryPickerOpen])
+
+  useEffect(() => {
+    if (!categoryPickerOpen) return
+    setExpandedCategoryIds(() => {
+      const next = new Set()
+      categoryPathIds.slice(0, -1).forEach((id) => next.add(String(id)))
+      return next
+    })
+  }, [categoryPickerOpen, categoryPathIds])
+
+  function selectCategoryRow(row) {
+    if (!row?.id) return
+    setData((d) => ({ ...d, form: String(row.name || '').trim() }))
+    setData((d) => ({ ...d, category: String(row.id) }))
+    setCategoryPathIds(categoryAncestorsPath(row.id, idToRow))
+    setCategoryPickerOpen(false)
+  }
+
+  function toggleCategoryExpand(categoryId) {
+    setExpandedCategoryIds((prev) => {
+      const next = new Set(prev)
+      const id = String(categoryId)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function pickFlatCategoryName(name) {
+    const trimmed = (name || '').trim()
+    if (!trimmed) return
+    setData((d) => ({ ...d, form: trimmed, category: '' }))
+    const row = medicineCategoryRows.find(
+      (r) => normalizeCategoryName(r.name) === normalizeCategoryName(trimmed),
+    )
+    if (row?.id) {
+      setCategoryPathIds(categoryAncestorsPath(row.id, idToRow))
+      setData((d) => ({ ...d, category: String(row.id) }))
+    } else {
+      setCategoryPathIds([])
+    }
+    setCategoryPickerOpen(false)
+  }
+
+  function pickFromSearchList(name) {
+    const trimmed = (name || '').trim()
+    if (!trimmed) return
+    const row = medicineCategoryRows.find(
+      (r) => normalizeCategoryName(r.name) === normalizeCategoryName(trimmed),
+    )
+    if (row?.id) selectCategoryRow(row)
+    else pickFlatCategoryName(trimmed)
+  }
 
   const pricingLocked = !!(data.add_batch && data.batch_mode === 'existing' && data.existing_batch_id)
   const openingUnitsPerPack = Math.max(0, Number(data.units_per_pack) || 0)
@@ -2072,7 +2624,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
 
   async function handleAdd() {
     if (!data.name.trim()) return toast.error('Product name is required')
-    if (!data.form.trim()) return toast.error('Product form is required')
+    if (!data.form.trim()) return toast.error('Category is required')
     if (!(Number(data.mrp) > 0)) return toast.error('MRP is required')
     const unitsPerPack =
       data.mrp_input_type === 'unit'
@@ -2122,6 +2674,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
         name: data.name.trim(),
         company_name: data.company_name.trim(),
         form: data.form.trim(),
+        ...(data.category ? { category: data.category } : {}),
         composition: data.composition.trim(),
         strength: data.composition.trim(),
         pack_info: `1x${unitsPerPack}`,
@@ -2207,9 +2760,6 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
     }
   }
 
-  const filteredForms = forms.filter((f) =>
-    f.toLowerCase().includes((data.form || '').toLowerCase().trim()),
-  )
   const trimmedForm = (data.form || '').trim()
   const formExists = forms.some((f) => f.toLowerCase() === trimmedForm.toLowerCase())
 
@@ -2225,10 +2775,14 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
     }
     setCreatingForm(true)
     try {
-      await api.post('/medicine-categories/', { name, is_active: true })
+      const res = await api.post('/medicine-categories/', { name, is_active: true })
+      const created = res?.data?.data || res?.data?.entity || res?.data
+      if (created?.id) {
+        setMedicineCategoryRows((prev) => [...prev, created])
+      }
       setForms((prev) => uniqText([name, ...prev]))
       setData((d) => ({ ...d, form: name }))
-      setShowFormOptions(false)
+      setCategoryPathIds(created?.id ? [String(created.id)] : [])
       toast.success('Category added')
     } catch {
       toast.error('Could not add category')
@@ -2271,55 +2825,164 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
                     className="mt-1 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
                   />
                 </label>
-                <label className="block">
-                  <span className="text-[10px] font-semibold text-slate-700">Product Form*</span>
-                  <div className="relative mt-1">
-                    <input
-                      value={data.form}
-                      onFocus={() => setShowFormOptions(true)}
-                      onBlur={() => setTimeout(() => setShowFormOptions(false), 120)}
-                      onChange={(e) => {
-                        setData({ ...data, form: e.target.value })
-                        setShowFormOptions(true)
-                      }}
-                      placeholder="Search category..."
-                      className="w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500 bg-white"
-                    />
-                    {showFormOptions && (
-                      <div className="absolute z-30 mt-1 w-full max-h-36 overflow-auto rounded border border-slate-200 bg-white shadow-lg">
-                        {filteredForms.length > 0 ? (
-                          filteredForms.slice(0, 60).map((f) => (
-                            <button
-                              key={f}
-                              type="button"
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={() => {
-                                setData((d) => ({ ...d, form: f }))
-                                setShowFormOptions(false)
-                              }}
-                              className="w-full text-left px-2 py-1.5 text-xs hover:bg-slate-50"
-                            >
-                              {f}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-2 py-2 text-xs text-slate-500">No matching category</div>
-                        )}
-                        {!formExists && trimmedForm && (
-                          <button
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={handleCreateForm}
-                            disabled={creatingForm}
-                            className="w-full text-left px-2 py-1.5 text-xs font-semibold text-blue-700 border-t border-slate-100 hover:bg-blue-50 disabled:opacity-50"
+                <div className="block">
+                  <span className="text-[10px] font-semibold text-slate-700">Categories*</span>
+                  <div className="mt-1 space-y-1.5">
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setCategoryPickerOpen((o) => !o)}
+                        className="w-full flex items-center justify-between gap-2 min-h-8 border border-slate-300 rounded px-2 py-1 text-[11px] text-left bg-white hover:bg-slate-50 outline-none focus:border-blue-500"
+                      >
+                        <span className="truncate text-slate-800">
+                          {categoryBreadcrumb || data.form?.trim() || 'Browse categories…'}
+                        </span>
+                        <ChevronRight size={14} className="text-slate-400 shrink-0" sx={{ transform: 'rotate(90deg)' }} />
+                      </button>
+                      {roots.length === 0 && medicineCategoryRows.length === 0 ? (
+                        <p className="text-[10px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1">
+                          No saved folders yet — open the picker for presets, or type below / add under Settings.
+                        </p>
+                      ) : null}
+                      {categoryPickerOpen &&
+                        createPortal(
+                          <div
+                            className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-900/45"
+                            onClick={() => setCategoryPickerOpen(false)}
+                            role="presentation"
                           >
-                            {creatingForm ? 'Adding category...' : `+ Add "${trimmedForm}" category`}
-                          </button>
+                            <div
+                              className="flex h-[min(85vh,32rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+                              onClick={(e) => e.stopPropagation()}
+                              role="dialog"
+                              aria-modal="true"
+                              aria-labelledby="category-picker-title"
+                            >
+                              <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
+                                <h4 id="category-picker-title" className="text-sm font-bold text-slate-900">
+                                  Select category
+                                </h4>
+                                <button
+                                  type="button"
+                                  onClick={() => setCategoryPickerOpen(false)}
+                                  className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                                  aria-label="Close"
+                                >
+                                  <X size={18} />
+                                </button>
+                              </div>
+                              <div className="shrink-0 border-b border-slate-100 p-2">
+                                <input
+                                  type="text"
+                                  value={categorySearch}
+                                  onChange={(e) => setCategorySearch(e.target.value)}
+                                  placeholder="Search all names or browse lists below…"
+                                  className="h-7 w-full rounded border border-slate-200 px-2 text-[11px]"
+                                  autoFocus
+                                />
+                              </div>
+                              <div className="min-h-0 flex-1 overflow-y-auto py-1">
+                                {categorySearch.trim() ? (
+                                  filteredFlatNames.length === 0 ? (
+                                    <div className="px-3 py-4 text-[11px] text-slate-500">No matches</div>
+                                  ) : (
+                                    filteredFlatNames.slice(0, 500).map((n, idx) => {
+                                      const row = medicineCategoryRows.find(
+                                        (r) => normalizeCategoryName(r.name) === normalizeCategoryName(n),
+                                      )
+                                      const label =
+                                        row?.id != null ? categoryPathLabel(row.id, idToRow) || n : n
+                                      return (
+                                        <button
+                                          key={`${n}-${idx}`}
+                                          type="button"
+                                          onClick={() => pickFromSearchList(n)}
+                                          className="w-full border-b border-slate-50 px-3 py-1.5 text-left text-[11px] text-slate-800 last:border-b-0 hover:bg-slate-50"
+                                        >
+                                          <span className="block truncate" title={label}>
+                                            {label}
+                                          </span>
+                                        </button>
+                                      )
+                                    })
+                                  )
+                                ) : (
+                                  <div className="flex flex-col gap-0">
+                                    {roots.length > 0 ? (
+                                      <>
+                                        <div className="px-3 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                                          Nested folders
+                                        </div>
+                                        <CategoryPickerTreeRows
+                                          nodes={roots}
+                                          depth={0}
+                                          childrenOf={childrenOf}
+                                          expandedIds={expandedCategoryIds}
+                                          onToggleExpand={toggleCategoryExpand}
+                                          onSelectRow={selectCategoryRow}
+                                        />
+                                        <div className="mx-2 my-2 border-t border-slate-100" />
+                                      </>
+                                    ) : null}
+                                    <div className="px-3 pb-0.5 pt-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                                      All category names (presets · medicines · folders)
+                                    </div>
+                                    {sortedAllFlatCategoryNames.length === 0 ? (
+                                      <div className="px-3 py-2 text-[11px] text-slate-500">No labels loaded</div>
+                                    ) : (
+                                      sortedAllFlatCategoryNames.map((n, idx) => {
+                                        const row = medicineCategoryRows.find(
+                                          (r) => normalizeCategoryName(r.name) === normalizeCategoryName(n),
+                                        )
+                                        const label =
+                                          row?.id != null ? categoryPathLabel(row.id, idToRow) || n : n
+                                        return (
+                                          <button
+                                            key={`flat-${n}-${idx}`}
+                                            type="button"
+                                            onClick={() => pickFromSearchList(n)}
+                                            className="w-full border-b border-slate-50 px-3 py-1.5 text-left text-[11px] text-slate-800 last:border-b-0 hover:bg-slate-50"
+                                          >
+                                            <span className="block truncate" title={label}>
+                                              {label}
+                                            </span>
+                                          </button>
+                                        )
+                                      })
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>,
+                          document.body,
                         )}
-                      </div>
-                    )}
+                    </>
+                    <label className="block">
+                      <span className="text-[9px] text-slate-500">Or type manually</span>
+                      <input
+                        type="text"
+                        value={data.form}
+                        onChange={(e) => {
+                          setCategoryPathIds([])
+                          setData({ ...data, form: e.target.value, category: '' })
+                        }}
+                        placeholder="Category label stored on the medicine"
+                        className="mt-0.5 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
+                      />
+                    </label>
+                    {!formExists && trimmedForm ? (
+                      <button
+                        type="button"
+                        onClick={handleCreateForm}
+                        disabled={creatingForm}
+                        className="w-full text-left px-2 py-1.5 text-[11px] font-semibold text-blue-700 border border-blue-100 rounded bg-blue-50/80 hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        {creatingForm ? 'Adding category…' : `+ Save "${trimmedForm}" as new top-level category`}
+                      </button>
+                    ) : null}
                   </div>
-                </label>
+                </div>
                 <label className="block">
                   <span className="text-[10px] font-semibold text-slate-700">Composition</span>
                   <input
@@ -2706,6 +3369,7 @@ function AddPatientModal({ onClose, onAdd }) {
         last_name: lastName,
         phone,
         gender: data.gender || 'other',
+        hospital_id: getHospitalId(),
       }
       const res = await api.post('/patients/', payload)
       toast.success('Patient registered')

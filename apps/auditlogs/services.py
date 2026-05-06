@@ -11,7 +11,8 @@ from apps.shared.models import Hospital
 def create_audit_log(
     *,
     request,
-    hospital: Optional[Hospital],
+    hospital: Optional[Hospital] = None,
+    pharmacy=None,
     module: str,
     action: str,
     obj: Any = None,
@@ -21,6 +22,9 @@ def create_audit_log(
     """
     Writes an audit log entry for critical events.
     """
+
+    if hospital is None and pharmacy is not None:
+        hospital = getattr(pharmacy, "hospital", None)
 
     actor = getattr(request, "user", None)
     if actor is not None and getattr(actor, "is_authenticated", False) is not True:
