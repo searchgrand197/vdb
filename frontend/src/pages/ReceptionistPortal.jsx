@@ -48,6 +48,7 @@ import {
   Science as ScienceIcon,
   Medication as MedicationIcon,
   Message as MessageIcon,
+  DragIndicator as DragIndicatorIcon,
 } from '@mui/icons-material'
 import { getRoomsConfig, saveRoomsConfig, getTvGroupsConfig, saveTvGroupsConfig } from '../utils/rooms'
 import BedSelector from '../components/BedSelector'
@@ -56,6 +57,21 @@ import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel
 import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
 import { DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS } from '../pharmacy/rxConstants'
 import { syncHospitalBrandingFromApiRow } from '../utils/hospitalBranding'
+import {
+  SALUTATION_CHOICE_OPTIONS,
+  resolveSalutationForSlip,
+  formatPatientLineForSlip,
+  formatGuardianLineForSlip,
+  GUARDIAN_RELATIONSHIP_OPTIONS,
+} from '../utils/opdPrintFormat'
+
+/** Maps Patient.preferred_salutation from API to salutation dropdown value. */
+function normalizeSalutationChoiceFromApi(raw) {
+  if (raw == null || raw === '') return ''
+  const s = String(raw).trim()
+  if (s === 'none' || ['Mr', 'Mrs', 'Master', 'Miss'].includes(s)) return s
+  return ''
+}
 
 function asMuiIcon(IconComponent) {
   return function IconBridge({ size, className, sx, ...rest }) {
@@ -111,6 +127,7 @@ const Syringe = asMuiIcon(VaccinesIcon)
 const FlaskConical = asMuiIcon(ScienceIcon)
 const Pill = asMuiIcon(MedicationIcon)
 const MessageSquare = asMuiIcon(MessageIcon)
+const GripVertical = asMuiIcon(DragIndicatorIcon)
 
 const DEFAULT_PAYMENT_SLIP_PROFILE = {
   hospital_name: 'Vardraan Hospital',
@@ -126,6 +143,10 @@ const DEFAULT_RECEPTION_OPD_SETTINGS = {
   default_state: 'Haryana',
   default_doctor_user: '',
   print_with_background: true,
+  opd_fee_mode: 'doctor',
+  opd_fee_slots: [],
+  current_opd_slot_fee: null,
+  current_opd_slot: null,
 }
 
 let receptionPortalSettingsCache = {
@@ -146,6 +167,10 @@ function getReceptionOpdSettings() {
     default_state: receptionPortalSettingsCache.default_state || DEFAULT_RECEPTION_OPD_SETTINGS.default_state,
     default_doctor_user: receptionPortalSettingsCache.default_doctor_user || '',
     print_with_background: receptionPortalSettingsCache.print_with_background === true,
+    opd_fee_mode: receptionPortalSettingsCache.opd_fee_mode || 'doctor',
+    opd_fee_slots: Array.isArray(receptionPortalSettingsCache.opd_fee_slots) ? receptionPortalSettingsCache.opd_fee_slots : [],
+    current_opd_slot_fee: receptionPortalSettingsCache.current_opd_slot_fee ?? null,
+    current_opd_slot: receptionPortalSettingsCache.current_opd_slot ?? null,
   }
 }
 
@@ -165,6 +190,10 @@ async function loadReceptionPortalSettings() {
       email: row.email ?? receptionPortalSettingsCache.email,
       website: row.website ?? receptionPortalSettingsCache.website,
       print_with_background: row.print_with_background ?? receptionPortalSettingsCache.print_with_background,
+      opd_fee_mode: row.opd_fee_mode || receptionPortalSettingsCache.opd_fee_mode || 'doctor',
+      opd_fee_slots: Array.isArray(row.opd_fee_slots) ? row.opd_fee_slots : (receptionPortalSettingsCache.opd_fee_slots || []),
+      current_opd_slot_fee: row.current_opd_slot_fee ?? null,
+      current_opd_slot: row.current_opd_slot ?? null,
     }
     syncHospitalBrandingFromApiRow(receptionPortalSettingsCache)
   } catch {
@@ -178,6 +207,8 @@ async function saveReceptionOpdSettings(settings) {
     default_state: settings.default_state || '',
     default_doctor_user: settings.default_doctor_user || null,
     print_with_background: settings.print_with_background === true,
+    opd_fee_mode: settings.opd_fee_mode === 'slot' ? 'slot' : 'doctor',
+    opd_fee_slots: Array.isArray(settings.opd_fee_slots) ? settings.opd_fee_slots : [],
   }
   await api.patch('/settings/reception-portal/', payload)
   receptionPortalSettingsCache = { ...receptionPortalSettingsCache, ...payload, default_doctor_user: payload.default_doctor_user || '' }
@@ -547,6 +578,13 @@ function PrintSlip({ visit, onClose }) {
   const [fieldValues, setFieldValues] = useState({})
   const [loadingTemplate, setLoadingTemplate] = useState(true)
   const displayToken = visit.display_token || `${visit.room?.prefix || ''}${visit.token_number || visit.queue_number || ''}`
+  const patientLine = formatPatientLineForSlip(
+    visit.patient_name,
+    visit.patient_gender,
+    visit.patient_age,
+    visit.patient_salutation,
+  )
+  const guardianLine = formatGuardianLineForSlip(visit.patient_guardian_name, visit.patient_guardian_relationship)
 
   useEffect(() => {
     const loadOpdLayout = async () => {
@@ -566,9 +604,9 @@ function PrintSlip({ visit, onClose }) {
               let fullAddress = [visit.patient_address, visit.patient_city, visit.patient_state].filter(Boolean).join(', ')
               if (fullAddress.length > 35) fullAddress = fullAddress.substring(0, 32) + '...'
               // NOTE: guardian must be checked BEFORE generic 'name' check
-              if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) initValues[f] = visit.patient_guardian_name || ''
-              else if (lowerF.includes('patient') && !lowerF.includes('guardian')) initValues[f] = visit.patient_name || ''
-              else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) initValues[f] = visit.patient_name || ''
+              if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) initValues[f] = guardianLine
+              else if (lowerF.includes('patient') && !lowerF.includes('guardian')) initValues[f] = patientLine
+              else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) initValues[f] = patientLine
               else if (lowerF.includes('date')) initValues[f] = visit.visit_date ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})` : ''
               else if (lowerF.includes('reg') || lowerF.includes('uhid')) initValues[f] = visit.patient_uhid || ''
               else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) initValues[f] = visit.patient_phone || ''
@@ -595,7 +633,7 @@ function PrintSlip({ visit, onClose }) {
       }
     }
     loadOpdLayout()
-  }, [visit])
+  }, [visit, patientLine, guardianLine])
 
   function printBasicSlip() {
     const w = createSameTabPrintWindow()
@@ -620,8 +658,8 @@ function PrintSlip({ visit, onClose }) {
       <div class="token">${displayToken}</div>
       <div class="row"><span class="label">OPD No.</span><span>${displayToken}</span></div>
       <div class="row"><span class="label">UHID</span><span>${visit.patient_uhid || ''}</span></div>
-      <div class="row"><span class="label">Patient</span><span>${visit.patient_name}</span></div>
-      ${visit.patient_guardian_name ? `<div class="row"><span class="label">Guardian</span><span>${visit.patient_guardian_name}</span></div>` : ''}
+      <div class="row"><span class="label">Patient</span><span>${patientLine}</span></div>
+      ${guardianLine ? `<div class="row"><span class="label">Guardian</span><span>${guardianLine}</span></div>` : ''}
       <div class="row"><span class="label">Date</span><span>${slipDateTime}</span></div>
       <div class="row"><span class="label">Doctor</span><span>${visit.room?.label || visit.doc_name || 'OPD'}</span></div>
       <div class="row"><span class="label">Complaint</span><span>${visit.chief_complaint || '-'}</span></div>
@@ -660,7 +698,7 @@ function PrintSlip({ visit, onClose }) {
             <div className="text-5xl font-black text-blue-600 mb-1">
               {displayToken}
             </div>
-            <p className="font-bold text-gray-900 text-lg">{visit.patient_name}</p>
+            <p className="font-bold text-gray-900 text-lg">{patientLine}</p>
             <p className="text-sm font-medium text-gray-500">{visit.room?.label || visit.doc_name || 'OPD'}</p>
           </div>
 
@@ -709,7 +747,7 @@ function PrintSlip({ visit, onClose }) {
 
 // ─── OPD Section ──────────────────────────────────────────────────────────────
 function OPDSection({ rooms }) {
-  const opdSettings = getReceptionOpdSettings()
+  const [opdSettings, setOpdSettings] = useState(() => getReceptionOpdSettings())
   const defaultCity = opdSettings.default_city || ''
   const defaultState = opdSettings.default_state || ''
   const defaultDoctorUser = opdSettings.default_doctor_user || ''
@@ -736,9 +774,11 @@ function OPDSection({ rooms }) {
   const buildEmptyForm = () => ({
     phone: '',
     patient_name: '',
+    salutation_choice: '',
     gender: 'male',
     age: '',
     guardian_name: '',
+    guardian_relationship: '',
     address_line1: '',
     city: defaultCity,
     state: defaultState,
@@ -796,6 +836,30 @@ function OPDSection({ rooms }) {
     const numericFee = Number(String(rawFee).replace(/[^0-9.]/g, ''))
     return Number.isFinite(numericFee) && numericFee > 0 ? numericFee : null
   }
+  const parseSlotTimeMinutes = (hhmm) => {
+    const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/)
+    if (!m) return null
+    const h = Number(m[1])
+    const mm = Number(m[2])
+    if (h < 0 || h > 23 || mm < 0 || mm > 59) return null
+    return h * 60 + mm
+  }
+  const getSlotFeeForNow = (slots, now = new Date()) => {
+    const list = Array.isArray(slots) ? slots : []
+    if (!list.length) return null
+    const minsNow = now.getHours() * 60 + now.getMinutes()
+    for (const row of list) {
+      const start = parseSlotTimeMinutes(row?.start)
+      const end = parseSlotTimeMinutes(row?.end)
+      const amount = Number(row?.amount)
+      if (start == null || end == null || !Number.isFinite(amount) || amount < 0) continue
+      const inRange = start <= end
+        ? minsNow >= start && minsNow < end
+        : minsNow >= start || minsNow < end
+      if (inRange) return amount
+    }
+    return null
+  }
   const getRoomForDoctorUser = (doctorUser) => {
     const id = normalizeId(doctorUser)
     if (!id) return null
@@ -828,6 +892,8 @@ function OPDSection({ rooms }) {
           city: p.city || '',
           state: p.state || '',
           guardian_name: capitalizePersonName(p.guardian_name || ''),
+          guardian_relationship: p.guardian_relationship || '',
+          salutation_choice: normalizeSalutationChoiceFromApi(p.preferred_salutation),
         }))
       }
     } catch {
@@ -836,6 +902,8 @@ function OPDSection({ rooms }) {
         patient_name: capitalizePersonName([pt.first_name, pt.last_name].filter(Boolean).join(' ') || ''),
         gender: pt.gender || 'male',
         guardian_name: capitalizePersonName(pt.guardian_name || ''),
+        guardian_relationship: pt.guardian_relationship || '',
+        salutation_choice: normalizeSalutationChoiceFromApi(pt.preferred_salutation),
       }))
     }
   }, [])
@@ -862,6 +930,9 @@ function OPDSection({ rooms }) {
       patient_name: '',
       gender: 'male',
       age: '',
+      guardian_name: '',
+      guardian_relationship: '',
+      salutation_choice: '',
       address_line1: '',
       city: defaultCity,
       state: defaultState,
@@ -873,6 +944,14 @@ function OPDSection({ rooms }) {
     fetchDoctors()
     fetchHandoverSummary()
     pollingRef.current = setInterval(fetchQueue, 15000)
+    // Keep OPD settings in sync while staying on this page.
+    const refreshSettings = async () => {
+      await loadReceptionPortalSettings()
+      setOpdSettings(getReceptionOpdSettings())
+    }
+    refreshSettings()
+    // Fast polling so slot fee changes at boundaries.
+    const settingsPoll = setInterval(refreshSettings, 15000)
 
     const loadOpdLayout = async () => {
       try {
@@ -888,7 +967,10 @@ function OPDSection({ rooms }) {
     }
     loadOpdLayout()
 
-    return () => clearInterval(pollingRef.current)
+    return () => {
+      clearInterval(pollingRef.current)
+      clearInterval(settingsPoll)
+    }
   }, [])
 
   const isCustomField = f => {
@@ -911,16 +993,22 @@ function OPDSection({ rooms }) {
   }
 
   useEffect(() => {
-    // When a default doctor is preselected (from OPD settings), auto-fill fee after doctors load.
-    if (!form.doctor || form.amount || opdAmountManuallyEditedRef.current) return
-    const selectedDoc = findDoctorBySelectedId(doctors, form.doctor)
-    const fee = getDoctorFee(selectedDoc)
+    // Auto-fill consultation amount based on OPD fee mode until user edits manually.
+    // This also refreshes amount when fee mode/settings change.
+    const mode = opdSettings.opd_fee_mode === 'slot' ? 'slot' : 'doctor'
+    if (mode !== 'slot' && opdAmountManuallyEditedRef.current) return
+    const fee = mode === 'slot'
+      ? (Number.isFinite(Number(opdSettings.current_opd_slot_fee)) ? Number(opdSettings.current_opd_slot_fee) : null)
+      : getDoctorFee(findDoctorBySelectedId(doctors, form.doctor))
     if (fee == null) return
     setForm(f => {
-      if (normalizeId(f.doctor) !== normalizeId(form.doctor) || f.amount) return f
-      return { ...f, amount: String(fee) }
+      if (mode !== 'slot' && opdAmountManuallyEditedRef.current) return f
+      if (mode === 'doctor' && normalizeId(f.doctor) !== normalizeId(form.doctor)) return f
+      const nextAmount = String(fee)
+      if (String(f.amount ?? '') === nextAmount) return f
+      return { ...f, amount: nextAmount }
     })
-  }, [doctors, form.doctor, form.amount])
+  }, [doctors, form.doctor, form.amount, opdSettings.opd_fee_mode, opdSettings.current_opd_slot_fee])
 
   useEffect(() => {
     // On hard refresh, settings load async. Backfill defaults into an untouched form.
@@ -1117,6 +1205,9 @@ function OPDSection({ rooms }) {
               patient_name: '',
               gender: 'male',
               age: '',
+              guardian_name: '',
+              guardian_relationship: '',
+              salutation_choice: '',
               address_line1: '',
               city: '',
               state: '',
@@ -1191,6 +1282,8 @@ function OPDSection({ rooms }) {
           ...(form.city        ? { city: form.city }            : {}),
           ...(form.state       ? { state: form.state }          : {}),
           guardian_name: normalizedGuardianName,
+          guardian_relationship: form.guardian_relationship || '',
+          preferred_salutation: form.salutation_choice ?? '',
         })
         patientId = (patRes.data?.data || patRes.data)?.id
       } else {
@@ -1202,6 +1295,8 @@ function OPDSection({ rooms }) {
           city: form.city || '',
           state: form.state || '',
           guardian_name: capitalizePersonName(form.guardian_name).trim(),
+          guardian_relationship: form.guardian_relationship || '',
+          preferred_salutation: form.salutation_choice ?? '',
         }
         const trimmedName = capitalizePersonName(form.patient_name).trim()
         if (trimmedName && trimmedName !== 'Patient') {
@@ -1245,7 +1340,12 @@ function OPDSection({ rooms }) {
         let printPhone = payload?.patient_phone || matchedPatient?.phone || '';
         let printCity = payload?.patient_city || form.city || '';
         let printState = payload?.patient_state || form.state || '';
-        let printGuardian = capitalizePersonName(payload?.patient_guardian_name || form.guardian_name || '');
+        const slipSalutation = resolveSalutationForSlip(form.salutation_choice, form.gender, form.age)
+        const printPatientLine = formatPatientLineForSlip(ptName, form.gender, form.age, slipSalutation)
+        const printGuardianLine = formatGuardianLineForSlip(
+          capitalizePersonName(payload?.patient_guardian_name || form.guardian_name || ''),
+          payload?.patient_guardian_relationship ?? form.guardian_relationship ?? '',
+        )
 
         const genderAbbr = form.gender === 'female' ? 'F' : form.gender === 'male' ? 'M' : 'O'
         const ageSex = [genderAbbr, form.age].filter(Boolean).join(' ')
@@ -1256,9 +1356,9 @@ function OPDSection({ rooms }) {
         for (const f of layoutFields) {
           const lowerF = f.toLowerCase()
           // NOTE: guardian must be checked BEFORE generic 'name' check
-          if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) finalValues[f] = finalValues[f] || printGuardian
-          else if (lowerF.includes('patient') && !lowerF.includes('guardian')) finalValues[f] = finalValues[f] || ptName
-          else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) finalValues[f] = finalValues[f] || ptName
+          if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) finalValues[f] = finalValues[f] || printGuardianLine
+          else if (lowerF.includes('patient') && !lowerF.includes('guardian')) finalValues[f] = finalValues[f] || printPatientLine
+          else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) finalValues[f] = finalValues[f] || printPatientLine
           else if (lowerF.includes('date')) finalValues[f] = finalValues[f] || (form.visit_date ? `${format(new Date(form.visit_date), 'd/M/yyyy')} (${format(new Date(), 'HH:mm')})` : '')
           else if (lowerF.includes('reg') || lowerF.includes('uhid')) finalValues[f] = finalValues[f] || printUhid || ''
           else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) finalValues[f] = finalValues[f] || printPhone || form.phone.replace(/\D/g, '') || ''
@@ -1281,6 +1381,10 @@ function OPDSection({ rooms }) {
         setPrintVisit({
           ...payload,
           patient_name: ptName,
+          patient_gender: payload?.patient_gender ?? form.gender,
+          patient_age: payload?.patient_age ?? form.age,
+          patient_salutation: resolveSalutationForSlip(form.salutation_choice, form.gender, form.age),
+          patient_guardian_relationship: payload?.patient_guardian_relationship ?? form.guardian_relationship ?? '',
           doc_name: selectedDoc?.name || '',
           patient_uhid: payload?.patient_uhid || matchedPatient?.uhid || '',
           patient_city: payload?.patient_city || form.city || '',
@@ -1294,6 +1398,7 @@ function OPDSection({ rooms }) {
       }
 
       setForm(buildEmptyForm())
+      opdAmountManuallyEditedRef.current = false
       setTemplateValues({})
       setMatchedPatient(null)
       setOpdNewPersonSamePhone(false)
@@ -1471,8 +1576,9 @@ function OPDSection({ rooms }) {
 
         <div className="min-h-0 flex-1 overflow-hidden p-4 grid grid-cols-12 gap-x-3 gap-y-3 content-start auto-rows-min">
 
+          {/* Row 1: Phone + Patient + Guardian. Row 2: Age + Gender. */}
           {/* Phone / UHID — compact input; hints on the right in wide layout */}
-          <div className="col-span-3">
+          <div className="col-span-12 lg:col-span-3 min-w-0">
             <label className={`${lblFilled} flex items-center gap-1.5`}>
               Phone or UHID *
               {showSamePhoneNewHint && (
@@ -1552,22 +1658,59 @@ function OPDSection({ rooms }) {
             )}
           </div>
 
-          <div className="col-span-3">
-            <label className={lblFilled}>Patient Name</label>
-            <input value={form.patient_name} onChange={e => setForm(f => ({ ...f, patient_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))} placeholder="Full Name" className={inpFilled} />
+          <div className="col-span-12 lg:col-span-4 min-w-0">
+              <label className={lblFilled}>Patient Name</label>
+              <div
+                className={`flex w-full min-w-0 rounded-lg border overflow-hidden items-stretch focus-within:ring-2 focus-within:ring-emerald-500 focus-within:border-emerald-400 ${filledBg || 'border-gray-200 bg-white'}`}
+              >
+                <select
+                  value={form.salutation_choice}
+                  onChange={e => setForm(f => ({ ...f, salutation_choice: e.target.value }))}
+                  className="shrink-0 w-[5.25rem] sm:w-28 border-0 border-r border-gray-200/90 bg-gray-50/95 py-2 pl-2 pr-1 text-xs sm:text-sm font-bold text-gray-800 focus:outline-none focus:bg-gray-50 cursor-pointer"
+                  aria-label="Patient title (Mr, Mrs, …)"
+                >
+                  {SALUTATION_CHOICE_OPTIONS.map((o) => (
+                    <option key={o.value || '_none'} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <input
+                  value={form.patient_name}
+                  onChange={e => setForm(f => ({ ...f, patient_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))}
+                  placeholder="Full name"
+                  className="flex-1 min-w-0 border-0 rounded-none bg-transparent py-2 px-3 text-base font-semibold text-gray-900 placeholder:text-gray-400 placeholder:font-medium focus:outline-none focus:ring-0"
+                />
+              </div>
           </div>
-          <div className="col-span-3">
-            <label className={lblFilled}>Guardian / Relative Name</label>
-            <input value={form.guardian_name} onChange={e => setForm(f => ({ ...f, guardian_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))} placeholder="Guardian name" className={inpFilled} />
+          <div className="col-span-12 lg:col-span-5 min-w-0">
+              <label className={lblFilled}>Guardian</label>
+              <div
+                className={`flex w-full min-w-0 rounded-lg border overflow-hidden items-stretch focus-within:ring-2 focus-within:ring-emerald-500 focus-within:border-emerald-400 ${filledBg || 'border-gray-200 bg-white'}`}
+              >
+                <select
+                  value={form.guardian_relationship}
+                  onChange={e => setForm(f => ({ ...f, guardian_relationship: e.target.value }))}
+                  className="shrink-0 w-[6.5rem] sm:min-w-[7.5rem] sm:max-w-[9.5rem] sm:w-36 border-0 border-r border-gray-200/90 bg-gray-50/95 py-2 pl-1.5 pr-0.5 text-[11px] sm:text-xs font-bold text-gray-800 focus:outline-none focus:bg-gray-50 cursor-pointer"
+                  aria-label="Relation to guardian (S/o, W/o, …)"
+                >
+                  {GUARDIAN_RELATIONSHIP_OPTIONS.map((o) => (
+                    <option key={o.value || '_'} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <input
+                  value={form.guardian_name}
+                  onChange={e => setForm(f => ({ ...f, guardian_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))}
+                  placeholder="Guardian name"
+                  className="flex-1 min-w-0 border-0 rounded-none bg-transparent py-2 px-3 text-base font-semibold text-gray-900 placeholder:text-gray-400 placeholder:font-medium focus:outline-none focus:ring-0"
+                />
+              </div>
           </div>
-          <div className="col-span-3">
+          <div className="col-span-6 sm:col-span-3 lg:col-span-3 min-w-0">
             <label className={lblFilled}>Age</label>
             <input type="number" min="0" max="150" value={form.age} onChange={e => setForm(f => ({ ...f, age: e.target.value.replace(/\D/g, '').slice(0, 3) }))} placeholder="yrs" className={inpFilled} />
           </div>
-
-          <div className="col-span-12">
+          <div className="col-span-6 sm:col-span-9 lg:col-span-9 min-w-0">
             <label className={lblFilled}>Gender</label>
-            <div className={`flex gap-2 max-w-md rounded-lg p-1 ${
+            <div className={`flex gap-2 w-full max-w-none rounded-lg p-1 ${
               matchedPatient ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-100/70'
                 : opdNewPersonSamePhone ? 'bg-amber-50/80 ring-1 ring-inset ring-amber-100/70'
                 : ''
@@ -1681,7 +1824,9 @@ function OPDSection({ rooms }) {
               opdAmountManuallyEditedRef.current = false
               const selectedDocId = e.target.value
               const selectedDoc = findDoctorBySelectedId(doctors, selectedDocId)
-              const fee = getDoctorFee(selectedDoc)
+              const fee = opdSettings.opd_fee_mode === 'slot'
+                ? (Number.isFinite(Number(opdSettings.current_opd_slot_fee)) ? Number(opdSettings.current_opd_slot_fee) : null)
+                : getDoctorFee(selectedDoc)
               setForm(f => ({
                 ...f,
                 doctor: selectedDocId,
@@ -1844,7 +1989,9 @@ function OPDSection({ rooms }) {
                       {v.patient_uhid && <span className="ml-1 text-[11px] font-mono text-gray-400">({v.patient_uhid})</span>}
                     </p>
                     {v.patient_guardian_name && (
-                      <p className="text-[10px] text-gray-500 truncate">G: {capitalizePersonName(v.patient_guardian_name)}</p>
+                      <p className="text-[10px] text-gray-500 truncate">
+                        G: {formatGuardianLineForSlip(capitalizePersonName(v.patient_guardian_name), v.patient_guardian_relationship)}
+                      </p>
                     )}
                     {v.created_by_name && <p className="text-[10px] text-gray-400 font-bold">By: {v.created_by_name}</p>}
                   </div>
@@ -6661,17 +6808,31 @@ function DischargeSection() {
 
 // ─── Payment Slip ─────────────────────────────────────────────────────────────
 const QUICK_SERVICES_STORAGE_KEY = 'payment_quick_services'
+const QUICK_SERVICE_CATEGORIES_STORAGE_KEY = 'payment_quick_service_categories'
+const QUICK_SERVICE_DEFAULT_CATEGORY = 'Custom'
+const QUICK_SERVICE_ALL_CATEGORY = 'All'
+function normalizeQuickService(service) {
+  const label = String(service?.label || '').trim()
+  const price = Number(service?.price || 0)
+  const category = String(service?.category || QUICK_SERVICE_DEFAULT_CATEGORY).trim() || QUICK_SERVICE_DEFAULT_CATEGORY
+  return { label, price, category }
+}
+function normalizeQuickServices(rows) {
+  return (rows || [])
+    .map(normalizeQuickService)
+    .filter(s => s.label && Number.isFinite(s.price) && s.price >= 0)
+}
 const DEFAULT_QUICK_SERVICES = [
-  { label: 'X-Ray', price: 300 },
-  { label: 'ECG', price: 200 },
-  { label: 'Blood Test (CBC)', price: 250 },
-  { label: 'Urine Test', price: 150 },
-  { label: 'OPD Consultation', price: 500 },
-  { label: 'Dressing', price: 100 },
-  { label: 'Injection', price: 80 },
-  { label: 'Ultrasound', price: 600 },
-  { label: 'MRI', price: 3500 },
-  { label: 'CT Scan', price: 2500 },
+  { label: 'X-Ray', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 300 },
+  { label: 'ECG', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 200 },
+  { label: 'Blood Test (CBC)', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 250 },
+  { label: 'Urine Test', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 150 },
+  { label: 'OPD Consultation', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 500 },
+  { label: 'Dressing', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 100 },
+  { label: 'Injection', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 80 },
+  { label: 'Ultrasound', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 600 },
+  { label: 'MRI', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 3500 },
+  { label: 'CT Scan', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 2500 },
 ]
 
 function PaymentSlipSection() {
@@ -6691,9 +6852,18 @@ function PaymentSlipSection() {
   const [isAddingNew, setIsAddingNew] = useState(false)
   const [newPt, setNewPt] = useState({ name: '', phone: '', address: '' })
   const [quickServices, setQuickServices] = useState(DEFAULT_QUICK_SERVICES)
+  const [quickCategoryExtras, setQuickCategoryExtras] = useState([])
+  const [activeQuickCategory, setActiveQuickCategory] = useState(QUICK_SERVICE_ALL_CATEGORY)
   const [showQuickServiceEditor, setShowQuickServiceEditor] = useState(false)
   const [newQuickLabel, setNewQuickLabel] = useState('')
   const [newQuickPrice, setNewQuickPrice] = useState('')
+  const [newQuickCategory, setNewQuickCategory] = useState(QUICK_SERVICE_DEFAULT_CATEGORY)
+  const [newQuickCategoryName, setNewQuickCategoryName] = useState('')
+  const [activeServiceSearchRow, setActiveServiceSearchRow] = useState(null)
+  const [editorQuickCategory, setEditorQuickCategory] = useState(QUICK_SERVICE_DEFAULT_CATEGORY)
+  const [showCategoryCreator, setShowCategoryCreator] = useState(false)
+  const [showQuickItemCreator, setShowQuickItemCreator] = useState(false)
+  const [draggingQuickIndex, setDraggingQuickIndex] = useState(null)
   const [activeIpdByPatient, setActiveIpdByPatient] = useState({})
   const autoPrintedInvoiceNoRef = useRef(null)
   const autoResetPendingRef = useRef(false)
@@ -6703,12 +6873,37 @@ function PaymentSlipSection() {
     ;(async () => {
       try {
         const { data } = await api.get('/payments/quick-services/')
-        const rows = Array.isArray(data?.data) ? data.data : []
-        const normalized = rows
-          .map(s => ({ label: String(s?.label || '').trim(), price: Number(s?.price || 0) }))
-          .filter(s => s.label && Number.isFinite(s.price) && s.price >= 0)
+        const payload = data?.data
+        const rows = Array.isArray(payload?.services)
+          ? payload.services
+          : (Array.isArray(payload) ? payload : [])
+        const serverCategories = Array.isArray(payload?.categories)
+          ? payload.categories
+          : []
+        const normalized = normalizeQuickServices(rows)
         if (!cancelled && normalized.length > 0) {
           setQuickServices(normalized)
+          if (serverCategories.length > 0) {
+            const categories = Array.from(
+              new Set(
+                serverCategories
+                  .map(c => String(c || '').trim())
+                  .filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
+              )
+            )
+            setQuickCategoryExtras(categories)
+          }
+          return
+        }
+        if (!cancelled && serverCategories.length > 0) {
+          const categories = Array.from(
+            new Set(
+              serverCategories
+                .map(c => String(c || '').trim())
+                .filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
+            )
+          )
+          setQuickCategoryExtras(categories)
           return
         }
       } catch {
@@ -6717,10 +6912,17 @@ function PaymentSlipSection() {
       try {
         const raw = JSON.parse(localStorage.getItem(QUICK_SERVICES_STORAGE_KEY) || '[]')
         if (Array.isArray(raw) && raw.length > 0) {
-          const normalized = raw
-            .map(s => ({ label: String(s?.label || '').trim(), price: Number(s?.price || 0) }))
-            .filter(s => s.label && Number.isFinite(s.price) && s.price >= 0)
+          const normalized = normalizeQuickServices(raw)
           if (!cancelled && normalized.length > 0) setQuickServices(normalized)
+        }
+      } catch {}
+      try {
+        const rawCats = JSON.parse(localStorage.getItem(QUICK_SERVICE_CATEGORIES_STORAGE_KEY) || '[]')
+        if (Array.isArray(rawCats) && !cancelled) {
+          const normalized = rawCats
+            .map(c => String(c || '').trim())
+            .filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
+          setQuickCategoryExtras(Array.from(new Set(normalized)))
         }
       } catch {}
     })()
@@ -6729,18 +6931,50 @@ function PaymentSlipSection() {
     }
   }, [])
 
-  async function persistQuickServices(nextList) {
-    const payload = (nextList || [])
-      .map(s => ({ label: String(s?.label || '').trim(), price: Number(s?.price || 0) }))
-      .filter(s => s.label && Number.isFinite(s.price) && s.price >= 0)
+  async function persistQuickServices(nextList, extraCategoriesOverride = null) {
+    const payload = normalizeQuickServices(nextList)
+    const categorySet = new Set([QUICK_SERVICE_DEFAULT_CATEGORY])
+    const extraCategories = Array.isArray(extraCategoriesOverride) ? extraCategoriesOverride : quickCategoryExtras
+    extraCategories.forEach(c => categorySet.add(String(c || '').trim()))
+    payload.forEach(svc => categorySet.add(String(svc.category || QUICK_SERVICE_DEFAULT_CATEGORY).trim() || QUICK_SERVICE_DEFAULT_CATEGORY))
+    const categoriesPayload = Array.from(categorySet).filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
     setQuickServices(payload)
     localStorage.setItem(QUICK_SERVICES_STORAGE_KEY, JSON.stringify(payload))
     try {
-      await api.put('/payments/quick-services/', { services: payload })
+      await api.put('/payments/quick-services/', { services: payload, categories: categoriesPayload })
     } catch {
       toast.error('Could not sync quick services to server')
     }
   }
+  const quickServiceCategories = useMemo(() => {
+    const seen = new Set([QUICK_SERVICE_DEFAULT_CATEGORY])
+    quickCategoryExtras.forEach(cat => seen.add(String(cat || '').trim()))
+    quickServices.forEach(svc => seen.add(String(svc.category || QUICK_SERVICE_DEFAULT_CATEGORY)))
+    return [QUICK_SERVICE_ALL_CATEGORY, ...Array.from(seen)]
+  }, [quickCategoryExtras, quickServices])
+
+  const visibleQuickServices = useMemo(() => {
+    if (activeQuickCategory === QUICK_SERVICE_ALL_CATEGORY) return quickServices
+    return quickServices.filter(svc => String(svc.category || QUICK_SERVICE_DEFAULT_CATEGORY) === activeQuickCategory)
+  }, [activeQuickCategory, quickServices])
+
+  useEffect(() => {
+    if (!quickServiceCategories.includes(activeQuickCategory)) {
+      setActiveQuickCategory(QUICK_SERVICE_ALL_CATEGORY)
+    }
+  }, [activeQuickCategory, quickServiceCategories])
+  useEffect(() => {
+    const allowed = quickServiceCategories.filter(c => c !== QUICK_SERVICE_ALL_CATEGORY)
+    if (!allowed.includes(newQuickCategory)) {
+      setNewQuickCategory(QUICK_SERVICE_DEFAULT_CATEGORY)
+    }
+  }, [newQuickCategory, quickServiceCategories])
+  useEffect(() => {
+    const allowed = quickServiceCategories.filter(c => c !== QUICK_SERVICE_ALL_CATEGORY)
+    if (!allowed.includes(editorQuickCategory)) {
+      setEditorQuickCategory(QUICK_SERVICE_DEFAULT_CATEGORY)
+    }
+  }, [editorQuickCategory, quickServiceCategories])
 
   useEffect(() => {
     if (ptSearch.trim().length < 2) { setPtResults([]); return }
@@ -6778,7 +7012,13 @@ function PaymentSlipSection() {
     setItems(prev => [...prev, { description: '', unit_price: '', quantity: 1 }])
   }
   function removeItem(i) {
-    setItems(prev => prev.filter((_, idx) => idx !== i))
+    setItems(prev => {
+      if (prev.length <= 1) {
+        return [{ description: '', unit_price: '', quantity: 1 }]
+      }
+      const next = prev.filter((_, idx) => idx !== i)
+      return next.length > 0 ? next : [{ description: '', unit_price: '', quantity: 1 }]
+    })
   }
   function updateItem(i, field, val) {
     if (field === 'unit_price' || field === 'quantity') {
@@ -6790,6 +7030,21 @@ function PaymentSlipSection() {
       if (!Number.isFinite(numericVal) || numericVal < 0) return
     }
     setItems(prev => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it))
+  }
+  function applyServiceSuggestion(rowIndex, suggestion) {
+    setItems(prev => {
+      const next = prev.map((it, idx) => (
+        idx === rowIndex
+          ? { ...it, description: suggestion.label, unit_price: String(suggestion.price) }
+          : it
+      ))
+      const hasEmptyRow = next.some(it => !String(it.description || '').trim())
+      if (!hasEmptyRow) {
+        next.push({ description: '', unit_price: '', quantity: 1 })
+      }
+      return next
+    })
+    setActiveServiceSearchRow(null)
   }
   function quickAdd(svc) {
     const label = String(svc.label || '').trim()
@@ -6816,29 +7071,81 @@ function PaymentSlipSection() {
     })
   }
 
-  function moveQuickService(index, direction) {
-    const to = index + direction
-    if (to < 0 || to >= quickServices.length) return
-    const copy = [...quickServices]
-    const tmp = copy[index]
-    copy[index] = copy[to]
-    copy[to] = tmp
-    void persistQuickServices(copy)
-  }
-
   function addQuickService() {
     const label = newQuickLabel.trim()
     const price = parseFloat(newQuickPrice)
+    const category = (newQuickCategory || QUICK_SERVICE_DEFAULT_CATEGORY).trim()
     if (!label) { toast.error('Service label is required'); return }
     if (Number.isNaN(price) || price < 0) { toast.error('Enter valid price'); return }
-    void persistQuickServices([...quickServices, { label, price }])
+    if (!category) { toast.error('Select category'); return }
+    setQuickServices(prev => [...prev, { label, price, category }])
     setNewQuickLabel('')
     setNewQuickPrice('')
+    setShowQuickItemCreator(false)
+  }
+
+  function addQuickCategory() {
+    const normalized = newQuickCategoryName.trim()
+    if (!normalized) {
+      toast.error('Category name is required')
+      return
+    }
+    const exists = quickServiceCategories.some(cat => cat.toLowerCase() === normalized.toLowerCase())
+    if (exists) {
+      toast.error('Category already exists')
+      return
+    }
+    setNewQuickCategory(normalized)
+    setActiveQuickCategory(normalized)
+    setEditorQuickCategory(normalized)
+    const mergedCategories = Array.from(new Set([...quickCategoryExtras, normalized]))
+    setQuickCategoryExtras(mergedCategories)
+    localStorage.setItem(QUICK_SERVICE_CATEGORIES_STORAGE_KEY, JSON.stringify(mergedCategories))
+    setNewQuickCategoryName('')
+    setShowCategoryCreator(false)
+    toast.success('Category added')
   }
 
   function removeQuickService(index) {
-    void persistQuickServices(quickServices.filter((_, i) => i !== index))
+    setQuickServices(prev => prev.filter((_, i) => i !== index))
   }
+  function handleQuickServiceDrop(targetIndex) {
+    if (draggingQuickIndex === null || draggingQuickIndex === targetIndex) return
+    setQuickServices(prev => {
+      if (draggingQuickIndex < 0 || draggingQuickIndex >= prev.length) return prev
+      if (targetIndex < 0 || targetIndex >= prev.length) return prev
+      const copy = [...prev]
+      const [moved] = copy.splice(draggingQuickIndex, 1)
+      copy.splice(targetIndex, 0, moved)
+      return copy
+    })
+    setDraggingQuickIndex(null)
+  }
+
+  const editorCategories = useMemo(
+    () => quickServiceCategories.filter(c => c !== QUICK_SERVICE_ALL_CATEGORY),
+    [quickServiceCategories]
+  )
+  const editorQuickRows = useMemo(
+    () => quickServices
+      .map((svc, idx) => ({ svc, idx }))
+      .filter(({ svc }) => String(svc.category || QUICK_SERVICE_DEFAULT_CATEGORY) === editorQuickCategory),
+    [editorQuickCategory, quickServices]
+  )
+  const searchableServiceItems = useMemo(() => {
+    const seen = new Set()
+    const out = []
+    quickServices.forEach(svc => {
+      const label = String(svc?.label || '').trim()
+      const price = Number(svc?.price || 0)
+      if (!label || !Number.isFinite(price) || price < 0) return
+      const key = label.toLowerCase()
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push({ label, price })
+    })
+    return out
+  }, [quickServices])
 
   const subtotal = items.reduce((sum, it) => {
     const p = parseFloat(it.unit_price) || 0
@@ -7425,15 +7732,38 @@ function PaymentSlipSection() {
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Quick Add</p>
                 <button
                   type="button"
-                  onClick={() => setShowQuickServiceEditor(true)}
+                  onClick={() => {
+                    const initial = activeQuickCategory === QUICK_SERVICE_ALL_CATEGORY ? QUICK_SERVICE_DEFAULT_CATEGORY : activeQuickCategory
+                    setEditorQuickCategory(initial)
+                    setShowCategoryCreator(false)
+                    setShowQuickItemCreator(false)
+                    setNewQuickCategory(initial)
+                    setShowQuickServiceEditor(true)
+                  }}
                   className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded border border-indigo-200 bg-indigo-50"
                 >
                   Edit Quick Add
                 </button>
               </div>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {quickServiceCategories.map(category => (
+                  <button
+                    key={category}
+                    type="button"
+                    onClick={() => setActiveQuickCategory(category)}
+                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                      activeQuickCategory === category
+                        ? 'border-emerald-600 bg-emerald-600 text-white'
+                        : 'border-gray-200 bg-gray-50 text-gray-600 hover:border-emerald-300'
+                    }`}
+                  >
+                    {category}
+                  </button>
+                ))}
+              </div>
               <div className="flex flex-wrap gap-1.5">
-                {quickServices.map(svc => (
-                  <button key={svc.label} type="button" onClick={() => quickAdd(svc)}
+                {visibleQuickServices.map((svc, idx) => (
+                  <button key={`${svc.category}-${svc.label}-${idx}`} type="button" onClick={() => quickAdd(svc)}
                     className="text-[11px] px-2.5 py-1 rounded-full border border-gray-200 bg-gray-50 hover:border-emerald-400 hover:bg-emerald-50 hover:text-emerald-800 text-gray-600 transition-colors">
                     {svc.label} <span className="text-gray-400">₹{svc.price}</span>
                   </button>
@@ -7458,14 +7788,56 @@ function PaymentSlipSection() {
               <div className="space-y-1.5 overflow-y-auto flex-1">
                 {items.map((it, i) => (
                   <div key={i} className="grid grid-cols-12 gap-1.5 items-center">
-                    <input className={`${inp} col-span-6 py-1.5 text-xs`} placeholder="Service"
-                      value={it.description} onChange={e => updateItem(i, 'description', e.target.value)} />
+                    {(() => {
+                      const q = String(it.description || '').trim().toLowerCase()
+                      const suggestions = q
+                        ? searchableServiceItems.filter(s => s.label.toLowerCase().includes(q)).slice(0, 8)
+                        : []
+                      const showSuggestions = activeServiceSearchRow === i && suggestions.length > 0
+                      return (
+                        <div className="col-span-6 relative">
+                          <input
+                            className={`${inp} w-full py-1.5 text-xs`}
+                            placeholder="Service"
+                            value={it.description}
+                            onFocus={() => setActiveServiceSearchRow(i)}
+                            onBlur={() => setTimeout(() => setActiveServiceSearchRow(prev => (prev === i ? null : prev)), 120)}
+                            onChange={e => {
+                              updateItem(i, 'description', e.target.value)
+                              setActiveServiceSearchRow(i)
+                            }}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter' && suggestions.length > 0) {
+                                e.preventDefault()
+                                applyServiceSuggestion(i, suggestions[0])
+                              }
+                            }}
+                          />
+                          {showSuggestions && (
+                            <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                              {suggestions.map((s, idx) => (
+                                <button
+                                  key={`${s.label}-${idx}`}
+                                  type="button"
+                                  onMouseDown={e => e.preventDefault()}
+                                  onClick={() => applyServiceSuggestion(i, s)}
+                                  className="w-full px-2 py-1.5 text-left text-xs hover:bg-emerald-50 flex items-center justify-between"
+                                >
+                                  <span className="text-gray-700 truncate">{s.label}</span>
+                                  <span className="text-gray-400 ml-2 shrink-0">₹{s.price}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
                     <input type="number" min="1" className={`${inp} col-span-2 text-center py-1.5 text-xs`}
                       value={it.quantity} onChange={e => updateItem(i, 'quantity', e.target.value)} />
                     <input type="number" min="0" step="1" className={`${inp} col-span-3 py-1.5 text-xs`} placeholder="0"
                       value={it.unit_price} onChange={e => updateItem(i, 'unit_price', e.target.value)} />
-                    <button type="button" onClick={() => removeItem(i)} disabled={items.length === 1}
-                      className="col-span-1 flex justify-center text-gray-300 hover:text-red-500 disabled:opacity-30">
+                    <button type="button" onClick={() => removeItem(i)}
+                      className="col-span-1 flex justify-center text-gray-300 hover:text-red-500">
                       <Trash2 size={13} strokeWidth={2} />
                     </button>
                   </div>
@@ -7556,65 +7928,162 @@ function PaymentSlipSection() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden">
             <div className="bg-indigo-600 px-4 py-3 flex items-center justify-between">
               <h3 className="text-white font-bold">Edit Quick Add Services</h3>
-              <button type="button" onClick={() => setShowQuickServiceEditor(false)} className="text-white/80 hover:text-white">
+              <button type="button" onClick={() => { setShowCategoryCreator(false); setShowQuickItemCreator(false); setShowQuickServiceEditor(false) }} className="text-white/80 hover:text-white">
                 <X size={18} />
               </button>
             </div>
             <div className="p-4 space-y-3 max-h-[75vh] overflow-y-auto">
-              <div className="grid grid-cols-12 gap-2 text-[10px] font-black uppercase tracking-wider text-gray-400 px-1">
-                <div className="col-span-5">Service</div>
-                <div className="col-span-3">Price</div>
-                <div className="col-span-4 text-right">Actions</div>
+              <div className="sticky top-0 z-10 rounded-xl border border-indigo-100 bg-white/95 backdrop-blur p-3 space-y-2 shadow-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-black text-indigo-700 uppercase tracking-wide">Categories</p>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewQuickCategory(editorQuickCategory)
+                        setShowQuickItemCreator(v => !v)
+                      }}
+                      className="text-[11px] px-2.5 py-1 rounded-full border border-indigo-300 bg-indigo-100 text-indigo-700 font-bold hover:bg-indigo-200"
+                    >
+                      + Add Item
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowCategoryCreator(v => !v)}
+                      className="text-[11px] px-2.5 py-1 rounded-full border border-emerald-300 bg-emerald-100 text-emerald-700 font-bold hover:bg-emerald-200"
+                    >
+                      + Add Category
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                  {editorCategories.map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => { setEditorQuickCategory(c); setNewQuickCategory(c) }}
+                      className={`text-[11px] px-2.5 py-1 rounded-full border font-semibold transition-colors ${
+                        editorQuickCategory === c
+                          ? 'border-indigo-600 bg-indigo-600 text-white'
+                          : 'border-indigo-200 bg-white text-indigo-700 hover:border-indigo-300'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                        <Tag size={12} />
+                        {c}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {showQuickItemCreator && (
+                  <div className="grid grid-cols-12 gap-2">
+                    <input
+                      value={newQuickLabel}
+                      onChange={e => setNewQuickLabel(e.target.value)}
+                      placeholder="Service name"
+                      className="col-span-5 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                    />
+                    <select
+                      value={newQuickCategory}
+                      onChange={e => setNewQuickCategory(e.target.value)}
+                      className="col-span-3 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                    >
+                      {editorCategories.map(c => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={newQuickPrice}
+                      onChange={e => setNewQuickPrice(e.target.value)}
+                      placeholder="Price"
+                      className="col-span-2 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                    />
+                    <button type="button" onClick={addQuickService} className="col-span-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700">
+                      Add
+                    </button>
+                  </div>
+                )}
+                {showCategoryCreator && (
+                  <div className="grid grid-cols-12 gap-2">
+                    <input
+                      value={newQuickCategoryName}
+                      onChange={e => setNewQuickCategoryName(e.target.value)}
+                      placeholder="Category name"
+                      className="col-span-9 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none bg-white"
+                    />
+                    <button type="button" onClick={addQuickCategory} className="col-span-2 bg-gray-700 text-white rounded-lg text-sm font-bold hover:bg-gray-800">
+                      Add
+                    </button>
+                    <button type="button" onClick={() => setShowCategoryCreator(false)} className="col-span-1 border border-gray-200 rounded-lg text-sm font-bold text-gray-500 hover:bg-gray-100">
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
               </div>
-              {quickServices.map((svc, i) => (
-                <div key={`${svc.label}-${i}`} className="grid grid-cols-12 gap-2 items-center border border-gray-100 rounded-xl p-2">
+
+              <div className="flex items-center justify-between px-1">
+                <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">Quick Items</p>
+                <p className="text-[10px] text-gray-400">Drag handle to reorder</p>
+              </div>
+              <div className="grid grid-cols-12 gap-2 text-[10px] font-black uppercase tracking-wider text-gray-400 px-1">
+                <div className="col-span-1 text-center">Drag</div>
+                <div className="col-span-4">Service</div>
+                <div className="col-span-3">Category</div>
+                <div className="col-span-3">Price</div>
+                <div className="col-span-1 text-right">Delete</div>
+              </div>
+              {editorQuickRows.map(({ svc, idx }) => (
+                <div
+                  key={`${svc.label}-${idx}`}
+                  className={`grid grid-cols-12 gap-2 items-center border rounded-xl p-2 transition-colors ${
+                    draggingQuickIndex === idx ? 'border-indigo-300 bg-indigo-50/40' : 'border-gray-100'
+                  }`}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={() => handleQuickServiceDrop(idx)}
+                >
+                  <button
+                    type="button"
+                    draggable
+                    onDragStart={() => setDraggingQuickIndex(idx)}
+                    onDragEnd={() => setDraggingQuickIndex(null)}
+                    className="col-span-1 h-9 rounded-lg border border-gray-200 bg-gray-50 text-gray-500 hover:text-indigo-600 hover:border-indigo-300 flex items-center justify-center cursor-grab active:cursor-grabbing"
+                    title="Drag to reorder"
+                  >
+                    <GripVertical size={16} />
+                  </button>
                   <input
                     value={svc.label}
-                    onChange={e => setQuickServices(prev => prev.map((x, idx) => idx === i ? { ...x, label: e.target.value } : x))}
-                    className="col-span-5 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                    onChange={e => setQuickServices(prev => prev.map((x, i) => i === idx ? { ...x, label: e.target.value } : x))}
+                    className="col-span-4 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                   />
+                  <select
+                    value={svc.category || QUICK_SERVICE_DEFAULT_CATEGORY}
+                    onChange={e => setQuickServices(prev => prev.map((x, i) => i === idx ? { ...x, category: e.target.value } : x))}
+                    className="col-span-3 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
+                  >
+                    {editorCategories.map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
                   <input
                     type="number"
                     min="0"
                     step="1"
                     value={svc.price}
-                    onChange={e => setQuickServices(prev => prev.map((x, idx) => idx === i ? { ...x, price: Number(e.target.value || 0) } : x))}
+                    onChange={e => setQuickServices(prev => prev.map((x, i) => i === idx ? { ...x, price: Number(e.target.value || 0) } : x))}
                     className="col-span-3 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
                   />
-                  <div className="col-span-4 flex justify-end gap-1.5">
-                    <button type="button" onClick={() => moveQuickService(i, -1)} className="px-2 py-1 text-xs font-bold rounded bg-gray-100 hover:bg-gray-200">Up</button>
-                    <button type="button" onClick={() => moveQuickService(i, 1)} className="px-2 py-1 text-xs font-bold rounded bg-gray-100 hover:bg-gray-200">Down</button>
-                    <button type="button" onClick={() => removeQuickService(i)} className="px-2 py-1 text-xs font-bold rounded bg-red-50 text-red-600 hover:bg-red-100">Delete</button>
-                  </div>
-                </div>
-              ))}
-
-              <div className="border-t border-gray-100 pt-3 mt-2">
-                <p className="text-xs font-black text-gray-500 uppercase tracking-wider mb-2">Create New Quick Add</p>
-                <div className="grid grid-cols-12 gap-2">
-                  <input
-                    value={newQuickLabel}
-                    onChange={e => setNewQuickLabel(e.target.value)}
-                    placeholder="Service name"
-                    className="col-span-7 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
-                  />
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={newQuickPrice}
-                    onChange={e => setNewQuickPrice(e.target.value)}
-                    placeholder="Price"
-                    className="col-span-3 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none"
-                  />
-                  <button type="button" onClick={addQuickService} className="col-span-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700">
-                    Add
+                  <button type="button" onClick={() => removeQuickService(idx)} className="col-span-1 h-9 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 flex items-center justify-center">
+                    <Trash2 size={14} />
                   </button>
                 </div>
-              </div>
+              ))}
             </div>
             <div className="px-4 py-3 border-t border-gray-100 bg-gray-50 flex justify-end">
-              <button type="button" onClick={() => { setShowQuickServiceEditor(false); toast.success('Quick Add services updated') }} className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700">
+              <button type="button" onClick={() => { void persistQuickServices(quickServices); setShowQuickServiceEditor(false); toast.success('Quick Add services updated') }} className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700">
                 Done
               </button>
             </div>
@@ -8095,6 +8564,8 @@ function OpdSlipsSection({ onMoveToIpd }) {
           first_name: nameParts[0] || 'Patient',
           last_name: nameParts.slice(1).join(' ') || '',
           guardian_name: formatPersonName(editingVisit.patient_guardian_name || '').trim(),
+          guardian_relationship: String(editingVisit.patient_guardian_relationship || '').trim(),
+          preferred_salutation: String(editingVisit.salutation_choice ?? ''),
           gender: editingVisit.patient_gender || 'male',
           address_line1: editingVisit.patient_address || '',
           city: editingVisit.patient_city || '',
@@ -8147,13 +8618,18 @@ function OpdSlipsSection({ onMoveToIpd }) {
           patient_gender: p.gender || visit.patient_gender || 'male',
           patient_age: p.age != null ? String(p.age) : (visit.patient_age || ''),
           patient_guardian_name: formatPersonName(p.guardian_name || visit.patient_guardian_name || ''),
+          patient_guardian_relationship: (p.guardian_relationship || '').trim() || visit.patient_guardian_relationship || '',
           patient_address: p.address_line1 || visit.patient_address || '',
           patient_city: p.city || visit.patient_city || '',
           patient_state: p.state || visit.patient_state || '',
+          salutation_choice: normalizeSalutationChoiceFromApi(p.preferred_salutation),
         }
       } catch {
         // fall back to visit payload values
       }
+    }
+    if (enriched.salutation_choice === undefined) {
+      enriched = { ...enriched, salutation_choice: '' }
     }
     setEditingVisit(enriched)
   }
@@ -8390,13 +8866,47 @@ function OpdSlipsSection({ onMoveToIpd }) {
                <div className="grid grid-cols-2 gap-3">
                  <div className="col-span-2">
                     <label className="block text-xs font-bold text-gray-600 mb-1">Patient Name</label>
-                    <input
-                      type="text"
-                      value={editingVisit.patient_name || ''}
-                      onChange={e => setEditingVisit({ ...editingVisit, patient_name: e.target.value })}
-                      className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
-                      placeholder="Patient full name"
-                    />
+                    <div className="flex w-full min-w-0 rounded-xl border border-gray-200 overflow-hidden items-stretch focus-within:ring-2 focus-within:ring-emerald-500 focus-within:border-emerald-400">
+                      <select
+                        value={editingVisit.salutation_choice ?? ''}
+                        onChange={e => setEditingVisit({ ...editingVisit, salutation_choice: e.target.value })}
+                        className="shrink-0 w-[5.25rem] sm:w-28 border-0 border-r border-gray-200 bg-gray-50/95 py-2 pl-2 pr-1 text-xs sm:text-sm font-bold text-gray-800 focus:outline-none cursor-pointer"
+                        aria-label="Patient title (Mr, Mrs, …)"
+                      >
+                        {SALUTATION_CHOICE_OPTIONS.map((o) => (
+                          <option key={o.value || '_none'} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        value={editingVisit.patient_name || ''}
+                        onChange={e => setEditingVisit({ ...editingVisit, patient_name: e.target.value })}
+                        className="flex-1 min-w-0 border-0 rounded-none bg-transparent py-2 px-3 text-sm focus:outline-none focus:ring-0"
+                        placeholder="Patient full name"
+                      />
+                    </div>
+                 </div>
+                 <div className="col-span-2">
+                    <label className="block text-xs font-bold text-gray-600 mb-1">Guardian</label>
+                    <div className="flex w-full min-w-0 rounded-xl border border-gray-200 overflow-hidden items-stretch focus-within:ring-2 focus-within:ring-emerald-500 focus-within:border-emerald-400">
+                      <select
+                        value={editingVisit.patient_guardian_relationship || ''}
+                        onChange={e => setEditingVisit({ ...editingVisit, patient_guardian_relationship: e.target.value })}
+                        className="shrink-0 w-[6.5rem] sm:min-w-[7.5rem] sm:max-w-[9.5rem] sm:w-36 border-0 border-r border-gray-200/90 bg-gray-50/95 py-2 pl-1.5 pr-0.5 text-[11px] sm:text-xs font-bold text-gray-800 focus:outline-none cursor-pointer"
+                        aria-label="Relation to guardian (S/o, W/o, …)"
+                      >
+                        {GUARDIAN_RELATIONSHIP_OPTIONS.map((o) => (
+                          <option key={o.value || '_'} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        value={editingVisit.patient_guardian_name || ''}
+                        onChange={e => setEditingVisit({ ...editingVisit, patient_guardian_name: e.target.value })}
+                        className="flex-1 min-w-0 border-0 rounded-none bg-transparent py-2 px-3 text-sm focus:outline-none focus:ring-0"
+                        placeholder="Guardian name"
+                      />
+                    </div>
                  </div>
                  <div>
                     <label className="block text-xs font-bold text-gray-600 mb-1">Phone</label>
@@ -8430,16 +8940,6 @@ function OpdSlipsSection({ onMoveToIpd }) {
                       <option value="female">Female</option>
                       <option value="other">Other</option>
                     </select>
-                 </div>
-                 <div>
-                    <label className="block text-xs font-bold text-gray-600 mb-1">Guardian / Relative</label>
-                    <input
-                      type="text"
-                      value={editingVisit.patient_guardian_name || ''}
-                      onChange={e => setEditingVisit({ ...editingVisit, patient_guardian_name: e.target.value })}
-                      className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
-                      placeholder="Guardian name"
-                    />
                  </div>
                  <div className="col-span-2">
                     <label className="block text-xs font-bold text-gray-600 mb-1">Address</label>
@@ -8550,7 +9050,14 @@ function OpdSlipsSection({ onMoveToIpd }) {
                   {viewVisit.patient_name?.charAt(0) || 'P'}
                 </div>
                 <div>
-                  <h2 className="font-bold text-lg leading-tight">{viewVisit.patient_name || '--'}</h2>
+                  <h2 className="font-bold text-lg leading-tight">
+                    {formatPatientLineForSlip(
+                      viewVisit.patient_name,
+                      viewVisit.patient_gender,
+                      viewVisit.patient_age,
+                      viewVisit.patient_salutation,
+                    ) || '--'}
+                  </h2>
                   <p className="text-xs text-gray-400 font-mono tracking-tighter">{viewVisit.patient_uhid || 'No UHID'}</p>
                 </div>
               </div>
@@ -8588,7 +9095,9 @@ function OpdSlipsSection({ onMoveToIpd }) {
                     </div>
                     <div className="flex flex-col">
                       <span className="text-[10px] font-black text-gray-400 uppercase">Guardian / Relative</span>
-                      <span className="text-sm font-bold text-gray-700 mt-0.5">{viewVisit.patient_guardian_name || '--'}</span>
+                      <span className="text-sm font-bold text-gray-700 mt-0.5">
+                        {formatGuardianLineForSlip(viewVisit.patient_guardian_name || '', viewVisit.patient_guardian_relationship) || '--'}
+                      </span>
                     </div>
                     <div className="flex flex-col">
                       <span className="text-[10px] font-black text-gray-400 uppercase">Full Address</span>
@@ -9436,6 +9945,16 @@ function PaymentSlipSettingsSection() {
 function OpdSettingsSection() {
   const [form, setForm] = useState(() => getReceptionOpdSettings())
   const [doctors, setDoctors] = useState([])
+  const normalizedSlots = useMemo(() => (
+    Array.isArray(form.opd_fee_slots)
+      ? form.opd_fee_slots.map((s) => ({
+          start: String(s?.start || ''),
+          end: String(s?.end || ''),
+          amount: String(s?.amount ?? ''),
+        }))
+      : []
+  ), [form.opd_fee_slots])
+  const [timelineDraft, setTimelineDraft] = useState({ startMin: null, endMin: null, amount: '', editIndex: null })
 
   useEffect(() => {
     let cancelled = false
@@ -9467,10 +9986,128 @@ function OpdSettingsSection() {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  async function persistSlotRows(rows) {
+    const sanitizedRows = (Array.isArray(rows) ? rows : [])
+      .filter((s) => s && s.start && s.end)
+      .map((s) => ({
+        start: String(s.start).slice(0, 5),
+        end: String(s.end).slice(0, 5),
+        amount: Number(String(s.amount || '0').replace(/[^0-9.]/g, '') || 0),
+      }))
+    const next = {
+      ...form,
+      opd_fee_mode: 'slot',
+      opd_fee_slots: sanitizedRows,
+    }
+    setForm((prev) => ({ ...prev, opd_fee_mode: 'slot', opd_fee_slots: sanitizedRows }))
+    await saveReceptionOpdSettings(next)
+    await loadReceptionPortalSettings()
+    setForm(getReceptionOpdSettings())
+  }
+
+  function plusOneMinute(hhmm) {
+    const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/)
+    if (!m) return ''
+    const h = Number(m[1])
+    const mm = Number(m[2])
+    if (!Number.isFinite(h) || !Number.isFinite(mm) || h < 0 || h > 23 || mm < 0 || mm > 59) return ''
+    const total = (h * 60 + mm + 1) % (24 * 60)
+    const nh = String(Math.floor(total / 60)).padStart(2, '0')
+    const nmm = String(total % 60).padStart(2, '0')
+    return `${nh}:${nmm}`
+  }
+
+  function addFeeSlot() {
+    setForm((prev) => {
+      const rows = Array.isArray(prev.opd_fee_slots) ? [...prev.opd_fee_slots] : []
+      const last = rows[rows.length - 1]
+      const nextStart = plusOneMinute(last?.end)
+      rows.push({ start: nextStart, end: '', amount: '' })
+      return { ...prev, opd_fee_slots: rows }
+    })
+  }
+
+  function updateFeeSlot(index, patch) {
+    setForm((prev) => {
+      const rows = Array.isArray(prev.opd_fee_slots) ? [...prev.opd_fee_slots] : []
+      rows[index] = { ...(rows[index] || { start: '', end: '', amount: '' }), ...patch }
+      return { ...prev, opd_fee_slots: rows }
+    })
+  }
+
+  function removeFeeSlot(index) {
+    setForm((prev) => {
+      const rows = Array.isArray(prev.opd_fee_slots) ? [...prev.opd_fee_slots] : []
+      rows.splice(index, 1)
+      return { ...prev, opd_fee_slots: rows }
+    })
+  }
+
+  const toMin = (hhmm) => {
+    const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/)
+    if (!m) return null
+    const h = Number(m[1]); const mm = Number(m[2])
+    if (h < 0 || h > 23 || mm < 0 || mm > 59) return null
+    return h * 60 + mm
+  }
+  const toHHMM = (mins) => {
+    if (mins == null) return ''
+    const m = ((Number(mins) % 1440) + 1440) % 1440
+    const h = String(Math.floor(m / 60)).padStart(2, '0')
+    const mm = String(m % 60).padStart(2, '0')
+    return `${h}:${mm}`
+  }
+  const segments = useMemo(() => {
+    const segs = []
+    normalizedSlots.forEach((s, idx) => {
+      const a = toMin(s.start)
+      const b = toMin(s.end)
+      if (a == null || b == null) return
+      const amount = s.amount
+      if (a <= b) segs.push({ idx, start: a, end: b, amount })
+      else {
+        segs.push({ idx, start: a, end: 1440, amount, overnight: true })
+        segs.push({ idx, start: 0, end: b, amount, overnight: true })
+      }
+    })
+    return segs
+  }, [normalizedSlots])
+
+  const draftSegments = useMemo(() => {
+    const a = timelineDraft.startMin
+    const b = timelineDraft.endMin
+    if (a == null) return []
+    if (b == null) return [{ start: a, end: a + 1 }]
+    if (a <= b) return [{ start: a, end: b }]
+    return [
+      { start: a, end: 1440 },
+      { start: 0, end: b },
+    ]
+  }, [timelineDraft.startMin, timelineDraft.endMin])
+
+  const nowMarkerPct = useMemo(() => {
+    // This is only for UI indicator; fee calculation remains backend-driven.
+    const d = new Date()
+    const mins = d.getHours() * 60 + d.getMinutes()
+    return (mins / 1440) * 100
+  }, [])
+
   async function handleSave(e) {
     e.preventDefault()
     try {
-      await saveReceptionOpdSettings(form)
+      const prepared = {
+        ...form,
+        opd_fee_mode: form.opd_fee_mode === 'slot' ? 'slot' : 'doctor',
+        opd_fee_slots: normalizedSlots
+          .filter((s) => s.start && s.end)
+          .map((s) => ({
+            start: s.start,
+            end: s.end,
+            amount: Number(String(s.amount || '0').replace(/[^0-9.]/g, '') || 0),
+          })),
+      }
+      await saveReceptionOpdSettings(prepared)
+      setForm(getReceptionOpdSettings())
       toast.success('OPD settings saved')
     } catch {
       toast.error('Failed to save OPD settings')
@@ -9534,6 +10171,253 @@ function OpdSettingsSection() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="border border-gray-100 rounded-xl p-4 bg-gray-50/50 space-y-3">
+            <div>
+              <p className="text-sm font-bold text-gray-800">OPD Fee Mode</p>
+              <p className="text-xs text-gray-500 mt-0.5">Choose one: doctor-wise consultation fee or slot-wise fee slabs.</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onChange('opd_fee_mode', 'doctor')
+                  saveReceptionOpdSettings({ ...form, opd_fee_mode: 'doctor' }).catch(() => {})
+                }}
+                className={`text-left rounded-lg border-2 p-3 transition-all ${
+                  form.opd_fee_mode !== 'slot'
+                    ? 'border-emerald-500 bg-emerald-50'
+                    : 'border-gray-200 bg-white'
+                }`}
+              >
+                <p className="text-sm font-bold text-gray-800">Doctor charges currently following</p>
+                <p className="text-xs text-gray-500 mt-0.5">Uses the selected doctor's consultation fee.</p>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onChange('opd_fee_mode', 'slot')
+                  saveReceptionOpdSettings({ ...form, opd_fee_mode: 'slot' }).catch(() => {})
+                }}
+                className={`text-left rounded-lg border-2 p-3 transition-all ${
+                  form.opd_fee_mode === 'slot'
+                    ? 'border-emerald-500 bg-emerald-50'
+                    : 'border-gray-200 bg-white'
+                }`}
+              >
+                <p className="text-sm font-bold text-gray-800">Slots wise</p>
+                <p className="text-xs text-gray-500 mt-0.5">Set fee by time ranges, e.g. 08:00-14:00 = 200.</p>
+              </button>
+            </div>
+
+            {form.opd_fee_mode === 'slot' && (
+              <div className="space-y-2">
+                <div className="rounded-xl border border-gray-200 bg-white p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-extrabold text-gray-700 uppercase tracking-wider">24-hour OPD fee timeline</p>
+                      <p className="text-[11px] text-gray-500 mt-0.5">Click once for start, again for end. Click an existing segment to edit.</p>
+                    </div>
+                    {form.current_opd_slot_fee != null && (
+                      <div className="text-right">
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Now</p>
+                        <p className="text-sm font-extrabold text-emerald-700">₹{form.current_opd_slot_fee}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    className="mt-3 relative w-full h-12 rounded-xl bg-gradient-to-b from-gray-50 to-white border border-gray-200 overflow-hidden cursor-crosshair select-none"
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect()
+                      const x = Math.min(Math.max(0, e.clientX - rect.left), rect.width)
+                      const raw = (x / rect.width) * 1440
+                      const snapped = Math.round(raw / 5) * 5
+                      if (timelineDraft.startMin == null || (timelineDraft.startMin != null && timelineDraft.endMin != null)) {
+                        setTimelineDraft((d) => ({ startMin: snapped, endMin: null, amount: d.amount || '', editIndex: null }))
+                      } else {
+                        setTimelineDraft((d) => ({ ...d, endMin: snapped }))
+                      }
+                    }}
+                    title="Click to pick start and end"
+                  >
+                    {/* Hour ticks */}
+                    {[0, 6, 12, 18, 24].map((h) => (
+                      <div
+                        key={`tick-${h}`}
+                        className="absolute top-0 bottom-0 w-px bg-gray-200"
+                        style={{ left: `${(h / 24) * 100}%` }}
+                      />
+                    ))}
+                    {/* Current time marker */}
+                    <div className="absolute top-0 bottom-0 w-px bg-blue-500/70" style={{ left: `${nowMarkerPct}%` }} />
+
+                    {segments.map((seg, i) => (
+                      <div
+                        key={`${seg.idx}-${i}`}
+                        className={`absolute top-1 bottom-1 rounded-md ${
+                          seg.idx % 3 === 0 ? 'bg-emerald-200/90 border border-emerald-300'
+                            : seg.idx % 3 === 1 ? 'bg-sky-200/90 border border-sky-300'
+                            : 'bg-violet-200/90 border border-violet-300'
+                        }`}
+                        style={{
+                          left: `${(seg.start / 1440) * 100}%`,
+                          width: `${((seg.end - seg.start) / 1440) * 100}%`,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          const slot = normalizedSlots[seg.idx]
+                          setTimelineDraft({
+                            startMin: toMin(slot.start),
+                            endMin: toMin(slot.end),
+                            amount: String(slot.amount || ''),
+                            editIndex: seg.idx,
+                          })
+                        }}
+                        title={`${toHHMM(seg.start)}–${toHHMM(seg.end)} ₹${seg.amount}`}
+                      />
+                    ))}
+                    {draftSegments.map((seg, idx) => (
+                      <div
+                        key={`draft-${idx}`}
+                        className="absolute top-1 bottom-1 rounded-md bg-blue-500/15 border border-blue-400/40"
+                        style={{
+                          left: `${(seg.start / 1440) * 100}%`,
+                          width: `${((seg.end - seg.start) / 1440) * 100}%`,
+                        }}
+                      />
+                    ))}
+                  </div>
+
+                  <div className="mt-1 flex items-center justify-between text-[10px] font-bold text-gray-400">
+                    <span>00:00</span>
+                    <span>06:00</span>
+                    <span>12:00</span>
+                    <span>18:00</span>
+                    <span>24:00</span>
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-12 gap-2 items-end">
+                    <div className="col-span-4">
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1">From</label>
+                      <input
+                        type="time"
+                        value={toHHMM(timelineDraft.startMin)}
+                        onChange={(e) => setTimelineDraft((d) => ({ ...d, startMin: toMin(e.target.value) }))}
+                        className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                      />
+                    </div>
+                    <div className="col-span-4">
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1">To</label>
+                      <input
+                        type="time"
+                        value={toHHMM(timelineDraft.endMin)}
+                        onChange={(e) => setTimelineDraft((d) => ({ ...d, endMin: toMin(e.target.value) }))}
+                        className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                      />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1">Fee (Rs)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={timelineDraft.amount}
+                        onChange={(e) => setTimelineDraft((d) => ({ ...d, amount: e.target.value }))}
+                        className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                        placeholder="0"
+                      />
+                    </div>
+                    <div className="col-span-1">
+                      <button
+                        type="button"
+                        onClick={() => setTimelineDraft({ startMin: null, endMin: null, amount: '', editIndex: null })}
+                        className="w-full h-9 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 text-sm font-bold"
+                        title="Clear selection"
+                      >
+                        ↺
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (timelineDraft.startMin == null || timelineDraft.endMin == null) return
+                        const rows = (() => {
+                          const prev = form
+                          const rows = Array.isArray(prev.opd_fee_slots) ? [...prev.opd_fee_slots] : []
+                          const row = { start: toHHMM(timelineDraft.startMin), end: toHHMM(timelineDraft.endMin), amount: timelineDraft.amount || '0' }
+                          if (timelineDraft.editIndex != null && rows[timelineDraft.editIndex]) {
+                            rows[timelineDraft.editIndex] = row
+                          } else {
+                            rows.push(row)
+                          }
+                          return rows
+                        })()
+                        persistSlotRows(rows)
+                          .then(() => {
+                            toast.success('Slots saved')
+                            setTimelineDraft({ startMin: null, endMin: null, amount: '', editIndex: null })
+                          })
+                          .catch(() => toast.error('Failed to save slots'))
+                      }}
+                      className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-white text-sm font-extrabold disabled:opacity-40 ${
+                        timelineDraft.editIndex != null ? 'bg-blue-600 hover:bg-blue-700' : 'bg-emerald-600 hover:bg-emerald-700'
+                      }`}
+                      disabled={timelineDraft.startMin == null || timelineDraft.endMin == null}
+                    >
+                      {timelineDraft.editIndex != null ? 'Save changes' : '+ Add slot'}
+                    </button>
+                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                      <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-200 border border-emerald-300" /> Slots</span>
+                      <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded bg-blue-500/15 border border-blue-400/40" /> Draft</span>
+                    </div>
+                  </div>
+                </div>
+
+                {normalizedSlots.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {normalizedSlots.map((slot, idx) => (
+                      <div key={`slot-row-${idx}`} className="flex items-center justify-between gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                        <div className="text-sm font-bold text-gray-800">
+                          {slot.start || '—'} – {slot.end || '—'} <span className="text-gray-400 font-black">·</span> ₹{slot.amount || '0'}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setTimelineDraft({ startMin: toMin(slot.start), endMin: toMin(slot.end), amount: String(slot.amount || ''), editIndex: idx })}
+                            className="px-2 py-1 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 text-xs font-extrabold"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rows = Array.isArray(form.opd_fee_slots) ? [...form.opd_fee_slots] : []
+                              rows.splice(idx, 1)
+                              persistSlotRows(rows)
+                                .then(() => toast.success('Slot removed'))
+                                .catch(() => toast.error('Failed to remove slot'))
+                            }}
+                            className="px-2 py-1 rounded-md bg-gray-100 text-gray-700 hover:bg-red-100 hover:text-red-700 text-xs font-extrabold"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {normalizedSlots.length === 0 && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    No slots added yet. Add one or more time ranges to apply slot-wise OPD fee.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* ── OPD Slip Print Background Toggle ── */}

@@ -53,6 +53,8 @@ class Patient(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     last_name = models.CharField(max_length=100, blank=True, default="")
     gender = models.CharField(max_length=10, choices=Gender.choices, blank=True, default=Gender.OTHER)
     dob = models.DateField(null=True, blank=True)
+    # OPD/reception honorific: '' = use age+gender rules; 'none' = no prefix; else Mr/Mrs/Master/Miss.
+    preferred_salutation = models.CharField(max_length=16, blank=True, default="")
 
     phone = models.CharField(max_length=25, blank=True, default="")
     email = models.EmailField(blank=True, default="")

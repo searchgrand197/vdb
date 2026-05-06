@@ -14,6 +14,8 @@ class OPDVisitSerializer(serializers.ModelSerializer):
     patient_city = serializers.SerializerMethodField()
     patient_state = serializers.SerializerMethodField()
     patient_guardian_name = serializers.SerializerMethodField()
+    patient_guardian_relationship = serializers.SerializerMethodField()
+    patient_salutation = serializers.SerializerMethodField()
     token_number = serializers.IntegerField(source="queue_number", read_only=True)
     chief_complaint = serializers.CharField(source="visit_reason", read_only=True)
     room_code = serializers.SerializerMethodField()
@@ -39,6 +41,8 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "patient_city",
             "patient_state",
             "patient_guardian_name",
+            "patient_guardian_relationship",
+            "patient_salutation",
             "visit_date",
             "queue_number",
             "token_number",
@@ -113,6 +117,36 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             return obj.patient.guardian.name or ""
         except Exception:
             return ""
+
+    def get_patient_guardian_relationship(self, obj):
+        try:
+            return (obj.patient.guardian.relationship or "").strip()
+        except Exception:
+            return ""
+
+    def get_patient_salutation(self, obj):
+        """
+        Honorific for OPD slip: use Patient.preferred_salutation when set
+        ('none' = no prefix; explicit Mr/Mrs/Master/Miss); otherwise age+gender rules.
+        """
+        pref = (getattr(obj.patient, "preferred_salutation", None) or "").strip()
+        if pref == "none":
+            return ""
+        if pref in ("Mr", "Mrs", "Master", "Miss"):
+            return pref
+        gender = (getattr(obj.patient, "gender", None) or "").strip().lower()
+        age = self.get_patient_age(obj)
+        if age is not None and age < 18:
+            if gender == "male":
+                return "Master"
+            if gender == "female":
+                return "Miss"
+            return ""
+        if gender == "male":
+            return "Mr"
+        if gender == "female":
+            return "Mrs"
+        return ""
 
     def get_room_code(self, obj):
         # Backward-compatibility for old frontend payload/filters.

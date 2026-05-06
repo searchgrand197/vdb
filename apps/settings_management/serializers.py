@@ -37,6 +37,9 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    opd_fee_slots = serializers.ListField(required=False)
+    current_opd_slot_fee = serializers.SerializerMethodField()
+    current_opd_slot = serializers.SerializerMethodField()
 
     class Meta:
         model = ReceptionPortalSettings
@@ -52,7 +55,46 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
             "email",
             "website",
             "print_with_background",
+            "opd_fee_mode",
+            "opd_fee_slots",
+            "current_opd_slot_fee",
+            "current_opd_slot",
             "created_at",
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_current_opd_slot(self, obj):
+        return obj.get_current_opd_slot()
+
+    def get_current_opd_slot_fee(self, obj):
+        return obj.get_current_opd_slot_fee()
+
+    def validate_opd_fee_slots(self, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Slots must be a list.")
+        cleaned = []
+        for idx, row in enumerate(value):
+            if not isinstance(row, dict):
+                raise serializers.ValidationError(f"Slot #{idx + 1} must be an object.")
+            start = str(row.get("start", "")).strip()
+            end = str(row.get("end", "")).strip()
+            amount = row.get("amount", "")
+            if not start or not end:
+                raise serializers.ValidationError(f"Slot #{idx + 1} needs start and end time.")
+            if ":" not in start or ":" not in end:
+                raise serializers.ValidationError(f"Slot #{idx + 1} time must be HH:MM.")
+            try:
+                amount_value = float(str(amount).strip())
+            except Exception:
+                raise serializers.ValidationError(f"Slot #{idx + 1} amount must be numeric.")
+            if amount_value < 0:
+                raise serializers.ValidationError(f"Slot #{idx + 1} amount cannot be negative.")
+            cleaned.append({
+                "start": start[:5],
+                "end": end[:5],
+                "amount": round(amount_value, 2),
+            })
+        return cleaned
