@@ -17,7 +17,7 @@ import MenuIcon from '@mui/icons-material/Menu';
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined';
 import { NAV_ITEMS } from '@/constants/navigation';
 import { useAuth } from '@admin/context/AuthContext';
-import { useAuthStore } from '@/stores/authStore';
+import { useAuthStore } from '../../stores/authStore';
 import { userHasRole } from '@/utils/roleUtils';
 import { AppButton } from '@/components/AppButton';
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from decimal import Decimal
+from collections import defaultdict
 
 from django.db import transaction
 from django.db.models import Q
@@ -325,14 +326,43 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 invoice_date__lte=stay_end_date,
             )
         ).prefetch_related("items").order_by("-created_at")
+
+        # Count invoice payment outcomes so cancelled advances can be excluded
+        # from charge totals/rows.
+        invoice_payment_counts = defaultdict(lambda: {"success": 0, "cancelled": 0})
+        invoice_ids = list(invoices.values_list("id", flat=True))
+        if invoice_ids:
+            payment_rows = (
+                PaymentTransaction.objects.filter(
+                    invoice_id__in=invoice_ids,
+                    is_deleted=False,
+                    status__in=[
+                        PaymentTransaction.Status.SUCCESS,
+                        PaymentTransaction.Status.CANCELLED,
+                    ],
+                )
+                .values("invoice_id", "status")
+            )
+            for row in payment_rows:
+                bucket = "success" if row["status"] == PaymentTransaction.Status.SUCCESS else "cancelled"
+                invoice_payment_counts[row["invoice_id"]][bucket] += 1
         
         record_charges = []
         grouped_charge_map = {}
         invoice_to_event_refs = {}
         invoices_total = Decimal("0.00")
         for inv in invoices:
+            is_advance_invoice = str(inv.invoice_no or "").startswith("IPDADV-")
+            payment_counts = invoice_payment_counts.get(inv.id, {"success": 0, "cancelled": 0})
             # Paid advance invoices are deposits, not billable charges.
-            if inv.invoice_no.startswith("IPDADV-") and (inv.amount_paid or Decimal("0.00")) > Decimal("0.00"):
+            if is_advance_invoice and (
+                (inv.amount_paid or Decimal("0.00")) > Decimal("0.00")
+                or payment_counts["success"] > 0
+            ):
+                continue
+            # If advance payment was cancelled (and no successful payment remains),
+            # do not show it as credit/due charge.
+            if is_advance_invoice and payment_counts["success"] == 0 and payment_counts["cancelled"] > 0:
                 continue
             # Cancelled invoices stay visible on the ledger but do not add to active totals.
             if inv.status == BillingInvoice.Status.FINALIZED:
@@ -348,7 +378,7 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
                 base = (description or "").strip().lower()
                 return f"{base}__inv__{inv.id}"
 
-            if inv.invoice_no.startswith("IPDADV-") and (inv.amount_paid or Decimal("0.00")) == Decimal("0.00"):
+            if is_advance_invoice and (inv.amount_paid or Decimal("0.00")) == Decimal("0.00"):
                 desc = "Advance (Credit / Due)"
                 quantity = Decimal("1")
                 unit_price = inv.total_amount

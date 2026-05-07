@@ -49,8 +49,6 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
             "default_city",
             "default_state",
             "default_doctor_user",
-            "invoice_prefix",
-            "invoice_next_number",
             "hospital_name",
             "address",
             "pin_code",
@@ -68,21 +66,6 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
-
-    def validate_invoice_prefix(self, value):
-        normalized = str(value or "").strip().upper()
-        if not normalized:
-            return "INV"
-        if len(normalized) > 20:
-            raise serializers.ValidationError("Invoice prefix cannot exceed 20 characters.")
-        return normalized
-
-    def validate_invoice_next_number(self, value):
-        if value is None:
-            return 1
-        if int(value) < 1:
-            raise serializers.ValidationError("Next invoice number must be at least 1.")
-        return int(value)
 
     def get_current_opd_slot(self, obj):
         return obj.get_current_opd_slot()

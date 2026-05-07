@@ -10,6 +10,9 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
     assigned_doctor_email = serializers.EmailField(source="assigned_doctor.email", read_only=True)
     assigned_doctor_name = serializers.SerializerMethodField()
     assigned_nurse_email = serializers.EmailField(source="assigned_nurse.email", read_only=True)
+    guardian_name = serializers.SerializerMethodField()
+    address = serializers.SerializerMethodField()
+    mobile_number = serializers.SerializerMethodField()
     hospital_id = serializers.UUIDField(read_only=True)
 
     class Meta:
@@ -29,6 +32,9 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
             "assigned_doctor_email",
             "assigned_nurse",
             "assigned_nurse_email",
+            "guardian_name",
+            "address",
+            "mobile_number",
             "ward_name",
             "department",
             "room_name",
@@ -56,6 +62,29 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
             assigned_doctor=obj.assigned_doctor,
             hospital_id=getattr(obj, "hospital_id", None),
         )
+
+    def get_guardian_name(self, obj):
+        patient = getattr(obj, "patient", None)
+        guardian = getattr(patient, "guardian", None) if patient is not None else None
+        return (getattr(guardian, "name", "") or "").strip()
+
+    def get_mobile_number(self, obj):
+        patient = getattr(obj, "patient", None)
+        return (getattr(patient, "phone", "") or "").strip()
+
+    def get_address(self, obj):
+        patient = getattr(obj, "patient", None)
+        addr = getattr(patient, "address", None) if patient is not None else None
+        if addr is None:
+            return ""
+        parts = [
+            getattr(addr, "line1", "") or "",
+            getattr(addr, "line2", "") or "",
+            getattr(addr, "city", "") or "",
+            getattr(addr, "state", "") or "",
+            getattr(addr, "postal_code", "") or "",
+        ]
+        return ", ".join([p.strip() for p in parts if str(p).strip()])
 
 
 class IPDAdmissionCreateUpdateSerializer(serializers.ModelSerializer):

@@ -143,8 +143,6 @@ const DEFAULT_RECEPTION_OPD_SETTINGS = {
   default_city: 'Jind',
   default_state: 'Haryana',
   default_doctor_user: '',
-  invoice_prefix: 'INV',
-  invoice_next_number: 1,
   print_with_background: true,
   opd_fee_mode: 'doctor',
   opd_fee_slots: [],
@@ -169,8 +167,6 @@ function getReceptionOpdSettings() {
     default_city: receptionPortalSettingsCache.default_city || DEFAULT_RECEPTION_OPD_SETTINGS.default_city,
     default_state: receptionPortalSettingsCache.default_state || DEFAULT_RECEPTION_OPD_SETTINGS.default_state,
     default_doctor_user: receptionPortalSettingsCache.default_doctor_user || '',
-    invoice_prefix: String(receptionPortalSettingsCache.invoice_prefix || DEFAULT_RECEPTION_OPD_SETTINGS.invoice_prefix).toUpperCase(),
-    invoice_next_number: Number(receptionPortalSettingsCache.invoice_next_number || DEFAULT_RECEPTION_OPD_SETTINGS.invoice_next_number) || 1,
     print_with_background: receptionPortalSettingsCache.print_with_background === true,
     opd_fee_mode: receptionPortalSettingsCache.opd_fee_mode || 'doctor',
     opd_fee_slots: Array.isArray(receptionPortalSettingsCache.opd_fee_slots) ? receptionPortalSettingsCache.opd_fee_slots : [],
@@ -188,8 +184,6 @@ async function loadReceptionPortalSettings() {
       default_city: row.default_city ?? receptionPortalSettingsCache.default_city,
       default_state: row.default_state ?? receptionPortalSettingsCache.default_state,
       default_doctor_user: row.default_doctor_user ? String(row.default_doctor_user) : '',
-      invoice_prefix: String(row.invoice_prefix ?? receptionPortalSettingsCache.invoice_prefix ?? 'INV').toUpperCase(),
-      invoice_next_number: Number(row.invoice_next_number ?? receptionPortalSettingsCache.invoice_next_number ?? 1) || 1,
       hospital_name: row.hospital_name ?? receptionPortalSettingsCache.hospital_name,
       address: row.address ?? receptionPortalSettingsCache.address,
       pin_code: row.pin_code ?? receptionPortalSettingsCache.pin_code,
@@ -215,8 +209,6 @@ async function saveReceptionOpdSettings(settings) {
     default_city: settings.default_city || '',
     default_state: settings.default_state || '',
     default_doctor_user: settings.default_doctor_user || null,
-    invoice_prefix: String(settings.invoice_prefix || 'INV').trim().toUpperCase() || 'INV',
-    invoice_next_number: Math.max(Number(settings.invoice_next_number || 1) || 1, 1),
     print_with_background: settings.print_with_background === true,
     opd_fee_mode: settings.opd_fee_mode === 'slot' ? 'slot' : 'doctor',
     opd_fee_slots: Array.isArray(settings.opd_fee_slots) ? settings.opd_fee_slots : [],
@@ -1062,7 +1054,9 @@ function OPDSection({ rooms }) {
     // Auto-fill consultation amount based on OPD fee mode until user edits manually.
     // Slot mode: prefer doctor-specific slot, then default (no doctor) slot, then doctor fee.
     const mode = opdSettings.opd_fee_mode === 'slot' ? 'slot' : 'doctor'
-    if (mode !== 'slot' && opdAmountManuallyEditedRef.current) return
+    // If user has typed an amount, do not auto-overwrite it.
+    // This makes amount truly editable in both doctor and slot fee modes.
+    if (opdAmountManuallyEditedRef.current) return
 
     let fee = null
     if (mode === 'slot') {
@@ -1079,7 +1073,6 @@ function OPDSection({ rooms }) {
 
     if (fee == null) return
     setForm(f => {
-      if (mode !== 'slot' && opdAmountManuallyEditedRef.current) return f
       if (mode === 'doctor' && normalizeId(f.doctor) !== normalizeId(form.doctor)) return f
       const nextAmount = String(fee)
       if (String(f.amount ?? '') === nextAmount) return f
@@ -1286,8 +1279,9 @@ function OPDSection({ rooms }) {
               guardian_relationship: '',
               salutation_choice: 'none',
               address_line1: '',
-              city: '',
-              state: '',
+              // Keep OPD defaults for brand-new patient flow.
+              city: defaultCity,
+              state: defaultState,
             }))
           }
         }
@@ -1305,7 +1299,7 @@ function OPDSection({ rooms }) {
       cancelled = true
       clearTimeout(t)
     }
-  }, [form.phone, opdNewPersonSamePhone, hydratePatientIntoForm])
+  }, [form.phone, opdNewPersonSamePhone, hydratePatientIntoForm, defaultCity, defaultState])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -5679,19 +5673,26 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                             {(ledger.payments||[]).length>0 && (() => {
                               const subKey = `${a.id}_payments`
                               const subOpen = expandedSubs[subKey]
+                              const isVoidedPayment = (row) => {
+                                if (String(row?.type || '') === 'pharmacy_payment') return false
+                                return String(row?.status || '').toLowerCase() === 'cancelled'
+                                  || String(row?.invoice_status || '').toLowerCase() === 'cancelled'
+                              }
                               const payRows = [...(ledger.payments || [])].sort((a, b) => {
-                                const voidA = String(a?.type || '') === 'pharmacy_payment' ? false : (String(a?.status || '').toLowerCase() === 'cancelled' || String(a?.invoice_status || '').toLowerCase() === 'cancelled')
-                                const voidB = String(b?.type || '') === 'pharmacy_payment' ? false : (String(b?.status || '').toLowerCase() === 'cancelled' || String(b?.invoice_status || '').toLowerCase() === 'cancelled')
+                                const voidA = isVoidedPayment(a)
+                                const voidB = isVoidedPayment(b)
                                 if (voidA !== voidB) return voidA ? 1 : -1
                                 return new Date(a.date) - new Date(b.date)
                               })
+                              const activePayRows = payRows.filter((p) => !isVoidedPayment(p))
+                              const activePaidTotal = activePayRows.reduce((sum, p) => sum + (parseFloat(p?.amount || 0) || 0), 0)
                               return (
                                 <div className="border border-emerald-200 rounded-xl overflow-hidden bg-white">
                                   <button type="button" onClick={() => setExpandedSubs(prev=>({...prev,[subKey]:!prev[subKey]}))}
                                     className="w-full flex flex-nowrap items-center gap-2 px-3 py-2.5 bg-emerald-50 hover:bg-emerald-100 transition-colors text-left min-w-0">
                                     <CreditCard size={12} className="text-emerald-600 shrink-0" />
                                     <span className="font-black text-emerald-700 text-xs flex-1 min-w-0 truncate">Payment Receipts</span>
-                                    <span className="text-[10px] font-bold text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded-full shrink-0">{payRows.length} payments</span>
+                                    <span className="text-[10px] font-bold text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded-full shrink-0">{activePayRows.length} payments</span>
                                     <button type="button" onClick={e=>{e.stopPropagation();setPrintTarget({type:'full_bill',admission:admObj,ledger})}}
                                       className="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded-md font-bold hover:bg-indigo-700 inline-flex items-center gap-1 shrink-0">
                                       <Printer size={9} /> Full Bill
@@ -5705,7 +5706,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                           <tr><th className="px-3 py-2 text-left font-semibold">Description</th><th className="px-3 py-2 text-left font-semibold">Date &amp; time</th><th className="px-3 py-2 text-right font-semibold">Amount</th><th className="px-3 py-2 text-center font-semibold">Status</th><th className="px-3 py-2 text-center font-semibold">Actions</th></tr>
                                         </thead>
                                         <tbody className="divide-y divide-gray-50">
-                                          {payRows.map((p,i)=>{
+                                          {activePayRows.map((p,i)=>{
                                             const md=(p.description||'').toUpperCase().includes('UPI')?'upi':(p.description||'').toUpperCase().includes('CREDIT')?'credit':'cash'
                                             const isAdv=(p.description||'').toLowerCase().includes('advance')
                                             const rawPid = p?.id != null ? String(p.id) : ''
@@ -5787,7 +5788,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                         <tfoot className="border-t-2 border-gray-200">
                                           <tr className="bg-emerald-50">
                                             <td colSpan={2} className="px-3 py-2 font-black text-emerald-700 text-xs">Total Paid</td>
-                                            <td className="px-3 py-2 text-right font-black text-emerald-700">₹{fmtM(ledger.total_paid)}</td>
+                                            <td className="px-3 py-2 text-right font-black text-emerald-700">₹{fmtM(activePaidTotal)}</td>
                                             <td />
                                             <td />
                                           </tr>
@@ -10708,34 +10709,6 @@ function OpdSettingsSection() {
               ))}
             </select>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Invoice Prefix</label>
-              <input
-                type="text"
-                value={form.invoice_prefix || ''}
-                onChange={(e) => onChange('invoice_prefix', e.target.value.toUpperCase())}
-                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
-                placeholder="INV"
-                maxLength={20}
-              />
-              <p className="mt-1 text-[11px] text-gray-500">Example format: {`${form.invoice_prefix || 'INV'}-${new Date().getFullYear()}-000345`}</p>
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Next Invoice Number</label>
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={form.invoice_next_number || 1}
-                onChange={(e) => onChange('invoice_next_number', Math.max(1, Number(e.target.value || 1)))}
-                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
-                placeholder="1"
-              />
-              <p className="mt-1 text-[11px] text-gray-500">If you set 345, the next generated invoice uses number 345.</p>
-            </div>
-          </div>
-
           <div className="border border-gray-100 rounded-xl p-4 bg-gray-50/50 space-y-3">
             <div>
               <p className="text-sm font-bold text-gray-800">OPD Fee Mode</p>
@@ -14084,6 +14057,8 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
 function PrintIpdLedger({ admission, ledger, onClose }) {
   const printRef = useRef(null)
+  const [printAdmission, setPrintAdmission] = useState(() => ({ ...admission }))
+  const [printReady, setPrintReady] = useState(false)
   const slipProfile = getPaymentSlipProfile()
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
@@ -14093,12 +14068,57 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
   const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
   
   useEffect(() => {
+    let cancelled = false
+    async function hydrateAdmissionForPrint() {
+      let enriched = { ...admission }
+      try {
+        const { data } = await api.get(`/ipd-admissions/${admission.id}/`)
+        const row = data?.data || data || {}
+        enriched = { ...enriched, ...row }
+      } catch {
+        // keep base admission on API failure
+      }
+      const guardianMissing = !String(enriched.guardian_name || '').trim()
+      const addressMissing = !String(enriched.address || '').trim()
+      const mobileMissing = !String(enriched.mobile_number || '').trim()
+      if ((guardianMissing || addressMissing || mobileMissing) && enriched.patient) {
+        try {
+          const { data } = await api.get(`/patients/${enriched.patient}/`)
+          const p = data?.data || data || {}
+          const addressBits = [
+            p.address_line1,
+            p.address_line2,
+            p.city,
+            p.state,
+            p.postal_code,
+          ].filter(Boolean).map((v) => String(v).trim()).filter(Boolean)
+          enriched = {
+            ...enriched,
+            guardian_name: String(enriched.guardian_name || p.guardian_name || '').trim(),
+            mobile_number: String(enriched.mobile_number || p.phone || p.mobile_number || '').trim(),
+            address: String(enriched.address || addressBits.join(', ')).trim(),
+          }
+        } catch {
+          // keep current fields if patient lookup fails
+        }
+      }
+      if (!cancelled) {
+        setPrintAdmission(enriched)
+        setPrintReady(true)
+      }
+    }
+    hydrateAdmissionForPrint()
+    return () => { cancelled = true }
+  }, [admission])
+
+  useEffect(() => {
+    if (!printReady) return
     const timer = setTimeout(() => {
       if (printRef.current) {
         receptionistLastPrintKind = 'ipd_ledger'
         window.print()
       }
-    }, 800)
+    }, 300)
 
     function handleAfterPrint() {
       onClose()
@@ -14109,7 +14129,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
       clearTimeout(timer)
       window.removeEventListener('afterprint', handleAfterPrint)
     }
-  }, [])
+  }, [printReady, onClose])
 
   const now = formatReceiptDateTime(new Date())
 
@@ -14173,19 +14193,19 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
           {/* Bill Info Grid */}
           <div className="ipd-ledger-info grid grid-cols-2 gap-x-12 gap-y-2 text-sm mb-6">
             <div className="space-y-1">
-              <div className="flex"><span className="w-24 font-bold">Patient Name</span><span className="font-medium">: {admission.patient_name}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Guardian Name</span><span className="font-medium">: {admission.guardian_name || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Address</span><span className="font-medium">: {admission.address || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Mobile No</span><span className="font-medium">: {admission.mobile_number || '—'}</span></div>
-              <div className="flex"><span className="w-24 font-bold">Consultant</span><span className="font-medium">: {admission.assigned_doctor_name || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Patient Name</span><span className="font-medium">: {printAdmission.patient_name || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Guardian Name</span><span className="font-medium">: {printAdmission.guardian_name || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Address</span><span className="font-medium">: {printAdmission.address || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Mobile No</span><span className="font-medium">: {printAdmission.mobile_number || '—'}</span></div>
+              <div className="flex"><span className="w-24 font-bold">Consultant</span><span className="font-medium">: {printAdmission.assigned_doctor_name || '—'}</span></div>
             </div>
             <div className="space-y-1">
-              <div className="flex"><span className="w-28 font-bold">Bill No</span><span className="font-medium">: BILL-{String(admission.ipd_no || admission.id).slice(0,6).toUpperCase()}</span></div>
-              <div className="flex"><span className="w-28 font-bold">UHID No</span><span className="font-medium">: {admission.patient_uhid}</span></div>
-              <div className="flex"><span className="w-28 font-bold">IPD No</span><span className="font-medium">: {admission.ipd_no}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Room / Bed</span><span className="font-medium">: {admission.room_name} / {admission.bed_code}</span></div>
+              <div className="flex"><span className="w-28 font-bold">Bill No</span><span className="font-medium">: BILL-{String(printAdmission.ipd_no || printAdmission.id || admission.id).slice(0,6).toUpperCase()}</span></div>
+              <div className="flex"><span className="w-28 font-bold">UHID No</span><span className="font-medium">: {printAdmission.patient_uhid || '—'}</span></div>
+              <div className="flex"><span className="w-28 font-bold">IPD No</span><span className="font-medium">: {printAdmission.ipd_no || '—'}</span></div>
+              <div className="flex"><span className="w-28 font-bold">Room / Bed</span><span className="font-medium">: {printAdmission.room_name || '—'} / {printAdmission.bed_code || '—'}</span></div>
               <div className="flex"><span className="w-28 font-bold">{'Bill date & time'}</span><span className="font-medium">: {now}</span></div>
-              <div className="flex"><span className="w-28 font-bold">Stay Period</span><span className="font-medium">: {admission.admission_date ? format(new Date(admission.admission_date), 'd/M/yy') : '—'} to {format(new Date(), 'd/M/yy')}</span></div>
+              <div className="flex"><span className="w-28 font-bold">Stay Period</span><span className="font-medium">: {printAdmission.admission_date ? format(new Date(printAdmission.admission_date), 'd/M/yy') : '—'} to {format(new Date(), 'd/M/yy')}</span></div>
             </div>
           </div>
 
