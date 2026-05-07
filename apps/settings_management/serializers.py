@@ -40,6 +40,7 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
     opd_fee_slots = serializers.ListField(required=False)
     current_opd_slot_fee = serializers.SerializerMethodField()
     current_opd_slot = serializers.SerializerMethodField()
+    hospital_logo_url = serializers.SerializerMethodField()
 
     class Meta:
         model = ReceptionPortalSettings
@@ -48,12 +49,16 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
             "default_city",
             "default_state",
             "default_doctor_user",
+            "invoice_prefix",
+            "invoice_next_number",
             "hospital_name",
             "address",
             "pin_code",
             "phone",
             "email",
             "website",
+            "hospital_logo",
+            "hospital_logo_url",
             "print_with_background",
             "opd_fee_mode",
             "opd_fee_slots",
@@ -64,11 +69,34 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
+    def validate_invoice_prefix(self, value):
+        normalized = str(value or "").strip().upper()
+        if not normalized:
+            return "INV"
+        if len(normalized) > 20:
+            raise serializers.ValidationError("Invoice prefix cannot exceed 20 characters.")
+        return normalized
+
+    def validate_invoice_next_number(self, value):
+        if value is None:
+            return 1
+        if int(value) < 1:
+            raise serializers.ValidationError("Next invoice number must be at least 1.")
+        return int(value)
+
     def get_current_opd_slot(self, obj):
         return obj.get_current_opd_slot()
 
     def get_current_opd_slot_fee(self, obj):
         return obj.get_current_opd_slot_fee()
+
+    def get_hospital_logo_url(self, obj):
+        if not obj.hospital_logo:
+            return ""
+        request = self.context.get("request")
+        if request is not None:
+            return request.build_absolute_uri(obj.hospital_logo.url)
+        return obj.hospital_logo.url
 
     def validate_opd_fee_slots(self, value):
         if value in (None, ""):
@@ -92,9 +120,21 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f"Slot #{idx + 1} amount must be numeric.")
             if amount_value < 0:
                 raise serializers.ValidationError(f"Slot #{idx + 1} amount cannot be negative.")
-            cleaned.append({
+            # Preserve optional per-doctor scope and days fields (added by frontend).
+            doctor_user_id = row.get("doctor_user_id")
+            if doctor_user_id is not None:
+                doctor_user_id = str(doctor_user_id).strip() or None
+            days = row.get("days")
+            if not isinstance(days, list):
+                days = None
+            entry = {
                 "start": start[:5],
                 "end": end[:5],
                 "amount": round(amount_value, 2),
-            })
+            }
+            if doctor_user_id is not None:
+                entry["doctor_user_id"] = doctor_user_id
+            if days is not None:
+                entry["days"] = days
+            cleaned.append(entry)
         return cleaned

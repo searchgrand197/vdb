@@ -18,14 +18,25 @@ from apps.billing.serializers import (
 )
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
+from apps.settings_management.models import ReceptionPortalSettings
 from apps.shared.response import success_response
 
 
 def _generate_invoice_no(hospital, year: int) -> str:
+    settings_obj, _ = ReceptionPortalSettings.objects.select_for_update().get_or_create(
+        hospital=hospital,
+        defaults={"default_city": "Jind", "default_state": "Haryana"},
+    )
     seq, _ = InvoiceNumberSequence.objects.select_for_update().get_or_create(hospital=hospital, year=year)
+    configured_next = max(int(settings_obj.invoice_next_number or 1), 1)
+    if seq.last_seq < configured_next - 1:
+        seq.last_seq = configured_next - 1
     seq.last_seq += 1
     seq.save(update_fields=["last_seq"])
-    return f"{hospital.slug[:10].upper()}-{year}-{seq.last_seq:06d}"
+    settings_obj.invoice_next_number = seq.last_seq + 1
+    settings_obj.save(update_fields=["invoice_next_number"])
+    prefix = (settings_obj.invoice_prefix or "INV").strip().upper() or "INV"
+    return f"{prefix}-{year}-{seq.last_seq:06d}"
 
 
 class BillingInvoiceViewSet(viewsets.ModelViewSet):
@@ -139,6 +150,66 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
         if invoice.status != BillingInvoice.Status.DRAFT:
             raise ValueError("Only draft invoices can be updated.")  # handled by exception handler
         serializer.save()
+
+    @action(detail=True, methods=["patch"], url_path="update-items")
+    @transaction.atomic
+    def update_items(self, request, pk=None):
+        """Replace all line items on an invoice and recalculate totals."""
+        invoice: BillingInvoice = self.get_object()
+        if invoice.status == BillingInvoice.Status.CANCELLED:
+            return Response(
+                {"success": False, "errors": {"detail": ["Cannot edit a cancelled invoice."]}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        items_data = request.data.get("items")
+        if not isinstance(items_data, list) or len(items_data) == 0:
+            return Response(
+                {"success": False, "errors": {"items": ["At least one item is required."]}},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        item_serializer = BillingInvoiceItemInputSerializer(data=items_data, many=True)
+        item_serializer.is_valid(raise_exception=True)
+
+        # Optional invoice-level overrides
+        discount_raw = request.data.get("discount_amount")
+        tax_rate_raw = request.data.get("tax_rate")
+        if discount_raw is not None:
+            try:
+                invoice.discount_amount = Decimal(str(discount_raw)).quantize(Decimal("0.01"))
+            except Exception:
+                pass
+        if tax_rate_raw is not None:
+            try:
+                invoice.tax_rate = Decimal(str(tax_rate_raw)).quantize(Decimal("0.01"))
+            except Exception:
+                pass
+
+        invoice.items.all().delete()
+        for item in item_serializer.validated_data:
+            qty = item["quantity"]
+            unit_price = item["unit_price"]
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                description=item["description"],
+                category=item.get("category", ""),
+                subcategory=item.get("subcategory", ""),
+                quantity=qty,
+                unit_price=unit_price,
+                line_total=(qty * unit_price).quantize(Decimal("0.01")),
+            )
+
+        invoice.recalc_totals()
+        invoice.save(update_fields=["subtotal_amount", "tax_amount", "total_amount", "discount_amount", "tax_rate"])
+
+        create_audit_log(
+            request=request,
+            hospital=invoice.hospital,
+            module="billing",
+            action="update_invoice_items",
+            obj=invoice,
+            after={"invoice_no": invoice.invoice_no, "total_amount": str(invoice.total_amount)},
+        )
+        return success_response(data=BillingInvoiceSerializer(invoice).data, message="Invoice items updated.")
 
     @action(detail=True, methods=["post"], url_path="finalize")
     def finalize(self, request, pk=None):

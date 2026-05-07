@@ -14,6 +14,8 @@ function SettingsPanelInner({ onSaved }) {
     dl_number: '',
     email: '',
     website: '',
+    invoice_prefix: 'INV',
+    invoice_next_number: '1',
     default_gst_percent: '5',
     default_sale_discount_percent: '0',
     b2b_enabled: false,
@@ -37,6 +39,11 @@ function SettingsPanelInner({ onSaved }) {
             dl_number: d.dl_number || '',
             email: d.email || '',
             website: d.website || '',
+            invoice_prefix: String(d.invoice_prefix || 'INV').toUpperCase(),
+            invoice_next_number:
+              d.invoice_next_number != null && d.invoice_next_number !== ''
+                ? String(d.invoice_next_number)
+                : '1',
             default_gst_percent:
               d.default_gst_percent != null && d.default_gst_percent !== ''
                 ? String(d.default_gst_percent)
@@ -64,9 +71,19 @@ function SettingsPanelInner({ onSaved }) {
   async function save() {
     setSaving(true)
     try {
-      await api.patch('/pharmacy/settings/', form)
+      const payload = {
+        ...form,
+        invoice_prefix: String(form.invoice_prefix || 'INV').trim().toUpperCase() || 'INV',
+        invoice_next_number: Math.max(1, Number(form.invoice_next_number || 1) || 1),
+      }
+      await api.patch('/pharmacy/settings/', payload)
       toast.success('Settings saved')
-      onSaved?.(form)
+      setForm((prev) => ({
+        ...prev,
+        invoice_prefix: payload.invoice_prefix,
+        invoice_next_number: String(payload.invoice_next_number),
+      }))
+      onSaved?.(payload)
     } catch {
       toast.error('Save failed')
     } finally {
@@ -118,6 +135,33 @@ function SettingsPanelInner({ onSaved }) {
           )
         )}
       </div>
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 max-w-xl">
+        <label className="block">
+          <span className="text-[10px] font-semibold text-slate-500 uppercase">Invoice Prefix</span>
+          <input
+            value={form.invoice_prefix}
+            onChange={(e) => setForm({ ...form, invoice_prefix: e.target.value.toUpperCase() })}
+            className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+            maxLength={20}
+            placeholder="INV"
+          />
+        </label>
+        <label className="block">
+          <span className="text-[10px] font-semibold text-slate-500 uppercase">Next Invoice Number</span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={form.invoice_next_number}
+            onChange={(e) => setForm({ ...form, invoice_next_number: e.target.value })}
+            className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+            placeholder="1"
+          />
+        </label>
+      </div>
+      <p className="mt-1 text-[10px] text-slate-500">
+        Example: {`${(form.invoice_prefix || 'INV').toUpperCase()}-${new Date().getFullYear()}-${String(Math.max(1, Number(form.invoice_next_number || 1) || 1)).padStart(3, '0')}`}
+      </p>
       <div className="mt-4">
         <label className="flex items-center gap-2 cursor-pointer select-none">
           <input

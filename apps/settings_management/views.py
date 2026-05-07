@@ -1,5 +1,6 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import permissions, viewsets, generics
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.exceptions import NotFound
 
 from apps.roles_permissions.permissions import HasRequiredPermission
@@ -95,6 +96,7 @@ class LeaveApproverViewSet(viewsets.ModelViewSet):
 class ReceptionPortalSettingsView(generics.RetrieveUpdateAPIView):
     serializer_class = ReceptionPortalSettingsSerializer
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_object(self):
         hospital = getattr(self.request.user, "hospital", None)

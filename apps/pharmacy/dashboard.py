@@ -209,13 +209,19 @@ def _today_sales_block(pharmacy_id, target_date=None):
         by_method[key]["amount"] += inv_total
         by_method[key]["margin"] += inv_margin
         total_margin += inv_margin
+        patient_name = ""
+        if inv.patient_id and inv.patient is not None:
+            patient_name = f"{(inv.patient.first_name or '').strip()} {(inv.patient.last_name or '').strip()}".strip()
+        if not patient_name:
+            patient_name = (getattr(inv, "party_name_snapshot", "") or "").strip() or "—"
+
         invoice_rows.append(
             {
                 "id": str(inv.id),
                 "invoice_no": inv.invoice_no,
                 "date": str(inv.date) if inv.date else None,
                 "payment_method": key,
-                "patient_name": f"{(inv.patient.first_name or '').strip()} {(inv.patient.last_name or '').strip()}".strip(),
+                "patient_name": patient_name,
                 "grand_total": float(inv_total),
                 "paid_amount": float(inv.paid_amount or ZERO),
                 "due_amount": float(max(due, ZERO)),

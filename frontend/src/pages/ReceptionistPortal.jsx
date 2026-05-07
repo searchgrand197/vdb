@@ -136,12 +136,15 @@ const DEFAULT_PAYMENT_SLIP_PROFILE = {
   phone: '+91-XXXXXXXXXX',
   email: 'info@vardraanhospital.com',
   website: 'www.vardraanhospital.com',
+  hospital_logo_url: '',
 }
 
 const DEFAULT_RECEPTION_OPD_SETTINGS = {
   default_city: 'Jind',
   default_state: 'Haryana',
   default_doctor_user: '',
+  invoice_prefix: 'INV',
+  invoice_next_number: 1,
   print_with_background: true,
   opd_fee_mode: 'doctor',
   opd_fee_slots: [],
@@ -166,6 +169,8 @@ function getReceptionOpdSettings() {
     default_city: receptionPortalSettingsCache.default_city || DEFAULT_RECEPTION_OPD_SETTINGS.default_city,
     default_state: receptionPortalSettingsCache.default_state || DEFAULT_RECEPTION_OPD_SETTINGS.default_state,
     default_doctor_user: receptionPortalSettingsCache.default_doctor_user || '',
+    invoice_prefix: String(receptionPortalSettingsCache.invoice_prefix || DEFAULT_RECEPTION_OPD_SETTINGS.invoice_prefix).toUpperCase(),
+    invoice_next_number: Number(receptionPortalSettingsCache.invoice_next_number || DEFAULT_RECEPTION_OPD_SETTINGS.invoice_next_number) || 1,
     print_with_background: receptionPortalSettingsCache.print_with_background === true,
     opd_fee_mode: receptionPortalSettingsCache.opd_fee_mode || 'doctor',
     opd_fee_slots: Array.isArray(receptionPortalSettingsCache.opd_fee_slots) ? receptionPortalSettingsCache.opd_fee_slots : [],
@@ -183,12 +188,16 @@ async function loadReceptionPortalSettings() {
       default_city: row.default_city ?? receptionPortalSettingsCache.default_city,
       default_state: row.default_state ?? receptionPortalSettingsCache.default_state,
       default_doctor_user: row.default_doctor_user ? String(row.default_doctor_user) : '',
+      invoice_prefix: String(row.invoice_prefix ?? receptionPortalSettingsCache.invoice_prefix ?? 'INV').toUpperCase(),
+      invoice_next_number: Number(row.invoice_next_number ?? receptionPortalSettingsCache.invoice_next_number ?? 1) || 1,
       hospital_name: row.hospital_name ?? receptionPortalSettingsCache.hospital_name,
       address: row.address ?? receptionPortalSettingsCache.address,
       pin_code: row.pin_code ?? receptionPortalSettingsCache.pin_code,
       phone: row.phone ?? receptionPortalSettingsCache.phone,
       email: row.email ?? receptionPortalSettingsCache.email,
       website: row.website ?? receptionPortalSettingsCache.website,
+      hospital_logo: row.hospital_logo ?? receptionPortalSettingsCache.hospital_logo ?? '',
+      hospital_logo_url: row.hospital_logo_url ?? receptionPortalSettingsCache.hospital_logo_url ?? '',
       print_with_background: row.print_with_background ?? receptionPortalSettingsCache.print_with_background,
       opd_fee_mode: row.opd_fee_mode || receptionPortalSettingsCache.opd_fee_mode || 'doctor',
       opd_fee_slots: Array.isArray(row.opd_fee_slots) ? row.opd_fee_slots : (receptionPortalSettingsCache.opd_fee_slots || []),
@@ -206,6 +215,8 @@ async function saveReceptionOpdSettings(settings) {
     default_city: settings.default_city || '',
     default_state: settings.default_state || '',
     default_doctor_user: settings.default_doctor_user || null,
+    invoice_prefix: String(settings.invoice_prefix || 'INV').trim().toUpperCase() || 'INV',
+    invoice_next_number: Math.max(Number(settings.invoice_next_number || 1) || 1, 1),
     print_with_background: settings.print_with_background === true,
     opd_fee_mode: settings.opd_fee_mode === 'slot' ? 'slot' : 'doctor',
     opd_fee_slots: Array.isArray(settings.opd_fee_slots) ? settings.opd_fee_slots : [],
@@ -222,6 +233,10 @@ function getPaymentSlipProfile() {
     phone: receptionPortalSettingsCache.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone,
     email: receptionPortalSettingsCache.email || DEFAULT_PAYMENT_SLIP_PROFILE.email,
     website: receptionPortalSettingsCache.website || DEFAULT_PAYMENT_SLIP_PROFILE.website,
+    hospital_logo_url:
+      receptionPortalSettingsCache.hospital_logo_url
+      || receptionPortalSettingsCache.hospital_logo
+      || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_logo_url,
   }
 }
 
@@ -262,16 +277,31 @@ function formatApiError(err, fallback) {
 }
 
 async function savePaymentSlipProfile(profile) {
-  const payload = {
-    hospital_name: profile.hospital_name || '',
-    address: profile.address || '',
-    pin_code: profile.pin_code || '',
-    phone: profile.phone || '',
-    email: profile.email || '',
-    website: profile.website || '',
+  const payload = new FormData()
+  payload.append('hospital_name', profile.hospital_name || '')
+  payload.append('address', profile.address || '')
+  payload.append('pin_code', profile.pin_code || '')
+  payload.append('phone', profile.phone || '')
+  payload.append('email', profile.email || '')
+  payload.append('website', profile.website || '')
+  if (profile.hospital_logo_file) {
+    payload.append('hospital_logo', profile.hospital_logo_file)
+  } else if (profile.remove_hospital_logo) {
+    payload.append('hospital_logo', '')
   }
-  await api.patch('/settings/reception-portal/', payload)
-  receptionPortalSettingsCache = { ...receptionPortalSettingsCache, ...payload }
+  const { data } = await api.patch('/settings/reception-portal/', payload)
+  const row = data?.data || data || {}
+  receptionPortalSettingsCache = {
+    ...receptionPortalSettingsCache,
+    hospital_name: row.hospital_name ?? profile.hospital_name ?? receptionPortalSettingsCache.hospital_name,
+    address: row.address ?? profile.address ?? receptionPortalSettingsCache.address,
+    pin_code: row.pin_code ?? profile.pin_code ?? receptionPortalSettingsCache.pin_code,
+    phone: row.phone ?? profile.phone ?? receptionPortalSettingsCache.phone,
+    email: row.email ?? profile.email ?? receptionPortalSettingsCache.email,
+    website: row.website ?? profile.website ?? receptionPortalSettingsCache.website,
+    hospital_logo: row.hospital_logo ?? '',
+    hospital_logo_url: row.hospital_logo_url ?? row.hospital_logo ?? '',
+  }
   syncHospitalBrandingFromApiRow(receptionPortalSettingsCache)
 }
 
@@ -414,7 +444,7 @@ const NAV_GROUPS = [
   {
     label: 'OPD',
     items: [
-      { id: 'opd', label: 'Token Queue', icon: Users },
+      { id: 'opd', label: 'Create OPD', icon: Users },
       { id: 'opd_history', label: 'OPD Slips', icon: FileText },
     ],
   },
@@ -599,6 +629,12 @@ function PrintSlip({ visit, onClose }) {
             const initValues = {}
             for (const f of fields) {
               const lowerF = f.toLowerCase()
+              const compactF = lowerF.replace(/[\s_-]/g, '')
+              const tokenDateTime = visit.visit_date
+                ? `${displayToken} · ${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})`
+                : displayToken
+              const registeredAtRaw = visit.patient_registered_at || ''
+              const registeredAt = registeredAtRaw ? format(new Date(registeredAtRaw), 'd/M/yyyy (HH:mm)') : ''
               const gAbbr = (visit.patient_gender === 'female' ? 'F' : visit.patient_gender === 'male' ? 'M' : 'O')
               const ageSexVal = [gAbbr, visit.patient_age ? String(visit.patient_age) : ''].filter(Boolean).join(' ')
               let fullAddress = [visit.patient_address, visit.patient_city, visit.patient_state].filter(Boolean).join(', ')
@@ -607,11 +643,13 @@ function PrintSlip({ visit, onClose }) {
               if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) initValues[f] = guardianLine
               else if (lowerF.includes('patient') && !lowerF.includes('guardian')) initValues[f] = patientLine
               else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) initValues[f] = patientLine
+              else if ((lowerF.includes('token') && lowerF.includes('date')) || compactF.includes('tokendate')) initValues[f] = tokenDateTime
+              else if (lowerF.includes('registration')) initValues[f] = registeredAt
               else if (lowerF.includes('date')) initValues[f] = visit.visit_date ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})` : ''
               else if (lowerF.includes('reg') || lowerF.includes('uhid')) initValues[f] = visit.patient_uhid || ''
               else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) initValues[f] = visit.patient_phone || ''
               else if (lowerF.includes('token') || lowerF.includes('queue') || lowerF.includes('opd') || lowerF.includes('no')) initValues[f] = displayToken
-              else if (lowerF.includes('complaint') || lowerF.includes('reason')) initValues[f] = visit.chief_complaint || ''
+              else if (compactF.includes('chiefcomplaint') || lowerF.includes('complaint') || lowerF.includes('reason')) initValues[f] = visit.chief_complaint || ''
               else if (lowerF.includes('doctor') || lowerF.includes('doc')) initValues[f] = visit.doc_name || ''
               else if (lowerF.includes('age') || lowerF.includes('sex')) initValues[f] = ageSexVal
               else if (lowerF.includes('gender')) initValues[f] = visit.patient_gender || ''
@@ -751,6 +789,7 @@ function OPDSection({ rooms }) {
   const defaultCity = opdSettings.default_city || ''
   const defaultState = opdSettings.default_state || ''
   const defaultDoctorUser = opdSettings.default_doctor_user || ''
+  const phoneInputRef = useRef(null)
   const [visits, setVisits] = useState([])
   const [doctors, setDoctors] = useState([])
   const [queueSearch, setQueueSearch] = useState('')
@@ -774,7 +813,7 @@ function OPDSection({ rooms }) {
   const buildEmptyForm = () => ({
     phone: '',
     patient_name: '',
-    salutation_choice: '',
+    salutation_choice: 'none',
     gender: 'male',
     age: '',
     guardian_name: '',
@@ -789,6 +828,20 @@ function OPDSection({ rooms }) {
     visit_date: format(new Date(), 'yyyy-MM-dd'),
   })
   const [form, setForm] = useState(() => buildEmptyForm())
+
+  useEffect(() => {
+    // When entering Create OPD section, focus phone input.
+    // The slight delay helps if layout/portal animations are still settling.
+    const t = setTimeout(() => {
+      phoneInputRef.current?.focus?.()
+      phoneInputRef.current?.select?.()
+    }, 0)
+    return () => clearTimeout(t)
+  }, [])
+
+  // UI control: hide/disable the thermal option submit button from the OPD form.
+  // Re-enable by changing this flag to `true`.
+  const SHOW_THERMAL_ASSIGN_BUTTON = false
   const [matchedPatient, setMatchedPatient] = useState(null)  // existing patient found by phone
   const [lookupCandidates, setLookupCandidates] = useState([])
   const [opdNewPersonSamePhone, setOpdNewPersonSamePhone] = useState(false) // register different person; same mobile → family link
@@ -835,6 +888,19 @@ function OPDSection({ rooms }) {
     if (rawFee == null || rawFee === '') return null
     const numericFee = Number(String(rawFee).replace(/[^0-9.]/g, ''))
     return Number.isFinite(numericFee) && numericFee > 0 ? numericFee : null
+  }
+  const getDoctorFeeBySelectedId = (doctorRows, selectedId) => {
+    const matched = findDoctorBySelectedId(doctorRows, selectedId)
+    const matchedFee = getDoctorFee(matched)
+    if (matchedFee != null) return matchedFee
+    const target = normalizeId(selectedId)
+    if (!target) return null
+    const fallback = (doctorRows || []).find((doctorRow) =>
+      normalizeId(getDoctorUserId(doctorRow)) === target
+      || normalizeId(doctorRow?.id) === target
+      || normalizeId(doctorRow?.pk) === target
+    )
+    return getDoctorFee(fallback)
   }
   const parseSlotTimeMinutes = (hhmm) => {
     const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/)
@@ -932,7 +998,7 @@ function OPDSection({ rooms }) {
       age: '',
       guardian_name: '',
       guardian_relationship: '',
-      salutation_choice: '',
+      salutation_choice: 'none',
       address_line1: '',
       city: defaultCity,
       state: defaultState,
@@ -994,12 +1060,23 @@ function OPDSection({ rooms }) {
 
   useEffect(() => {
     // Auto-fill consultation amount based on OPD fee mode until user edits manually.
-    // This also refreshes amount when fee mode/settings change.
+    // Slot mode: prefer doctor-specific slot, then default (no doctor) slot, then doctor fee.
     const mode = opdSettings.opd_fee_mode === 'slot' ? 'slot' : 'doctor'
     if (mode !== 'slot' && opdAmountManuallyEditedRef.current) return
-    const fee = mode === 'slot'
-      ? (Number.isFinite(Number(opdSettings.current_opd_slot_fee)) ? Number(opdSettings.current_opd_slot_fee) : null)
-      : getDoctorFee(findDoctorBySelectedId(doctors, form.doctor))
+
+    let fee = null
+    if (mode === 'slot') {
+      const allSlots = Array.isArray(opdSettings.opd_fee_slots) ? opdSettings.opd_fee_slots : []
+      const selectedDocId = normalizeId(form.doctor)
+      const doctorSlots = allSlots.filter(s => s.doctor_user_id && normalizeId(s.doctor_user_id) === selectedDocId)
+      const defaultSlots = allSlots.filter(s => !s.doctor_user_id)
+      fee = getSlotFeeForNow(doctorSlots) ?? getSlotFeeForNow(defaultSlots) ?? null
+      // Last resort: if no slot matched at all, use doctor consultation fee
+      if (fee == null) fee = getDoctorFeeBySelectedId(doctors, form.doctor)
+    } else {
+      fee = getDoctorFeeBySelectedId(doctors, form.doctor)
+    }
+
     if (fee == null) return
     setForm(f => {
       if (mode !== 'slot' && opdAmountManuallyEditedRef.current) return f
@@ -1008,7 +1085,7 @@ function OPDSection({ rooms }) {
       if (String(f.amount ?? '') === nextAmount) return f
       return { ...f, amount: nextAmount }
     })
-  }, [doctors, form.doctor, form.amount, opdSettings.opd_fee_mode, opdSettings.current_opd_slot_fee])
+  }, [doctors, form.doctor, form.amount, opdSettings.opd_fee_mode, opdSettings.opd_fee_slots, opdSettings.current_opd_slot_fee])
 
   useEffect(() => {
     // On hard refresh, settings load async. Backfill defaults into an untouched form.
@@ -1207,7 +1284,7 @@ function OPDSection({ rooms }) {
               age: '',
               guardian_name: '',
               guardian_relationship: '',
-              salutation_choice: '',
+              salutation_choice: 'none',
               address_line1: '',
               city: '',
               state: '',
@@ -1355,15 +1432,23 @@ function OPDSection({ rooms }) {
         const finalValues = { ...templateValues }
         for (const f of layoutFields) {
           const lowerF = f.toLowerCase()
+          const compactF = lowerF.replace(/[\s_-]/g, '')
+          const tokenDateTime = form.visit_date
+            ? `${displayToken} · ${format(new Date(form.visit_date), 'd/M/yyyy')} (${format(new Date(), 'HH:mm')})`
+            : displayToken
+          const patientRegisteredAtRaw = payload?.patient_registered_at || matchedPatient?.created_at || ''
+          const patientRegisteredAt = patientRegisteredAtRaw ? format(new Date(patientRegisteredAtRaw), 'd/M/yyyy (HH:mm)') : ''
           // NOTE: guardian must be checked BEFORE generic 'name' check
           if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) finalValues[f] = finalValues[f] || printGuardianLine
           else if (lowerF.includes('patient') && !lowerF.includes('guardian')) finalValues[f] = finalValues[f] || printPatientLine
           else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) finalValues[f] = finalValues[f] || printPatientLine
+          else if ((lowerF.includes('token') && lowerF.includes('date')) || compactF.includes('tokendate')) finalValues[f] = finalValues[f] || tokenDateTime
+          else if (lowerF.includes('registration')) finalValues[f] = finalValues[f] || patientRegisteredAt
           else if (lowerF.includes('date')) finalValues[f] = finalValues[f] || (form.visit_date ? `${format(new Date(form.visit_date), 'd/M/yyyy')} (${format(new Date(), 'HH:mm')})` : '')
           else if (lowerF.includes('reg') || lowerF.includes('uhid')) finalValues[f] = finalValues[f] || printUhid || ''
           else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) finalValues[f] = finalValues[f] || printPhone || form.phone.replace(/\D/g, '') || ''
           else if (lowerF.includes('token') || lowerF.includes('queue') || lowerF.includes('opd') || lowerF.includes('no')) finalValues[f] = finalValues[f] || displayToken
-          else if (lowerF.includes('complaint') || lowerF.includes('reason')) finalValues[f] = finalValues[f] || form.chief_complaint || ''
+          else if (compactF.includes('chiefcomplaint') || lowerF.includes('complaint') || lowerF.includes('reason')) finalValues[f] = finalValues[f] || form.chief_complaint || ''
           else if (lowerF.includes('doctor') || lowerF.includes('doc')) finalValues[f] = finalValues[f] || selectedDoc?.name || ''
           else if (lowerF.includes('age') || lowerF.includes('sex')) finalValues[f] = finalValues[f] || ageSex
           else if (lowerF.includes('gender')) finalValues[f] = finalValues[f] || form.gender || ''
@@ -1602,6 +1687,8 @@ function OPDSection({ rooms }) {
             </label>
             <div className="relative w-full">
               <input
+                ref={phoneInputRef}
+                autoFocus
                 value={form.phone}
                 onChange={e => {
                   let v = e.target.value;
@@ -1823,20 +1910,32 @@ function OPDSection({ rooms }) {
             <select value={form.doctor} onChange={e => {
               opdAmountManuallyEditedRef.current = false
               const selectedDocId = e.target.value
-              const selectedDoc = findDoctorBySelectedId(doctors, selectedDocId)
-              const fee = opdSettings.opd_fee_mode === 'slot'
-                ? (Number.isFinite(Number(opdSettings.current_opd_slot_fee)) ? Number(opdSettings.current_opd_slot_fee) : null)
-                : getDoctorFee(selectedDoc)
+              const feeAttr = e.target.selectedOptions?.[0]?.getAttribute('data-fee')
+              const feeFromOption = feeAttr != null && String(feeAttr).trim() !== '' ? Number(feeAttr) : Number.NaN
+              let fee = null
+              if (opdSettings.opd_fee_mode === 'slot') {
+                const allSlots = Array.isArray(opdSettings.opd_fee_slots) ? opdSettings.opd_fee_slots : []
+                const docSlots = allSlots.filter(s => s.doctor_user_id && normalizeId(s.doctor_user_id) === normalizeId(selectedDocId))
+                const defSlots = allSlots.filter(s => !s.doctor_user_id)
+                fee = getSlotFeeForNow(docSlots) ?? getSlotFeeForNow(defSlots) ?? null
+                if (fee == null) fee = Number.isFinite(feeFromOption) ? feeFromOption : getDoctorFeeBySelectedId(doctors, selectedDocId)
+              } else {
+                fee = Number.isFinite(feeFromOption) ? feeFromOption : getDoctorFeeBySelectedId(doctors, selectedDocId)
+              }
               setForm(f => ({
                 ...f,
                 doctor: selectedDocId,
-                amount: fee != null ? String(fee) : f.amount,
+                amount: fee != null ? String(fee) : '',
               }))
             }} className={inp}>
               <option value="">Walk-in / Any</option>
               {doctors.filter(d => getDoctorUserId(d)).map(d => (
-                <option key={getDoctorUserId(d)} value={getDoctorUserId(d)}>
-                  {d.name}{getDoctorFee(d) != null ? ` · ₹${getDoctorFee(d)}` : ''}
+                <option
+                  key={getDoctorUserId(d)}
+                  value={getDoctorUserId(d)}
+                  data-fee={getDoctorFee(d) ?? ''}
+                >
+                  {d.name}
                 </option>
               ))}
             </select>
@@ -1891,13 +1990,15 @@ function OPDSection({ rooms }) {
               : <><Printer size={18} strokeWidth={2.5} /> {matchedPatient ? 'Assign Token & Print A4 Sheet' : 'Register, Assign & Print A4 Sheet'}</>
             }
           </button>
-          <button type="submit" disabled={submitting} onClick={() => { submitActionRef.current = 'thermal' }}
-            className="w-full bg-white border border-gray-200 text-gray-700 py-2.5 rounded-xl text-sm font-bold hover:bg-gray-50 disabled:opacity-60 flex items-center justify-center gap-2 transition-colors">
-            {submitting && submitActionRef.current === 'thermal'
-              ? <span className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
-              : 'Assign Token & Show Thermal Option'
-            }
-          </button>
+          {SHOW_THERMAL_ASSIGN_BUTTON && (
+            <button type="submit" disabled={submitting} onClick={() => { submitActionRef.current = 'thermal' }}
+              className="w-full bg-white border border-gray-200 text-gray-700 py-2.5 rounded-xl text-sm font-bold hover:bg-gray-50 disabled:opacity-60 flex items-center justify-center gap-2 transition-colors">
+              {submitting && submitActionRef.current === 'thermal'
+                ? <span className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+                : 'Assign Token & Show Thermal Option'
+              }
+            </button>
+          )}
           <p className="text-center text-xs font-bold text-gray-500 leading-tight mt-1">
             {matchedPatient
               ? 'Patient found — edit details above if needed; saved when you assign token'
@@ -6245,6 +6346,7 @@ function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrint
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
   const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
   const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
+  const logoUrl = slipProfile.hospital_logo_url || ''
   const adm = admissionProp || {}
 
   const [billPrintTarget, setBillPrintTarget] = useState(null)
@@ -6395,7 +6497,13 @@ function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrint
         <div className="p-4 sm:p-[15mm] print:p-0 min-h-screen print:min-h-[281mm] flex flex-col relative">
           {/* Header */}
           <div className="flex justify-between items-start border-b-2 border-gray-900 pb-4 mb-4">
-            <div className="w-16 h-16 bg-gray-100 rounded-lg flex items-center justify-center font-black text-2xl text-gray-400">LOGO</div>
+            <div className="w-16 h-16 rounded-lg flex items-center justify-center overflow-hidden border border-gray-200 bg-white">
+              {logoUrl ? (
+                <img src={logoUrl} alt="Hospital logo" className="w-full h-full object-contain" />
+              ) : (
+                <span className="font-black text-xl text-gray-300">LOGO</span>
+              )}
+            </div>
             <div className="text-center flex-1">
               <h1 className="text-3xl font-black tracking-tight">{hospitalName}</h1>
               <p className="text-sm text-gray-600 font-medium">{address}, PIN: {pinCode}</p>
@@ -7233,17 +7341,21 @@ function PaymentSlipSection() {
       const { data } = await api.post('/invoices/', payload)
       const inv = data?.data || data?.entity || data
 
-      // For credit slips, keep amount due and skip payment entry.
-      let paymentRecord = null
-      if (paymentMode !== 'credit') {
-        const paymentRes = await api.post('/payments/', {
-          invoice: inv.id,
-          payment_mode: paymentMode,
-          amount: total.toFixed(2),
-          status: 'success',
-        })
-        paymentRecord = paymentRes?.data?.data || paymentRes?.data?.entity || paymentRes?.data
-      }
+      // Always create a payment transaction so every slip is visible in Payment Slips.
+      // Credit entries are stored as pending dues (amount due, not collected yet).
+      const isCreditSlip = paymentMode === 'credit'
+      const paymentRes = await api.post('/payments/', {
+        invoice: inv.id,
+        payment_mode: isCreditSlip ? 'other' : paymentMode,
+        amount: total.toFixed(2),
+        status: isCreditSlip ? 'pending' : 'success',
+        transaction_reference: isCreditSlip
+          ? `CREDIT DUE${(linkedAdmission?.ipd_no || linkedAdmission?.ipd_id || linkedAdmission?.admission_no)
+            ? ` | IPD ID:${linkedAdmission?.ipd_no || linkedAdmission?.ipd_id || linkedAdmission?.admission_no}`
+            : ''}`
+          : '',
+      })
+      const paymentRecord = paymentRes?.data?.data || paymentRes?.data?.entity || paymentRes?.data
 
       setInvoice({ 
         ...inv, 
@@ -7256,7 +7368,7 @@ function PaymentSlipSection() {
         paymentMode, subtotal, discountAmt, total, referredBy, purpose, linkedAdmission
       })
       toast.success(`Invoice ${inv.invoice_no} created!`)
-      toast.success(paymentMode === 'credit' ? 'Credit slip generated successfully!' : 'Payment slip recorded successfully!')
+      toast.success(paymentMode === 'credit' ? 'Credit slip generated and registered in Payment Slips!' : 'Payment slip recorded successfully!')
     } catch (err) {
       toast.error(err.response?.data?.detail || JSON.stringify(err.response?.data) || 'Failed to create invoice')
     } finally { setSubmitting(false) }
@@ -7745,13 +7857,13 @@ function PaymentSlipSection() {
                   Edit Quick Add
                 </button>
               </div>
-              <div className="flex flex-wrap gap-1.5 mb-2">
+              <div className="flex flex-wrap gap-1.5 mb-2 pb-2 border-b border-gray-200">
                 {quickServiceCategories.map(category => (
                   <button
                     key={category}
                     type="button"
                     onClick={() => setActiveQuickCategory(category)}
-                    className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+                    className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors ${
                       activeQuickCategory === category
                         ? 'border-emerald-600 bg-emerald-600 text-white'
                         : 'border-gray-200 bg-gray-50 text-gray-600 hover:border-emerald-300'
@@ -8629,7 +8741,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
       }
     }
     if (enriched.salutation_choice === undefined) {
-      enriched = { ...enriched, salutation_choice: '' }
+      enriched = { ...enriched, salutation_choice: 'none' }
     }
     setEditingVisit(enriched)
   }
@@ -9127,12 +9239,14 @@ function OpdSlipsSection({ onMoveToIpd }) {
                     </div>
                     <div className="flex flex-col">
                       <span className="text-[10px] font-black text-gray-400 uppercase">Token / Date</span>
-                      <span className="text-sm font-bold text-gray-700">#{viewVisit.queue_number || viewVisit.token_number} · {viewVisit.visit_date ? format(new Date(viewVisit.visit_date), 'd/M/yyyy') : '--'}</span>
+                      <span className="text-sm font-bold text-gray-700">
+                        #{viewVisit.queue_number || viewVisit.token_number} · {viewVisit.visit_date ? `${format(new Date(viewVisit.visit_date), 'd/M/yyyy')} (${viewVisit.created_at ? format(new Date(viewVisit.created_at), 'HH:mm') : '--'})` : '--'}
+                      </span>
                     </div>
                     <div className="flex flex-col col-span-2">
                       <span className="text-[10px] font-black text-gray-400 uppercase">Registration Time</span>
                       <span className="text-sm font-bold text-gray-600">
-                        {viewVisit.created_at ? format(new Date(viewVisit.created_at), 'd/M/yyyy (HH:mm)') : '--'}
+                        {viewVisit.patient_registered_at ? format(new Date(viewVisit.patient_registered_at), 'd/M/yyyy (HH:mm)') : '--'}
                       </span>
                     </div>
                     <div className="flex flex-col col-span-2">
@@ -9261,8 +9375,23 @@ function PaymentSlipsListSection() {
   const [page, setPage] = useState(0)
   const [editingPayment, setEditingPayment] = useState(null)
   const [viewPayment, setViewPayment] = useState(null)
+  const [cancelPayment, setCancelPayment] = useState(null)
+  const [cancelPaymentReason, setCancelPaymentReason] = useState('')
+  const [cancellingPayment, setCancellingPayment] = useState(false)
+  const [quickServices, setQuickServices] = useState([])
+  const [itemDropdownIdx, setItemDropdownIdx] = useState(null)
+  const [itemDropdownPos, setItemDropdownPos] = useState(null)
+  const itemDescRefs = useRef({})
   const PAGE_SIZE = 10
   const debounceRef = useRef(null)
+
+  useEffect(() => {
+    api.get('/payments/quick-services/').then(({ data }) => {
+      const payload = data?.data
+      const rows = Array.isArray(payload?.services) ? payload.services : (Array.isArray(payload) ? payload : [])
+      setQuickServices(rows.filter(r => r.label))
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     setPage(0)
@@ -9291,6 +9420,22 @@ function PaymentSlipsListSection() {
   async function handleSaveEdit(e) {
     e.preventDefault()
     try {
+      const invoiceId = editingPayment.invoice_details?.id || editingPayment.invoice
+      const editItems = editingPayment._editItems || []
+      if (invoiceId && editItems.length > 0) {
+        const itemsPayload = editItems.map(it => ({
+          description: it.description || 'Service',
+          category: it.category || '',
+          subcategory: it.subcategory || '',
+          quantity: Number(it.quantity) || 1,
+          unit_price: Number(it.unit_price) || 0,
+        }))
+        await api.patch(`/invoices/${invoiceId}/update-items/`, {
+          items: itemsPayload,
+          discount_amount: editingPayment._discount ?? undefined,
+          tax_rate: editingPayment._taxRate ?? undefined,
+        })
+      }
       await api.patch(`/payments/${editingPayment.id}/`, {
         payment_mode: editingPayment.payment_mode || 'cash',
         amount: editingPayment.amount || 0,
@@ -9302,8 +9447,50 @@ function PaymentSlipsListSection() {
       toast.success('Payment slip updated!')
       setEditingPayment(null)
       fetchPayments(page, search)
-    } catch {
-      toast.error('Failed to update payment slip')
+    } catch (err) {
+      toast.error(err?.response?.data?.errors?.detail?.[0] || err?.response?.data?.detail || 'Failed to update payment slip')
+    }
+  }
+
+  function openEditPayment(p) {
+    const rawItems = Array.isArray(p.invoice_details?.items) ? p.invoice_details.items : []
+    const editItems = rawItems.map(it => ({
+      id: it.id,
+      description: it.description || '',
+      category: it.category || '',
+      quantity: String(it.quantity ?? 1),
+      unit_price: String(it.unit_price ?? 0),
+    }))
+    setEditingPayment({
+      ...p,
+      paid_at: toDateTimeInputValue(p.paid_at),
+      _editItems: editItems.length > 0 ? editItems : [{ description: '', category: '', quantity: '1', unit_price: '0' }],
+      _discount: p.invoice_details?.discount_amount ?? 0,
+      _taxRate: p.invoice_details?.tax_rate ?? 0,
+    })
+  }
+
+  async function submitCancelPayment() {
+    if (!cancelPayment) return
+    const reason = cancelPaymentReason.trim()
+    if (!reason) { toast.error('Please enter cancellation reason'); return }
+    setCancellingPayment(true)
+    try {
+      await api.patch(`/payments/${cancelPayment.id}/`, {
+        status: 'cancelled',
+        transaction_reference: cancelPayment.transaction_reference
+          ? cancelPayment.transaction_reference
+          : `Cancelled: ${reason}`,
+      })
+      toast.success('Payment slip cancelled')
+      setCancelPayment(null)
+      setCancelPaymentReason('')
+      if (viewPayment?.id === cancelPayment.id) setViewPayment(v => ({ ...v, status: 'cancelled' }))
+      fetchPayments(page, search)
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || 'Failed to cancel payment slip')
+    } finally {
+      setCancellingPayment(false)
     }
   }
 
@@ -9312,14 +9499,17 @@ function PaymentSlipsListSection() {
     const w = createSameTabPrintWindow()
     const dateTimeStr = payment.paid_at ? format(new Date(payment.paid_at), 'd/M/yyyy HH:mm:ss') : format(new Date(), 'd/M/yyyy HH:mm:ss')
     const patientName = (payment.patient_name || 'PATIENT').toUpperCase()
+    const isCreditDue = payment.status === 'pending' && /credit/i.test(String(payment.transaction_reference || ''))
     const payModeLabel =
-      payment.payment_mode === 'cash'
-        ? 'Cash Payment'
-        : payment.payment_mode === 'card'
-          ? 'Card Payment'
-          : payment.payment_mode === 'upi'
-            ? 'UPI Payment'
-            : (payment.payment_mode || 'Payment').toUpperCase()
+      isCreditDue
+        ? 'Credit / Due'
+        : payment.payment_mode === 'cash'
+          ? 'Cash Payment'
+          : payment.payment_mode === 'card'
+            ? 'Card Payment'
+            : payment.payment_mode === 'upi'
+              ? 'UPI Payment'
+              : (payment.payment_mode || 'Payment').toUpperCase()
     const amountNum = Number(payment.amount || 0)
     const amountFixed = Number.isFinite(amountNum) ? amountNum.toFixed(2) : '0.00'
     const slipProfile = getPaymentSlipProfile()
@@ -9589,7 +9779,11 @@ function PaymentSlipsListSection() {
               </div>
               <div className="col-span-2 min-w-0 pr-2">
                 <span className="text-gray-600 truncate block font-semibold">{p.invoice_no || '--'}</span>
-                <span className="text-[10px] text-indigo-600 font-bold uppercase">{p.payment_mode || 'cash'}</span>
+                <span className="text-[10px] text-indigo-600 font-bold uppercase">
+                  {p.status === 'pending' && /credit/i.test(String(p.transaction_reference || ''))
+                    ? 'credit'
+                    : (p.payment_mode || 'cash')}
+                </span>
               </div>
               <div className="col-span-2 flex flex-col items-center gap-1">
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${statusColors[p.status] || 'bg-gray-100 text-gray-800'}`}>
@@ -9602,7 +9796,7 @@ function PaymentSlipsListSection() {
               <div className="col-span-2 min-w-0 pr-2">
                 <p className="text-xs text-gray-500 truncate">{p.transaction_reference || '--'}</p>
               </div>
-              <div className="col-span-2 flex flex-row gap-2 items-center justify-end">
+              <div className="col-span-2 flex flex-row gap-1.5 items-center justify-end">
                 <button
                   onClick={() => setViewPayment(p)}
                   title="View"
@@ -9612,15 +9806,28 @@ function PaymentSlipsListSection() {
                   <Eye size={13} className="group-hover:scale-110 transition-transform" />
                   <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[40px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest">View</span>
                 </button>
-                <button
-                  onClick={() => setEditingPayment({ ...p, paid_at: toDateTimeInputValue(p.paid_at) })}
-                  title="Edit"
-                  aria-label="Edit payment slip"
-                  className="h-8 w-8 hover:w-[68px] flex items-center justify-center gap-1 overflow-hidden text-emerald-600 hover:text-white bg-emerald-50 hover:bg-emerald-600 rounded-lg transition-all duration-150 border border-emerald-100 shadow-sm hover:shadow-md active:scale-95 group"
-                >
-                  <Edit2 size={13} className="group-hover:scale-110 transition-transform" />
-                  <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[36px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest">Edit</span>
-                </button>
+                {p.status !== 'cancelled' && (
+                  <button
+                    onClick={() => openEditPayment(p)}
+                    title="Edit"
+                    aria-label="Edit payment slip"
+                    className="h-8 w-8 hover:w-[68px] flex items-center justify-center gap-1 overflow-hidden text-emerald-600 hover:text-white bg-emerald-50 hover:bg-emerald-600 rounded-lg transition-all duration-150 border border-emerald-100 shadow-sm hover:shadow-md active:scale-95 group"
+                  >
+                    <Edit2 size={13} className="group-hover:scale-110 transition-transform" />
+                    <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[36px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest">Edit</span>
+                  </button>
+                )}
+                {p.status !== 'cancelled' && (
+                  <button
+                    onClick={() => { setCancelPayment(p); setCancelPaymentReason('') }}
+                    title="Cancel"
+                    aria-label="Cancel payment slip"
+                    className="h-8 w-8 hover:w-[84px] flex items-center justify-center gap-1 overflow-hidden text-red-600 hover:text-white bg-red-50 hover:bg-red-600 rounded-lg transition-all duration-150 border border-red-100 shadow-sm hover:shadow-md active:scale-95 group"
+                  >
+                    <X size={13} className="group-hover:scale-110 transition-transform" />
+                    <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[52px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest">Cancel</span>
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -9648,20 +9855,41 @@ function PaymentSlipsListSection() {
 
       {editingPayment && (
         <div className="fixed inset-0 z-[100] bg-gray-900/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <form onSubmit={handleSaveEdit} className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-full">
+          <form onSubmit={handleSaveEdit} className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[92vh]">
             <div className="bg-emerald-600 px-4 py-3 flex items-center justify-between pointer-events-none">
               <h2 className="text-white font-bold pointer-events-auto">Edit Payment Slip</h2>
               <button type="button" onClick={() => setEditingPayment(null)} className="text-white/80 hover:text-white pointer-events-auto"><X size={18} /></button>
             </div>
             <div className="p-4 overflow-y-auto space-y-4">
+
+              {/* Read-only context */}
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 grid grid-cols-3 gap-3">
+                <div>
+                  <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Patient</p>
+                  <p className="text-xs font-bold text-gray-800 truncate">{editingPayment.patient_name || '—'}</p>
+                  <p className="text-[10px] text-gray-500 font-mono">{editingPayment.patient_uhid || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Invoice No</p>
+                  <p className="text-xs font-bold text-gray-800 break-all">{editingPayment.invoice_no || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Slip No</p>
+                  <p className="text-xs font-bold text-gray-800 break-all">{editingPayment.slip_number || '—'}</p>
+                </div>
+              </div>
+
+              {/* Paid At */}
               <div>
                 <label className="block text-xs font-bold text-gray-600 mb-1">Paid At</label>
                 <input type="datetime-local" value={editingPayment.paid_at || ''} onChange={e => setEditingPayment({ ...editingPayment, paid_at: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" />
               </div>
+
+              {/* Amount + Mode */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-gray-600 mb-1">Amount</label>
-                  <input type="number" step="0.01" value={editingPayment.amount || ''} onChange={e => setEditingPayment({ ...editingPayment, amount: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" />
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Amount (₹)</label>
+                  <input type="number" step="0.01" min="0" value={editingPayment.amount || ''} onChange={e => setEditingPayment({ ...editingPayment, amount: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-600 mb-1">Payment Mode</label>
@@ -9674,29 +9902,256 @@ function PaymentSlipsListSection() {
                   </select>
                 </div>
               </div>
+
+              {/* Receipt + Status */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Receipt Number</label>
+                  <input type="text" value={editingPayment.receipt_no || ''} onChange={e => setEditingPayment({ ...editingPayment, receipt_no: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" placeholder="e.g. RCP-001" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Status</label>
+                  <select value={editingPayment.status || 'success'} onChange={e => setEditingPayment({ ...editingPayment, status: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none">
+                    <option value="success">Success</option>
+                    <option value="pending">Pending</option>
+                    <option value="failed">Failed</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Transaction Reference */}
               <div>
                 <label className="block text-xs font-bold text-gray-600 mb-1">Transaction Reference</label>
-                <input type="text" value={editingPayment.transaction_reference || ''} onChange={e => setEditingPayment({ ...editingPayment, transaction_reference: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" />
+                <input type="text" value={editingPayment.transaction_reference || ''} onChange={e => setEditingPayment({ ...editingPayment, transaction_reference: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" placeholder="UPI ID, cheque no., etc." />
               </div>
-              <div>
-                <label className="block text-xs font-bold text-gray-600 mb-1">Receipt Number</label>
-                <input type="text" value={editingPayment.receipt_no || ''} onChange={e => setEditingPayment({ ...editingPayment, receipt_no: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none" />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-gray-600 mb-1">Status</label>
-                <select value={editingPayment.status || 'success'} onChange={e => setEditingPayment({ ...editingPayment, status: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none">
-                  <option value="success">Success</option>
-                  <option value="pending">Pending</option>
-                  <option value="failed">Failed</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </div>
+
+              {/* Line Items Editor */}
+              {editingPayment.invoice_details?.id || editingPayment.invoice ? (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-bold text-gray-600">Invoice Items</label>
+                    <button
+                      type="button"
+                      onClick={() => setEditingPayment(prev => ({ ...prev, _editItems: [...(prev._editItems || []), { description: '', category: '', quantity: '1', unit_price: '0' }] }))}
+                      className="text-xs font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1 px-2 py-0.5 rounded-lg hover:bg-emerald-50 transition-colors border border-emerald-200"
+                    >
+                      <Plus size={11} /> Add Item
+                    </button>
+                  </div>
+                  <div className="border border-gray-200 rounded-xl overflow-hidden">
+                    <div className="grid grid-cols-12 bg-gray-100 px-2 py-1.5 text-[10px] font-black text-gray-500 uppercase tracking-widest">
+                      <div className="col-span-5">Description</div>
+                      <div className="col-span-2">Category</div>
+                      <div className="col-span-2 text-center">Qty</div>
+                      <div className="col-span-2 text-right">Price</div>
+                      <div className="col-span-1" />
+                    </div>
+                    {(editingPayment._editItems || []).map((item, idx) => {
+                      const lineTotal = (Number(item.quantity) || 0) * (Number(item.unit_price) || 0)
+                      return (
+                        <div key={idx} className="grid grid-cols-12 gap-1 px-2 py-1.5 border-t border-gray-100 items-center">
+                          <div className="col-span-5">
+                            <input
+                              ref={el => { itemDescRefs.current[idx] = el }}
+                              type="text"
+                              value={item.description}
+                              onChange={e => {
+                                const next = [...editingPayment._editItems]
+                                next[idx] = { ...next[idx], description: e.target.value }
+                                setEditingPayment(prev => ({ ...prev, _editItems: next }))
+                                const rect = itemDescRefs.current[idx]?.getBoundingClientRect()
+                                if (rect) setItemDropdownPos({ top: rect.bottom + 4, left: rect.left, width: Math.max(rect.width, 240) })
+                                setItemDropdownIdx(idx)
+                              }}
+                              onFocus={() => {
+                                const rect = itemDescRefs.current[idx]?.getBoundingClientRect()
+                                if (rect) setItemDropdownPos({ top: rect.bottom + 4, left: rect.left, width: Math.max(rect.width, 240) })
+                                setItemDropdownIdx(idx)
+                              }}
+                              onBlur={() => setTimeout(() => setItemDropdownIdx(null), 160)}
+                              placeholder="Service name or type to search…"
+                              className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <input
+                              type="text"
+                              value={item.category}
+                              onChange={e => {
+                                const next = [...editingPayment._editItems]
+                                next[idx] = { ...next[idx], category: e.target.value }
+                                setEditingPayment(prev => ({ ...prev, _editItems: next }))
+                              }}
+                              placeholder="Category"
+                              className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.quantity}
+                              onChange={e => {
+                                const next = [...editingPayment._editItems]
+                                next[idx] = { ...next[idx], quantity: e.target.value }
+                                setEditingPayment(prev => ({ ...prev, _editItems: next }))
+                              }}
+                              className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs text-center focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.unit_price}
+                              onChange={e => {
+                                const next = [...editingPayment._editItems]
+                                next[idx] = { ...next[idx], unit_price: e.target.value }
+                                setEditingPayment(prev => ({ ...prev, _editItems: next }))
+                              }}
+                              className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs text-right focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                            />
+                          </div>
+                          <div className="col-span-1 flex justify-end">
+                            {editingPayment._editItems.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = editingPayment._editItems.filter((_, i) => i !== idx)
+                                  setEditingPayment(prev => ({ ...prev, _editItems: next }))
+                                }}
+                                className="text-red-400 hover:text-red-600 transition-colors p-0.5"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
+                          </div>
+                          {lineTotal > 0 && (
+                            <div className="col-span-12 text-right text-[10px] text-gray-400 pr-5 -mt-0.5">
+                              = ₹{lineTotal.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                    <div className="px-2 py-1.5 bg-gray-50 border-t border-gray-200 flex justify-between items-center">
+                      <span className="text-[10px] text-gray-400 font-semibold">
+                        {editingPayment._editItems?.length || 0} item(s)
+                      </span>
+                      <span className="text-xs font-black text-emerald-700">
+                        Total: ₹{(editingPayment._editItems || []).reduce((s, it) => s + (Number(it.quantity) || 0) * (Number(it.unit_price) || 0), 0).toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
             </div>
             <div className="p-4 border-t border-gray-100 flex gap-2 justify-end bg-gray-50 mt-auto shrink-0">
-              <button type="button" onClick={() => setEditingPayment(null)} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200 transition-colors">Cancel</button>
+              <button type="button" onClick={() => setEditingPayment(null)} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200 transition-colors">Close</button>
               <button type="submit" className="px-4 py-2 rounded-xl text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">Save Changes</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Quick-service dropdown portal — renders outside the clipping modal */}
+      {itemDropdownIdx !== null && itemDropdownPos && (() => {
+        const item = editingPayment?._editItems?.[itemDropdownIdx]
+        if (!item) return null
+        const descLower = (item.description || '').toLowerCase()
+        const filteredSvc = quickServices.filter(s =>
+          !descLower || s.label.toLowerCase().includes(descLower)
+        )
+        if (filteredSvc.length === 0) return null
+
+        // Group by category
+        const grouped = {}
+        filteredSvc.forEach(svc => {
+          const cat = svc.category || 'Custom'
+          if (!grouped[cat]) grouped[cat] = []
+          grouped[cat].push(svc)
+        })
+        const categories = Object.keys(grouped)
+
+        return createPortal(
+          <div
+            style={{ position: 'fixed', top: itemDropdownPos.top, left: itemDropdownPos.left, width: Math.max(itemDropdownPos.width, 280), zIndex: 9999 }}
+            className="bg-white border border-gray-200 rounded-xl shadow-2xl max-h-64 overflow-y-auto"
+          >
+            {categories.map((cat, ci) => (
+              <div key={ci}>
+                {ci > 0 && <div className="border-t-2 border-gray-200" />}
+                <div className="sticky top-0 px-3 py-1.5 bg-gray-100 border-b border-gray-200 flex items-center gap-2">
+                  <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest bg-gray-300 px-2 py-0.5 rounded">{cat}</span>
+                  <span className="text-[9px] text-gray-400 font-medium">{grouped[cat].length} item{grouped[cat].length !== 1 ? 's' : ''}</span>
+                </div>
+                {grouped[cat].map((svc, si) => (
+                  <button
+                    key={si}
+                    type="button"
+                    onMouseDown={e => {
+                      e.preventDefault()
+                      const next = [...editingPayment._editItems]
+                      next[itemDropdownIdx] = {
+                        ...next[itemDropdownIdx],
+                        description: svc.label,
+                        category: svc.category || '',
+                        unit_price: String(svc.price ?? 0),
+                      }
+                      setEditingPayment(prev => ({ ...prev, _editItems: next }))
+                      setItemDropdownIdx(null)
+                    }}
+                    className="w-full text-left px-4 py-2 hover:bg-emerald-50 flex items-center justify-between gap-2 border-b border-gray-50 last:border-0 transition-colors"
+                  >
+                    <p className="text-xs font-semibold text-gray-800 truncate">{svc.label}</p>
+                    <span className="text-xs font-black text-emerald-600 shrink-0">₹{Number(svc.price || 0).toFixed(2)}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>,
+          document.body
+        )
+      })()}
+
+      {/* Cancel Payment Modal */}
+      {cancelPayment && (
+        <div className="fixed inset-0 z-[110] bg-gray-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="px-4 py-3 bg-red-600 text-white flex items-center justify-between">
+              <h3 className="font-bold">Cancel Payment Slip</h3>
+              <button type="button" onClick={() => { if (!cancellingPayment) { setCancelPayment(null); setCancelPaymentReason('') } }} className="text-white/80 hover:text-white" disabled={cancellingPayment}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-700">
+                You are cancelling slip <span className="font-black text-gray-900">{cancelPayment.slip_number || cancelPayment.invoice_no || `#${cancelPayment.receipt_no}`}</span> for{' '}
+                <span className="font-semibold">{cancelPayment.patient_name || 'Patient'}</span> of amount <span className="font-black text-red-600">₹{Number(cancelPayment.amount || 0).toLocaleString('en-IN')}</span>. This will mark the slip as cancelled.
+              </p>
+              <div>
+                <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation Reason *</label>
+                <textarea
+                  value={cancelPaymentReason}
+                  onChange={e => setCancelPaymentReason(e.target.value)}
+                  rows={4}
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none"
+                  placeholder="Enter reason for cancellation"
+                  disabled={cancellingPayment}
+                />
+              </div>
+            </div>
+            <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
+              <button type="button" onClick={() => { if (!cancellingPayment) { setCancelPayment(null); setCancelPaymentReason('') } }} disabled={cancellingPayment} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200 transition-colors disabled:opacity-60">Close</button>
+              <button type="button" onClick={submitCancelPayment} disabled={cancellingPayment} className="px-4 py-2 rounded-xl text-sm font-bold bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-60">
+                {cancellingPayment ? 'Cancelling...' : 'Confirm Cancel'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -9733,7 +10188,11 @@ function PaymentSlipsListSection() {
               </div>
               <div className="bg-gray-50 rounded-lg p-2 border border-gray-100">
                 <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Payment Mode</p>
-                <p className="text-xs font-bold text-gray-800 uppercase">{viewPayment.payment_mode || '--'}</p>
+                <p className="text-xs font-bold text-gray-800 uppercase">
+                  {viewPayment.status === 'pending' && /credit/i.test(String(viewPayment.transaction_reference || ''))
+                    ? 'CREDIT'
+                    : (viewPayment.payment_mode || '--')}
+                </p>
               </div>
               <div className="bg-gray-50 rounded-lg p-2 border border-gray-100">
                 <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Status</p>
@@ -9814,12 +10273,17 @@ function PaymentSlipsListSection() {
 
 function PaymentSlipSettingsSection() {
   const [form, setForm] = useState(() => getPaymentSlipProfile())
+  const [logoPreview, setLogoPreview] = useState(() => getPaymentSlipProfile().hospital_logo_url || '')
 
   useEffect(() => {
     let cancelled = false
     async function hydrate() {
       await loadReceptionPortalSettings()
-      if (!cancelled) setForm(getPaymentSlipProfile())
+      if (!cancelled) {
+        const next = getPaymentSlipProfile()
+        setForm(next)
+        setLogoPreview(next.hospital_logo_url || '')
+      }
     }
     hydrate()
     return () => { cancelled = true }
@@ -9829,10 +10293,34 @@ function PaymentSlipSettingsSection() {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  function onLogoFileChange(file) {
+    if (!file) return
+    const previewUrl = URL.createObjectURL(file)
+    setLogoPreview(previewUrl)
+    setForm((prev) => ({
+      ...prev,
+      hospital_logo_file: file,
+      remove_hospital_logo: false,
+    }))
+  }
+
+  function onRemoveLogo() {
+    setLogoPreview('')
+    setForm((prev) => ({
+      ...prev,
+      hospital_logo_file: null,
+      hospital_logo_url: '',
+      remove_hospital_logo: true,
+    }))
+  }
+
   async function handleSave(e) {
     e.preventDefault()
     try {
       await savePaymentSlipProfile(form)
+      const next = getPaymentSlipProfile()
+      setForm(next)
+      setLogoPreview(next.hospital_logo_url || '')
       toast.success('Payment slip details saved')
     } catch {
       toast.error('Failed to save payment slip details')
@@ -9840,9 +10328,13 @@ function PaymentSlipSettingsSection() {
   }
 
   async function handleReset() {
-    setForm({ ...DEFAULT_PAYMENT_SLIP_PROFILE })
+    setForm({ ...DEFAULT_PAYMENT_SLIP_PROFILE, remove_hospital_logo: true })
+    setLogoPreview('')
     try {
-      await savePaymentSlipProfile(DEFAULT_PAYMENT_SLIP_PROFILE)
+      await savePaymentSlipProfile({ ...DEFAULT_PAYMENT_SLIP_PROFILE, remove_hospital_logo: true })
+      const next = getPaymentSlipProfile()
+      setForm(next)
+      setLogoPreview(next.hospital_logo_url || '')
       toast.success('Payment slip details reset')
     } catch {
       toast.error('Failed to reset payment slip details')
@@ -9920,6 +10412,35 @@ function PaymentSlipSettingsSection() {
               placeholder="www.hospital.com"
             />
           </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Hospital Logo</label>
+            <div className="border border-dashed border-gray-300 rounded-xl p-3 bg-gray-50">
+              {logoPreview ? (
+                <img src={logoPreview} alt="Hospital logo preview" className="h-20 w-auto object-contain bg-white rounded-lg border border-gray-200 p-1 mb-2" />
+              ) : (
+                <div className="h-20 flex items-center justify-center text-xs text-gray-400 mb-2 bg-white rounded-lg border border-gray-200">
+                  No logo selected
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => onLogoFileChange(e.target.files?.[0])}
+                  className="block w-full text-xs text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-emerald-600 file:text-white file:font-bold file:cursor-pointer"
+                />
+                {logoPreview && (
+                  <button
+                    type="button"
+                    onClick={onRemoveLogo}
+                    className="px-3 py-2 rounded-lg bg-red-50 text-red-700 text-xs font-bold hover:bg-red-100 border border-red-100"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
 
           <div className="pt-2 flex gap-2">
             <button
@@ -9945,16 +10466,21 @@ function PaymentSlipSettingsSection() {
 function OpdSettingsSection() {
   const [form, setForm] = useState(() => getReceptionOpdSettings())
   const [doctors, setDoctors] = useState([])
+  // '' = All Doctors (default); a doctor user-id string = that doctor only
+  const [selectedSlotDoctor, setSelectedSlotDoctor] = useState('')
   const normalizedSlots = useMemo(() => (
     Array.isArray(form.opd_fee_slots)
       ? form.opd_fee_slots.map((s) => ({
           start: String(s?.start || ''),
           end: String(s?.end || ''),
           amount: String(s?.amount ?? ''),
+          days: Array.isArray(s?.days) ? s.days : null,
+          doctor_user_id: s?.doctor_user_id != null ? String(s.doctor_user_id) : null,
         }))
       : []
   ), [form.opd_fee_slots])
-  const [timelineDraft, setTimelineDraft] = useState({ startMin: null, endMin: null, amount: '', editIndex: null })
+  const ALL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+  const [timelineDraft, setTimelineDraft] = useState({ startMin: null, endMin: null, amount: '', days: ALL_DAYS, doctor_user_id: '', editIndex: null })
 
   useEffect(() => {
     let cancelled = false
@@ -9989,11 +10515,16 @@ function OpdSettingsSection() {
   async function persistSlotRows(rows) {
     const sanitizedRows = (Array.isArray(rows) ? rows : [])
       .filter((s) => s && s.start && s.end)
-      .map((s) => ({
-        start: String(s.start).slice(0, 5),
-        end: String(s.end).slice(0, 5),
-        amount: Number(String(s.amount || '0').replace(/[^0-9.]/g, '') || 0),
-      }))
+      .map((s) => {
+        const entry = {
+          start: String(s.start).slice(0, 5),
+          end: String(s.end).slice(0, 5),
+          amount: Number(String(s.amount || '0').replace(/[^0-9.]/g, '') || 0),
+          days: Array.isArray(s.days) && s.days.length > 0 ? s.days : ALL_DAYS,
+        }
+        if (s.doctor_user_id) entry.doctor_user_id = String(s.doctor_user_id)
+        return entry
+      })
     const next = {
       ...form,
       opd_fee_mode: 'slot',
@@ -10100,11 +10631,16 @@ function OpdSettingsSection() {
         opd_fee_mode: form.opd_fee_mode === 'slot' ? 'slot' : 'doctor',
         opd_fee_slots: normalizedSlots
           .filter((s) => s.start && s.end)
-          .map((s) => ({
-            start: s.start,
-            end: s.end,
-            amount: Number(String(s.amount || '0').replace(/[^0-9.]/g, '') || 0),
-          })),
+          .map((s) => {
+            const entry = {
+              start: s.start,
+              end: s.end,
+              amount: Number(String(s.amount || '0').replace(/[^0-9.]/g, '') || 0),
+              days: Array.isArray(s.days) && s.days.length > 0 ? s.days : ALL_DAYS,
+            }
+            if (s.doctor_user_id) entry.doctor_user_id = String(s.doctor_user_id)
+            return entry
+          }),
       }
       await saveReceptionOpdSettings(prepared)
       setForm(getReceptionOpdSettings())
@@ -10167,10 +10703,37 @@ function OpdSettingsSection() {
               <option value="">Walk-in / Any</option>
               {doctors.map((d) => (
                 <option key={d.user || d.id} value={String(d.user || d.id)}>
-                  {d.name}{d.consultation_fee > 0 ? ` · ₹${d.consultation_fee}` : ''}
+                  {d.name}
                 </option>
               ))}
             </select>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Invoice Prefix</label>
+              <input
+                type="text"
+                value={form.invoice_prefix || ''}
+                onChange={(e) => onChange('invoice_prefix', e.target.value.toUpperCase())}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                placeholder="INV"
+                maxLength={20}
+              />
+              <p className="mt-1 text-[11px] text-gray-500">Example format: {`${form.invoice_prefix || 'INV'}-${new Date().getFullYear()}-000345`}</p>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Next Invoice Number</label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={form.invoice_next_number || 1}
+                onChange={(e) => onChange('invoice_next_number', Math.max(1, Number(e.target.value || 1)))}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                placeholder="1"
+              />
+              <p className="mt-1 text-[11px] text-gray-500">If you set 345, the next generated invoice uses number 345.</p>
+            </div>
           </div>
 
           <div className="border border-gray-100 rounded-xl p-4 bg-gray-50/50 space-y-3">
@@ -10332,13 +10895,75 @@ function OpdSettingsSection() {
                     <div className="col-span-1">
                       <button
                         type="button"
-                        onClick={() => setTimelineDraft({ startMin: null, endMin: null, amount: '', editIndex: null })}
+                        onClick={() => setTimelineDraft({ startMin: null, endMin: null, amount: '', days: ALL_DAYS, doctor_user_id: selectedSlotDoctor, editIndex: null })}
                         className="w-full h-9 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 text-sm font-bold"
                         title="Clear selection"
                       >
                         ↺
                       </button>
                     </div>
+                  </div>
+
+                  {/* Days selector */}
+                  <div className="mt-2">
+                    <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1.5">Days</label>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {/* All days toggle */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allSelected = ALL_DAYS.every(d => (timelineDraft.days || []).includes(d))
+                          setTimelineDraft(prev => ({ ...prev, days: allSelected ? [] : [...ALL_DAYS] }))
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-extrabold border transition-all ${
+                          ALL_DAYS.every(d => (timelineDraft.days || []).includes(d))
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-emerald-400 hover:text-emerald-700'
+                        }`}
+                      >
+                        All
+                      </button>
+                      {ALL_DAYS.map(day => {
+                        const selected = (timelineDraft.days || []).includes(day)
+                        return (
+                          <button
+                            key={day}
+                            type="button"
+                            onClick={() => {
+                              setTimelineDraft(prev => {
+                                const cur = prev.days || []
+                                return {
+                                  ...prev,
+                                  days: selected ? cur.filter(d => d !== day) : [...cur, day],
+                                }
+                              })
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-extrabold border transition-all ${
+                              selected
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-700'
+                            }`}
+                          >
+                            {day}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Applies-to-Doctor picker */}
+                  <div className="mt-2">
+                    <label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1.5">Applies to Doctor</label>
+                    <select
+                      value={timelineDraft.doctor_user_id || ''}
+                      onChange={e => setTimelineDraft(d => ({ ...d, doctor_user_id: e.target.value }))}
+                      className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                    >
+                      <option value="">Default (All Doctors)</option>
+                      {doctors.filter(d => d.user || d.id).map(d => (
+                        <option key={d.user || d.id} value={String(d.user || d.id)}>{d.name}</option>
+                      ))}
+                    </select>
                   </div>
 
                   <div className="mt-2 flex items-center justify-between gap-2">
@@ -10349,7 +10974,7 @@ function OpdSettingsSection() {
                         const rows = (() => {
                           const prev = form
                           const rows = Array.isArray(prev.opd_fee_slots) ? [...prev.opd_fee_slots] : []
-                          const row = { start: toHHMM(timelineDraft.startMin), end: toHHMM(timelineDraft.endMin), amount: timelineDraft.amount || '0' }
+                          const row = { start: toHHMM(timelineDraft.startMin), end: toHHMM(timelineDraft.endMin), amount: timelineDraft.amount || '0', days: timelineDraft.days && timelineDraft.days.length > 0 ? timelineDraft.days : ALL_DAYS, ...(timelineDraft.doctor_user_id ? { doctor_user_id: timelineDraft.doctor_user_id } : {}) }
                           if (timelineDraft.editIndex != null && rows[timelineDraft.editIndex]) {
                             rows[timelineDraft.editIndex] = row
                           } else {
@@ -10360,7 +10985,7 @@ function OpdSettingsSection() {
                         persistSlotRows(rows)
                           .then(() => {
                             toast.success('Slots saved')
-                            setTimelineDraft({ startMin: null, endMin: null, amount: '', editIndex: null })
+                            setTimelineDraft({ startMin: null, endMin: null, amount: '', days: ALL_DAYS, doctor_user_id: selectedSlotDoctor, editIndex: null })
                           })
                           .catch(() => toast.error('Failed to save slots'))
                       }}
@@ -10378,39 +11003,123 @@ function OpdSettingsSection() {
                   </div>
                 </div>
 
-                {normalizedSlots.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {normalizedSlots.map((slot, idx) => (
-                      <div key={`slot-row-${idx}`} className="flex items-center justify-between gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                        <div className="text-sm font-bold text-gray-800">
-                          {slot.start || '—'} – {slot.end || '—'} <span className="text-gray-400 font-black">·</span> ₹{slot.amount || '0'}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setTimelineDraft({ startMin: toMin(slot.start), endMin: toMin(slot.end), amount: String(slot.amount || ''), editIndex: idx })}
-                            className="px-2 py-1 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 text-xs font-extrabold"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const rows = Array.isArray(form.opd_fee_slots) ? [...form.opd_fee_slots] : []
-                              rows.splice(idx, 1)
-                              persistSlotRows(rows)
-                                .then(() => toast.success('Slot removed'))
-                                .catch(() => toast.error('Failed to remove slot'))
-                            }}
-                            className="px-2 py-1 rounded-md bg-gray-100 text-gray-700 hover:bg-red-100 hover:text-red-700 text-xs font-extrabold"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                {/* Doctor filter + slot list */}
+                <div className="mt-1 space-y-2">
+                  {/* Filter dropdown */}
+                  <div className="flex items-center gap-2">
+                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide shrink-0">Show slots for</label>
+                    <select
+                      value={selectedSlotDoctor}
+                      onChange={e => {
+                        setSelectedSlotDoctor(e.target.value)
+                        setTimelineDraft({ startMin: null, endMin: null, amount: '', days: ALL_DAYS, doctor_user_id: e.target.value, editIndex: null })
+                      }}
+                      className="flex-1 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                    >
+                      <option value="">Default (All Doctors)</option>
+                      {doctors.filter(d => d.user || d.id).map(d => (
+                        <option key={d.user || d.id} value={String(d.user || d.id)}>{d.name}</option>
+                      ))}
+                    </select>
                   </div>
-                )}
+
+                  {/* Filtered slot rows:
+                      - "All Doctors" tab  → show only slots with no doctor_user_id
+                      - specific doctor tab → show that doctor's slots + "All Doctors" slots (inherited),
+                        BUT hide an "All Doctors" slot if the doctor already has a slot with the same start+end */}
+                  {(() => {
+                    // Pre-compute the set of start+end pairs that the selected doctor already owns
+                    const doctorOwnedTimes = new Set(
+                      selectedSlotDoctor
+                        ? normalizedSlots
+                            .filter(s => (s.doctor_user_id || '') === selectedSlotDoctor)
+                            .map(s => `${s.start}|${s.end}`)
+                        : []
+                    )
+                    return normalizedSlots.filter(slot => {
+                      const slotDoc = slot.doctor_user_id || ''
+                      if (!selectedSlotDoctor) return slotDoc === ''
+                      if (slotDoc === selectedSlotDoctor) return true
+                      // "All Doctors" slot — only show if doctor has no override for the same time
+                      if (slotDoc === '') return !doctorOwnedTimes.has(`${slot.start}|${slot.end}`)
+                      return false
+                    })
+                  })().length > 0 ? (
+                    <div className="space-y-1">
+                      {(() => {
+                        const doctorOwnedTimes = new Set(
+                          selectedSlotDoctor
+                            ? normalizedSlots
+                                .filter(s => (s.doctor_user_id || '') === selectedSlotDoctor)
+                                .map(s => `${s.start}|${s.end}`)
+                            : []
+                        )
+                        return normalizedSlots.map((slot, idx) => {
+                        const slotDoc = slot.doctor_user_id || ''
+                        const isAllDoctors = slotDoc === ''
+                        if (!selectedSlotDoctor && !isAllDoctors) return null
+                        if (selectedSlotDoctor && slotDoc !== selectedSlotDoctor && !isAllDoctors) return null
+                        // Hide inherited "All Doctors" slot if doctor has an override for same time
+                        if (isAllDoctors && selectedSlotDoctor && doctorOwnedTimes.has(`${slot.start}|${slot.end}`)) return null
+                        const docName = slot.doctor_user_id
+                          ? (doctors.find(d => String(d.user || d.id) === String(slot.doctor_user_id))?.name || `Doctor #${slot.doctor_user_id}`)
+                          : null
+                        return (
+                          <div key={`slot-row-${idx}`} className={`flex items-center justify-between gap-2 rounded-lg px-3 py-2 border ${isAllDoctors && selectedSlotDoctor ? 'bg-gray-50 border-gray-200' : 'bg-white border-gray-200'}`}>
+                            <div className="text-sm font-bold text-gray-800 space-y-0.5">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span>{slot.start || '—'} – {slot.end || '—'} <span className="text-gray-400 font-black">·</span> ₹{slot.amount || '0'}</span>
+                                {docName ? (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-50 text-violet-700 border border-violet-100">{docName}</span>
+                                ) : selectedSlotDoctor ? (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 border border-gray-200">All Doctors</span>
+                                ) : null}
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {(Array.isArray(slot.days) && slot.days.length > 0
+                                  ? (slot.days.length === 7 ? ['All days'] : slot.days)
+                                  : ['All days']
+                                ).map(d => (
+                                  <span key={d} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100">{d}</span>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setTimelineDraft({ startMin: toMin(slot.start), endMin: toMin(slot.end), amount: String(slot.amount || ''), days: Array.isArray(slot.days) && slot.days.length > 0 ? slot.days : ALL_DAYS, doctor_user_id: slot.doctor_user_id || '', editIndex: idx })}
+                                className="px-2 py-1 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 text-xs font-extrabold"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const rows = Array.isArray(form.opd_fee_slots) ? [...form.opd_fee_slots] : []
+                                  rows.splice(idx, 1)
+                                  persistSlotRows(rows)
+                                    .then(() => toast.success('Slot removed'))
+                                    .catch(() => toast.error('Failed to remove slot'))
+                                }}
+                                className="px-2 py-1 rounded-md bg-gray-100 text-gray-700 hover:bg-red-100 hover:text-red-700 text-xs font-extrabold"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })
+                    })()} 
+                    </div>
+                  ) : (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      No slots for {selectedSlotDoctor
+                        ? `${doctors.find(d => String(d.user || d.id) === selectedSlotDoctor)?.name || 'this doctor'} or All Doctors`
+                        : 'All Doctors'
+                      }. Add one above.
+                    </p>
+                  )}
+                </div>
                 {normalizedSlots.length === 0 && (
                   <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                     No slots added yet. Add one or more time ranges to apply slot-wise OPD fee.

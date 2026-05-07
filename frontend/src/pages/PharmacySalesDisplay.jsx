@@ -30,6 +30,14 @@ export default function PharmacySalesDisplay() {
 
   const fmt = (n) =>
     Number.isFinite(Number(n)) ? `₹${Number(n).toFixed(2)}` : '—'
+  const customerDetails = bill?.customerDetails || null
+  const infoBits = []
+  if (customerDetails?.uhid) infoBits.push(`UHID: ${customerDetails.uhid}`)
+  if (customerDetails?.phone) infoBits.push(`Phone: ${customerDetails.phone}`)
+  if (customerDetails?.age !== '' && customerDetails?.age !== null && customerDetails?.age !== undefined) {
+    infoBits.push(`Age: ${customerDetails.age}`)
+  }
+  if (customerDetails?.gender) infoBits.push(`Gender: ${customerDetails.gender}`)
 
   if (!bill || !bill.lines?.length) {
     return (
@@ -62,6 +70,11 @@ export default function PharmacySalesDisplay() {
           ) : (
             <p className="text-xl text-slate-400 mt-1.5">Walk-in customer</p>
           )}
+          {infoBits.length > 0 ? (
+            <p className="text-sm text-slate-500 mt-1">
+              {infoBits.join(' | ')}
+            </p>
+          ) : null}
         </div>
         <div className="text-right">
           <p className="text-sm text-slate-400 uppercase tracking-widest font-bold">Bill total</p>

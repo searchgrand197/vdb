@@ -29,12 +29,11 @@ export const GUARDIAN_RELATIONSHIP_OPTIONS = [
  * `none` = explicitly no honorific on slip (stored as 'none' on Patient).
  */
 export const SALUTATION_CHOICE_OPTIONS = [
-  { value: '', label: '\u00a0' },
-  { value: 'Mr', label: 'Mr' },
-  { value: 'Mrs', label: 'Mrs' },
-  { value: 'Master', label: 'Master' },
-  { value: 'Miss', label: 'Miss' },
   { value: 'none', label: '—' },
+  { value: 'Mr', label: 'Mr.' },
+  { value: 'Mrs', label: 'Mrs.' },
+  { value: 'Master', label: 'Master.' },
+  { value: 'Miss', label: 'Miss.' },
 ]
 
 /**

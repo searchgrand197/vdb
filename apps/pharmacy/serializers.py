@@ -21,6 +21,8 @@ class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
             "dl_number",
             "email",
             "website",
+            "invoice_prefix",
+            "invoice_next_number",
             "default_gst_percent",
             "default_sale_discount_percent",
             "b2b_enabled",
@@ -28,6 +30,21 @@ class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
+    def validate_invoice_prefix(self, value):
+        normalized = str(value or "").strip().upper()
+        if not normalized:
+            return "INV"
+        if len(normalized) > 20:
+            raise serializers.ValidationError("Invoice prefix cannot exceed 20 characters.")
+        return normalized
+
+    def validate_invoice_next_number(self, value):
+        if value is None:
+            return 1
+        if int(value) < 1:
+            raise serializers.ValidationError("Next invoice number must be at least 1.")
+        return int(value)
 
 
 class PharmacyInvoiceItemSerializer(serializers.ModelSerializer):
@@ -103,6 +120,7 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
     doctor_details = DoctorProfileSerializer(source="referred_by", read_only=True)
     due_amount = serializers.SerializerMethodField()
     party_name = serializers.CharField(source="party.name", read_only=True, default="")
+    party_details = serializers.SerializerMethodField()
 
     def validate(self, attrs: dict) -> dict:
         # Require either patient or party (but not both absent)
@@ -142,6 +160,18 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
     def get_due_amount(self, obj):
         return str(max(Decimal("0"), (obj.grand_total or Decimal("0")) - (obj.paid_amount or Decimal("0"))))
 
+    def get_party_details(self, obj):
+        party = getattr(obj, "party", None)
+        if party is None:
+            return None
+        return {
+            "id": str(party.id),
+            "name": party.name or "",
+            "phone": party.phone or "",
+            "gst_number": party.gst_number or "",
+            "address": party.address or "",
+        }
+
     class Meta:
         model = PharmacyInvoice
         fields = (
@@ -149,6 +179,7 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "patient",
             "patient_details",
             "party",
+            "party_details",
             "party_name",
             "party_name_snapshot",
             "referred_by",

@@ -8,6 +8,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
     patient_uhid = serializers.CharField(source="patient.uhid", read_only=True)
     patient_name = serializers.SerializerMethodField()
     patient_phone = serializers.CharField(source="patient.phone", read_only=True, default="")
+    patient_registered_at = serializers.DateTimeField(source="patient.created_at", read_only=True)
     patient_age = serializers.SerializerMethodField()
     patient_gender = serializers.CharField(source="patient.gender", read_only=True, default="")
     patient_address = serializers.SerializerMethodField()
@@ -35,6 +36,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "opd_no",
             "patient_name",
             "patient_phone",
+            "patient_registered_at",
             "patient_age",
             "patient_gender",
             "patient_address",

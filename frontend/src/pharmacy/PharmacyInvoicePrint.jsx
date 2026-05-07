@@ -133,6 +133,46 @@ function patientDisplayAddress(pd) {
   return joined || '—'
 }
 
+function partyDetailsObject(inv) {
+  if (!inv || typeof inv !== 'object') return null
+  const pd = inv.party_details
+  if (pd && typeof pd === 'object') return pd
+  if (inv.party && typeof inv.party === 'object') return inv.party
+  return null
+}
+
+function invoicePartyDisplayName(inv) {
+  const details = partyDetailsObject(inv)
+  const fromDetails = details?.name
+  if (fromDetails != null && String(fromDetails).trim() !== '') return String(fromDetails).trim()
+  const fromNamedField = inv?.party_name
+  if (fromNamedField != null && String(fromNamedField).trim() !== '') return String(fromNamedField).trim()
+  const fromSnapshot = inv?.party_name_snapshot
+  if (fromSnapshot != null && String(fromSnapshot).trim() !== '') return String(fromSnapshot).trim()
+  return '—'
+}
+
+function invoicePartyDisplayAddress(inv) {
+  const details = partyDetailsObject(inv)
+  const addr = details?.address
+  if (addr != null && String(addr).trim() !== '') return String(addr).trim()
+  return '—'
+}
+
+function invoicePartyDisplayPhone(inv) {
+  const details = partyDetailsObject(inv)
+  const phone = details?.phone
+  if (phone != null && String(phone).trim() !== '') return String(phone).trim()
+  return '—'
+}
+
+function invoicePartyDisplayGst(inv) {
+  const details = partyDetailsObject(inv)
+  const gst = details?.gst_number
+  if (gst != null && String(gst).trim() !== '') return String(gst).trim()
+  return '—'
+}
+
 /** Referred doctor: nested doctor_details.name (API) or legacy string. */
 function invoiceDoctorDisplayName(inv) {
   if (!inv || typeof inv !== 'object') return '—'
@@ -300,9 +340,18 @@ function buildInvoiceHtml({ invoice, outlet }) {
     ? `${biz.gst_number ? `<div>GSTIN : ${biz.gst_number}</div>` : ''}${biz.dl_number ? `<div>D.L.NO. : ${biz.dl_number}</div>` : ''}`
     : `${biz.dl_number ? `<div>D.L.NO. : ${biz.dl_number}</div>` : ''}`
 
+  const isB2B = Boolean(invoice?.party)
   const pd = invoice.patient_details
+  const partyName = invoicePartyDisplayName(invoice)
+  const partyAddr = invoicePartyDisplayAddress(invoice)
+  const partyPhone = invoicePartyDisplayPhone(invoice)
+  const partyGst = invoicePartyDisplayGst(invoice)
   const patientNameHtml = escapeHtml(patientDisplayName(pd) || '—')
   const patientAddrHtml = escapeHtml(patientDisplayAddress(pd))
+  const partyNameHtml = escapeHtml(partyName)
+  const partyAddrHtml = escapeHtml(partyAddr)
+  const partyPhoneHtml = escapeHtml(partyPhone)
+  const partyGstHtml = escapeHtml(partyGst)
   const doctorNameHtml = escapeHtml(invoiceDoctorDisplayName(invoice))
   const invoiceDate = safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy HH:mm')
   const notesAdviceText = extractNotesAdviceFromRemarks(invoice.remarks)
@@ -341,10 +390,14 @@ function buildInvoiceHtml({ invoice, outlet }) {
         <div style="font-size:16px;font-weight:bold;text-align:center">${showGst ? 'GST INVOICE' : 'INVOICE'}</div>
       </div>
       <div style="flex:1.2;padding:8px 10px;font-size:9px;line-height:1.8">
-        <div><strong>Patient Name :</strong> ${patientNameHtml}</div>
-        <div><strong>Patient Address :</strong> ${patientAddrHtml}</div>
-        <div><strong>UHID No. :</strong> ${escapeHtml(invoice.patient_details?.uhid || '—')}</div>
-        <div><strong>Dr. Name :</strong> ${doctorNameHtml}</div>
+        <div><strong>${isB2B ? 'Party Name' : 'Patient Name'} :</strong> ${isB2B ? partyNameHtml : patientNameHtml}</div>
+        <div><strong>${isB2B ? 'Party Address' : 'Patient Address'} :</strong> ${isB2B ? partyAddrHtml : patientAddrHtml}</div>
+        ${
+          isB2B
+            ? `<div><strong>Party Phone :</strong> ${partyPhoneHtml}</div><div><strong>Party GSTIN :</strong> ${partyGstHtml}</div>`
+            : `<div><strong>UHID No. :</strong> ${escapeHtml(invoice.patient_details?.uhid || '—')}</div>`
+        }
+        ${isB2B ? '' : `<div><strong>Dr. Name :</strong> ${doctorNameHtml}</div>`}
         <div><strong>Payment :</strong> ${paymentMethod}</div>
         <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid #000;padding-top:4px">
           <span><strong>Invoice No. : ${invoice.invoice_no || ''}</strong></span>
@@ -475,9 +528,14 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
   const dueAmount = Math.max(0, Number(invoice.due_amount ?? grandTotal - paidAmount))
   const paymentMethod = String(invoice.payment_method || 'cash').toUpperCase()
   const items = invoice.items || []
+  const isB2B = Boolean(invoice?.party)
   const pd = invoice.patient_details
   const patientNameLabel = patientDisplayName(pd) || '—'
   const patientAddrLabel = patientDisplayAddress(pd)
+  const partyNameLabel = invoicePartyDisplayName(invoice)
+  const partyAddrLabel = invoicePartyDisplayAddress(invoice)
+  const partyPhoneLabel = invoicePartyDisplayPhone(invoice)
+  const partyGstLabel = invoicePartyDisplayGst(invoice)
   const doctorLabel = invoiceDoctorDisplayName(invoice)
   const notesAdvice = extractNotesAdviceFromRemarks(invoice.remarks)
 
@@ -540,10 +598,17 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
           </div>
 
           <div style={{ flex: 1.2, padding: '8px 10px', fontSize: '9px', lineHeight: '1.8' }}>
-            <div><strong>Patient Name :</strong> {patientNameLabel}</div>
-            <div><strong>Patient Address :</strong> {patientAddrLabel}</div>
-            <div><strong>UHID No. :</strong> {invoice.patient_details?.uhid || '—'}</div>
-            <div><strong>Dr. Name :</strong> {doctorLabel}</div>
+            <div><strong>{isB2B ? 'Party Name' : 'Patient Name'} :</strong> {isB2B ? partyNameLabel : patientNameLabel}</div>
+            <div><strong>{isB2B ? 'Party Address' : 'Patient Address'} :</strong> {isB2B ? partyAddrLabel : patientAddrLabel}</div>
+            {isB2B ? (
+              <>
+                <div><strong>Party Phone :</strong> {partyPhoneLabel}</div>
+                <div><strong>Party GSTIN :</strong> {partyGstLabel}</div>
+              </>
+            ) : (
+              <div><strong>UHID No. :</strong> {invoice.patient_details?.uhid || '—'}</div>
+            )}
+            {!isB2B ? <div><strong>Dr. Name :</strong> {doctorLabel}</div> : null}
             <div><strong>Payment :</strong> {paymentMethod}</div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', borderTop: '1px solid #000', paddingTop: '4px' }}>
               <span><strong>Invoice No. : {invoice.invoice_no}</strong></span>

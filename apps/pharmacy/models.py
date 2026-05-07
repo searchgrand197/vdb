@@ -157,6 +157,8 @@ class PharmacyOutletSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     dl_number = models.CharField(max_length=40, blank=True, default="")
     email = models.CharField(max_length=120, blank=True, default="")
     website = models.CharField(max_length=200, blank=True, default="")
+    invoice_prefix = models.CharField(max_length=20, blank=True, default="INV")
+    invoice_next_number = models.PositiveIntegerField(default=1)
     default_gst_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
     default_sale_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
     b2b_enabled = models.BooleanField(default=False, help_text="When enabled, sales are made to business parties instead of patients.")

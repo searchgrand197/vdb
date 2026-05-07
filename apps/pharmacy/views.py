@@ -138,9 +138,9 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         if raw and not PharmacyInvoice.objects.filter(invoice_no=raw).exists():
             invoice_no = raw
         else:
-            invoice_no = next_pharmacy_invoice_number(pharmacy.id)
+            invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
             while PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
-                invoice_no = next_pharmacy_invoice_number(pharmacy.id)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
         payment_method = (serializer.validated_data.get("payment_method") or "cash").lower()
         grand_total = serializer.validated_data.get("grand_total") or Decimal("0.00")
         paid_amount = serializer.validated_data.get("paid_amount")
@@ -159,9 +159,9 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 )
                 return
             except IntegrityError:
-                invoice_no = next_pharmacy_invoice_number(pharmacy.id)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
                 while PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
-                    invoice_no = next_pharmacy_invoice_number(pharmacy.id)
+                    invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
         # If all retries fail, bubble up the final DB integrity error.
         serializer.save(
             pharmacy=pharmacy,
@@ -200,14 +200,14 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 # Generate a collision-safe invoice number (max 10 retries then UUID suffix)
-                invoice_no = next_pharmacy_invoice_number(pharmacy.id)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
                 for _ in range(10):
                     if not PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
                         break
-                    invoice_no = next_pharmacy_invoice_number(pharmacy.id)
+                    invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
                 else:
                     # Absolute fallback — extremely unlikely to collide
-                    invoice_no = f"INV-DRAFT-{str(_uuid.uuid4())[:8].upper()}"
+                    invoice_no = f"DRFT-{str(_uuid.uuid4())[:8].upper()}"
 
                 invoice = PharmacyInvoice.objects.create(
                     pharmacy=pharmacy,

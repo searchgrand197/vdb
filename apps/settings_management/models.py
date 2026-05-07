@@ -68,6 +68,13 @@ class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     phone = models.CharField(max_length=40, blank=True, default="+91-XXXXXXXXXX")
     email = models.CharField(max_length=120, blank=True, default="info@vardraanhospital.com")
     website = models.CharField(max_length=200, blank=True, default="www.vardraanhospital.com")
+    hospital_logo = models.ImageField(
+        upload_to="hospital_logos/",
+        null=True,
+        blank=True,
+    )
+    invoice_prefix = models.CharField(max_length=20, blank=True, default="INV")
+    invoice_next_number = models.PositiveIntegerField(default=1)
     print_with_background = models.BooleanField(default=True)
     opd_fee_mode = models.CharField(
         max_length=10,

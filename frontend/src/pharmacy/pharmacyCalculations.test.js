@@ -130,10 +130,10 @@ describe('lineDiscountRupeesFromPercent', () => {
     expect(lineDiscountRupeesFromPercent({ qty: 1, rate: 100, line_discount: 0 })).toBe(0)
     expect(lineDiscountRupeesFromPercent({ qty: 1, rate: 100, line_discount: 100 })).toBe(100)
   })
-  it('uses MRP − rate per qty when batch MRP is set (line_discount ignored for ₹)', () => {
+  it('returns 0 when batch MRP exists (rate already includes discount)', () => {
     expect(
-      lineDiscountRupeesFromPercent({ qty: 3, rate: 2.5, batch: { mrp: 3 }, line_discount: 0 }),
-    ).toBe(1.5)
+      lineDiscountRupeesFromPercent({ qty: 3, rate: 2.5, batch: { mrp: 3 }, line_discount: 16 }),
+    ).toBe(0)
   })
 })
 
@@ -168,7 +168,7 @@ describe('computeSaleGstTotals', () => {
     expect(t.grandTotal).toBe(6.3)
     expect(t.taxableSubtotal).toBe(6.3)
   })
-  it('non-GST: batch MRP — list 3×3 minus markdown 3×(3−2.5) → 7.50', () => {
+  it('non-GST: batch MRP present uses selling base without double discount', () => {
     const t = computeSaleGstTotals(
       [
         {

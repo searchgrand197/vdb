@@ -239,6 +239,7 @@ function ErpBillingViewInner({
   const b2bEnabled = !!outletSettings?.b2b_enabled
   const [partyId, setPartyId] = useState(null)
   const [partyName, setPartyName] = useState('')
+  const [partyDetails, setPartyDetails] = useState(null)
   const [ptSearch, setPtSearch] = useState('')
   const debouncedPtSearch = useDebouncedValue(ptSearch, 320)
   const [ptResults, setPtResults] = useState([])
@@ -457,7 +458,7 @@ function ErpBillingViewInner({
     [grandTotal, billDiscountAmount],
   )
 
-  /** List-side gross: qty×MRP when batch has MRP, else qty×rate — matches billing base. */
+  /** List-side gross: qty×selling rate — matches billing GST base. */
   const lineGrossTotal = useMemo(() => {
     let gross = 0
     for (const r of rows) {
@@ -494,6 +495,23 @@ function ErpBillingViewInner({
       customerName: b2bEnabled
         ? partyName
         : selectedPt ? `${selectedPt.first_name} ${selectedPt.last_name}` : '',
+      customerDetails: b2bEnabled
+        ? {
+            type: 'party',
+            id: partyId || '',
+            phone: partyDetails?.phone || '',
+            address: partyDetails?.address || '',
+            gst_number: partyDetails?.gst_number || '',
+          }
+        : selectedPt
+          ? {
+              type: 'patient',
+              phone: selectedPt.phone || '',
+              uhid: selectedPt.uhid || '',
+              age: selectedPt.age ?? '',
+              gender: selectedPt.gender || '',
+            }
+          : null,
       lines: activeLines.map((r) => {
         const netAmount = Math.round(Number(r.qty) * Number(r.rate) * 100) / 100
         const mrp = Number(r.batch?.mrp) || null
@@ -513,7 +531,7 @@ function ErpBillingViewInner({
       grandTotal: netGrandTotal,
       updatedAt: Date.now(),
     }))
-  }, [rows, selectedPt, partyId, partyName, netGrandTotal, taxableSubtotal, cgst, sgst, outletSettings, b2bEnabled])
+  }, [rows, selectedPt, partyId, partyName, partyDetails, netGrandTotal, taxableSubtotal, cgst, sgst, outletSettings, b2bEnabled])
 
   React.useEffect(() => {
     if (!replacingRowId) return
@@ -543,6 +561,7 @@ function ErpBillingViewInner({
     // ── Auto-select patient or party from draft ──────────────────────────────
     setPartyId(null)
     setPartyName('')
+    setPartyDetails(null)
     const pd = draftInvoiceToLoad.patient_details
     if (pd && pd.id) {
       setSelectedPt({
@@ -559,6 +578,10 @@ function ErpBillingViewInner({
     if (draftInvoiceToLoad.party) {
       setPartyId(draftInvoiceToLoad.party)
       setPartyName(draftInvoiceToLoad.party_name || draftInvoiceToLoad.party_name_snapshot || '')
+      setPartyDetails(
+        draftInvoiceToLoad.party_details ||
+          (typeof draftInvoiceToLoad.party === 'object' ? draftInvoiceToLoad.party : null),
+      )
     }
 
     // ── Map inline items (already in invoice serializer response) ────────────
@@ -903,6 +926,11 @@ function ErpBillingViewInner({
         items: builtItems,
         patient_details: invForPrint.patient_details || (b2bEnabled ? null : selectedPt),
         party_name: invForPrint.party_name || (b2bEnabled ? partyName : ''),
+        party_details:
+          invForPrint.party_details ||
+          (typeof invForPrint.party === 'object' ? invForPrint.party : null) ||
+          partyDetails ||
+          null,
         subtotal: taxableSubtotal,
         cgst,
         sgst,
@@ -915,6 +943,7 @@ function ErpBillingViewInner({
       setSelectedPt(null)
       setPartyId(null)
       setPartyName('')
+      setPartyDetails(null)
       setLinkedAdmission(null)
       setPaymentMethod('cash')
       setPaidAmount('')
@@ -952,7 +981,11 @@ function ErpBillingViewInner({
                 <PurchaseSupplierPicker
                   supplierId={partyId}
                   supplierName={partyName}
-                  onChange={(id, name) => { setPartyId(id); setPartyName(name) }}
+                  onChange={(id, name, details) => {
+                    setPartyId(id)
+                    setPartyName(name)
+                    setPartyDetails(details || null)
+                  }}
                   required
                 />
               ) : (

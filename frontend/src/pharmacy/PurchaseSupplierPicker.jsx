@@ -85,7 +85,7 @@ export function PurchaseSupplierPicker({ supplierId, supplierName, onChange, req
       const id = row?.id
       const name = row?.name || createForm.name.trim()
       if (!id) throw new Error('Invalid API response')
-      onChange(id, name)
+      onChange(id, name, row)
       setShowCreate(false)
       setOpen(false)
       setCreateForm({ name: '', phone: '', address: '', gst_number: '' })
@@ -142,7 +142,7 @@ export function PurchaseSupplierPicker({ supplierId, supplierName, onChange, req
                   type="button"
                   className="w-full text-left px-1.5 py-1 text-[10px] hover:bg-blue-50 truncate border-b border-slate-50 last:border-0"
                   onClick={() => {
-                    onChange(s.id, s.name)
+                    onChange(s.id, s.name, s)
                     setOpen(false)
                   }}
                 >

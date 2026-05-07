@@ -1535,7 +1535,7 @@ function HistoryView({ invoices: _invoices, setPrintingInvoice }) {
             <thead className="bg-gradient-to-b from-slate-100 to-slate-50 sticky top-0 z-10 text-[10px] font-bold text-slate-500 uppercase">
               <tr>
                 <th className="px-3 py-2">Invoice</th>
-                <th className="px-3 py-2">Patient</th>
+                <th className="px-3 py-2">Customer</th>
                 <th className="px-3 py-2">Method</th>
                 <th className="px-3 py-2 text-right">Paid</th>
                 <th className="px-3 py-2 text-right">Due</th>
@@ -1552,13 +1552,25 @@ function HistoryView({ invoices: _invoices, setPrintingInvoice }) {
                 const totalAmt = Number(inv.grand_total || 0)
                 const paidAmt = Number(inv.paid_amount || 0)
                 const dueAmt = Math.max(0, Number(inv.due_amount ?? totalAmt - paidAmt))
+                const isB2B = Boolean(inv?.party)
+                const party = inv?.party_details || (typeof inv?.party === 'object' ? inv.party : null)
+                const customerName = isB2B
+                  ? (party?.name || inv?.party_name || inv?.party_name_snapshot || '—')
+                  : `${inv?.patient_details?.first_name || ''} ${inv?.patient_details?.last_name || ''}`.trim() || '—'
+                const partyBits = []
+                if (party?.phone) partyBits.push(`Phone: ${party.phone}`)
+                if (party?.gst_number) partyBits.push(`GSTIN: ${party.gst_number}`)
+                if (party?.address) partyBits.push(`Address: ${party.address}`)
                 return (
                   <tr key={inv.id} className="hover:bg-indigo-50/30">
                     <td className="px-3 py-2 text-blue-700 font-mono text-[10px]">#{inv.invoice_no}</td>
                     <td className="px-3 py-2">
-                      <div className="font-medium">
-                        {inv.patient_details?.first_name} {inv.patient_details?.last_name}
-                      </div>
+                      <div className="font-medium">{customerName}</div>
+                      {isB2B ? (
+                        <div className="text-[10px] text-slate-500 break-words">
+                          {partyBits.length ? partyBits.join(' · ') : 'Party details unavailable'}
+                        </div>
+                      ) : null}
                       <div className="text-[10px] text-slate-400">{safeFormat(inv.created_at, 'dd MMM yy HH:mm')}</div>
                     </td>
                     <td className="px-3 py-2">
@@ -1573,7 +1585,24 @@ function HistoryView({ invoices: _invoices, setPrintingInvoice }) {
                       <div className="flex justify-end gap-1">
                         <button
                           type="button"
-                          onClick={() => setPrintingInvoice(inv)}
+                          onClick={async () => {
+                            try {
+                              const { data } = await api.get(`/pharmacy/invoices/${inv.id}/`)
+                              const full = data?.data || data || inv
+                              setPrintingInvoice({
+                                ...inv,
+                                ...full,
+                                party_details:
+                                  full?.party_details ||
+                                  (typeof full?.party === 'object' ? full.party : null) ||
+                                  inv?.party_details ||
+                                  (typeof inv?.party === 'object' ? inv.party : null) ||
+                                  null,
+                              })
+                            } catch {
+                              setPrintingInvoice(inv)
+                            }
+                          }}
                           className="px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700 text-[10px] font-semibold"
                         >
                           View
@@ -2304,6 +2333,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
   const [data, setData] = useState({
     name: '',
     company_name: '',
+    hsn_code: '',
     form: '',
     category: '',
     composition: '',
@@ -2624,6 +2654,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
 
   async function handleAdd() {
     if (!data.name.trim()) return toast.error('Product name is required')
+    if (!data.hsn_code.trim()) return toast.error('HSN code is required')
     if (!data.form.trim()) return toast.error('Category is required')
     if (!(Number(data.mrp) > 0)) return toast.error('MRP is required')
     const unitsPerPack =
@@ -2673,6 +2704,7 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
         sku: createdSku,
         name: data.name.trim(),
         company_name: data.company_name.trim(),
+        hsn_code: data.hsn_code.trim(),
         form: data.form.trim(),
         ...(data.category ? { category: data.category } : {}),
         composition: data.composition.trim(),
@@ -2822,6 +2854,16 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
                     value={data.company_name}
                     onChange={(e) => setData({ ...data, company_name: e.target.value })}
                     placeholder="Optional"
+                    className="mt-1 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-semibold text-slate-700">HSN Code*</span>
+                  <input
+                    type="text"
+                    value={data.hsn_code}
+                    onChange={(e) => setData({ ...data, hsn_code: e.target.value })}
+                    placeholder="Enter HSN code"
                     className="mt-1 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
                   />
                 </label>
