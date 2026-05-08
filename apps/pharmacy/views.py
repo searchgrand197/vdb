@@ -14,6 +14,7 @@ from apps.inventory.services.stock_service import deduct_stock_fifo, get_batch_a
 
 from apps.pharmacy.invoice_number import next_pharmacy_invoice_number
 from apps.pharmacy.models import Pharmacy, PharmacyInvoice, PharmacyInvoiceItem, PharmacyOutletSettings, PharmacySupplier
+from apps.patients.models import PatientAddress, PatientGuardian
 from apps.pharmacy.purchase_challan import process_purchase_challan
 from apps.pharmacy.purchase_history import detail_purchase_history, list_purchase_history
 from apps.pharmacy.serializers import (
@@ -170,6 +171,127 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
             payment_method=payment_method,
             paid_amount=paid_amount,
         )
+
+    @action(detail=True, methods=["patch"], url_path="update-full")
+    @transaction.atomic
+    def update_full(self, request, pk=None):
+        """
+        PATCH /api/v1/pharmacy/invoices/{id}/update-full/
+        Update patient basic details, invoice settlement fields, and replace all items.
+        """
+        invoice = self.get_object()
+        patient = invoice.patient
+        if patient is None:
+            return Response({"detail": "Invoice has no patient linked."}, status=status.HTTP_400_BAD_REQUEST)
+
+        patient_payload = request.data.get("patient") or {}
+        invoice_payload = request.data.get("invoice") or {}
+        items_payload = request.data.get("items") or []
+
+        if not isinstance(items_payload, list) or len(items_payload) == 0:
+            return Response({"detail": "At least one item is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update patient core fields
+        first_name = str(patient_payload.get("first_name", patient.first_name or "")).strip()
+        last_name = str(patient_payload.get("last_name", patient.last_name or "")).strip()
+        if first_name:
+            patient.first_name = first_name
+        patient.last_name = last_name
+        patient.phone = str(patient_payload.get("phone", patient.phone or "")).strip()
+        gender = str(patient_payload.get("gender", patient.gender or "")).strip().lower()
+        if gender in ("male", "female", "other"):
+            patient.gender = gender
+        patient.save(update_fields=["first_name", "last_name", "phone", "gender", "updated_at"])
+
+        # Update guardian
+        guardian_name = str(patient_payload.get("guardian_name", "")).strip()
+        if guardian_name:
+            guardian_obj, _ = PatientGuardian.objects.get_or_create(patient=patient, defaults={"name": guardian_name})
+            guardian_obj.name = guardian_name
+            guardian_obj.save(update_fields=["name", "updated_at"])
+
+        # Update address
+        line1 = str(patient_payload.get("address_line1", "")).strip()
+        city = str(patient_payload.get("city", "")).strip()
+        state_name = str(patient_payload.get("state", "")).strip()
+        if line1 or city or state_name:
+            addr_obj, _ = PatientAddress.objects.get_or_create(patient=patient)
+            addr_obj.line1 = line1
+            addr_obj.city = city
+            addr_obj.state = state_name
+            addr_obj.save(update_fields=["line1", "city", "state", "updated_at"])
+
+        # Replace all items
+        invoice.items.all().delete()
+        subtotal = Decimal("0.00")
+        total_cgst = Decimal("0.00")
+        total_sgst = Decimal("0.00")
+        for row in items_payload:
+            medicine_id = row.get("medicine")
+            batch_id = row.get("batch")
+            qty = Decimal(str(row.get("qty", 0) or 0))
+            rate = Decimal(str(row.get("rate", 0) or 0))
+            mrp = Decimal(str(row.get("mrp", 0) or 0))
+            cgst_rate = Decimal(str(row.get("cgst_rate", 0) or 0))
+            sgst_rate = Decimal(str(row.get("sgst_rate", 0) or 0))
+            if not medicine_id or not batch_id or qty <= 0:
+                continue
+            base_amount = (qty * rate).quantize(Decimal("0.01"))
+            cgst_amount = (base_amount * cgst_rate / Decimal("100")).quantize(Decimal("0.01"))
+            sgst_amount = (base_amount * sgst_rate / Decimal("100")).quantize(Decimal("0.01"))
+            line_total = (base_amount + cgst_amount + sgst_amount).quantize(Decimal("0.01"))
+            PharmacyInvoiceItem.objects.create(
+                invoice=invoice,
+                medicine_id=medicine_id,
+                batch_id=batch_id,
+                qty=qty,
+                mrp=mrp,
+                rate=rate,
+                cgst_rate=cgst_rate,
+                sgst_rate=sgst_rate,
+                amount=line_total,
+            )
+            subtotal += base_amount
+            total_cgst += cgst_amount
+            total_sgst += sgst_amount
+
+        total_discount = Decimal(str(invoice_payload.get("total_discount", invoice.total_discount or 0) or 0)).quantize(Decimal("0.01"))
+        payment_method = str(invoice_payload.get("payment_method", invoice.payment_method or "cash") or "cash").strip().lower()
+        if payment_method not in ("cash", "card", "upi", "credit", "bank_transfer", "other"):
+            payment_method = "cash"
+        grand_total = (subtotal + total_cgst + total_sgst - total_discount).quantize(Decimal("0.01"))
+        if grand_total < 0:
+            grand_total = Decimal("0.00")
+        paid_amount = Decimal(str(invoice_payload.get("paid_amount", invoice.paid_amount or 0) or 0)).quantize(Decimal("0.01"))
+        if payment_method == "credit":
+            paid_amount = Decimal("0.00")
+        if paid_amount > grand_total:
+            paid_amount = grand_total
+        if paid_amount < 0:
+            paid_amount = Decimal("0.00")
+
+        invoice.payment_method = payment_method
+        invoice.paid_amount = paid_amount
+        invoice.total_discount = total_discount
+        invoice.subtotal = subtotal.quantize(Decimal("0.01"))
+        invoice.cgst = total_cgst.quantize(Decimal("0.01"))
+        invoice.sgst = total_sgst.quantize(Decimal("0.01"))
+        invoice.grand_total = grand_total
+        invoice.remarks = str(invoice_payload.get("remarks", invoice.remarks or ""))
+        invoice.save(
+            update_fields=[
+                "payment_method",
+                "paid_amount",
+                "total_discount",
+                "subtotal",
+                "cgst",
+                "sgst",
+                "grand_total",
+                "remarks",
+                "updated_at",
+            ]
+        )
+        return success_response(data=PharmacyInvoiceSerializer(invoice).data, message="Invoice updated.")
 
 
     @action(detail=False, methods=["post"], url_path="create-draft")
