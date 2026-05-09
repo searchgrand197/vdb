@@ -116,6 +116,7 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
             "medication_rows",
             "investigation_rows",
             "surgery_rows",
+            "is_draft",
             "created_at",
         ]
         read_only_fields = ["hospital"]

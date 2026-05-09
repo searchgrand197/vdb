@@ -2327,6 +2327,17 @@ function formatStockNumber(value) {
   return String(Math.round(value * 1000) / 1000)
 }
 
+const HSN_HISTORY_KEY = 'pharma_hsn_history'
+function getHsnHistory() {
+  try { return JSON.parse(localStorage.getItem(HSN_HISTORY_KEY)) || [] } catch { return [] }
+}
+function saveHsnHistory(code) {
+  const trimmed = code.trim()
+  if (!trimmed) return
+  const prev = getHsnHistory().filter((h) => h !== trimmed)
+  localStorage.setItem(HSN_HISTORY_KEY, JSON.stringify([trimmed, ...prev].slice(0, 20)))
+}
+
 function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDiscountPercent }) {
   const fallbackGstStr = resolveNewMedicineDefaultGst(defaultGstPercent)
   const fallbackDiscountStr = resolveNewMedicineDefaultDiscount(defaultSaleDiscountPercent)
@@ -2371,6 +2382,9 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
   const [categorySearch, setCategorySearch] = useState('')
   /** Expanded folder ids in the nested tree (chevron toggles). */
   const [expandedCategoryIds, setExpandedCategoryIds] = useState(() => new Set())
+  const [hsnHistory, setHsnHistory] = useState(() => getHsnHistory())
+  const [hsnDropdownOpen, setHsnDropdownOpen] = useState(false)
+  const hsnWrapperRef = React.useRef(null)
 
   const unitPricingPreview = useMemo(() => {
     const unitsPerPack =
@@ -2778,6 +2792,8 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
       } else {
         toast.success('Medicine created (not visible in Inventory until a batch is added)')
       }
+      saveHsnHistory(data.hsn_code)
+      setHsnHistory(getHsnHistory())
       onRefresh()
       onClose()
     } catch (e) {
@@ -2859,13 +2875,46 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
                 </label>
                 <label className="block">
                   <span className="text-[10px] font-semibold text-slate-700">HSN Code*</span>
-                  <input
-                    type="text"
-                    value={data.hsn_code}
-                    onChange={(e) => setData({ ...data, hsn_code: e.target.value })}
-                    placeholder="Enter HSN code"
-                    className="mt-1 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
-                  />
+                  <div className="relative mt-1" ref={hsnWrapperRef}>
+                    <input
+                      type="text"
+                      value={data.hsn_code}
+                      onChange={(e) => {
+                        setData({ ...data, hsn_code: e.target.value })
+                        setHsnDropdownOpen(true)
+                      }}
+                      onFocus={() => setHsnDropdownOpen(true)}
+                      onBlur={(e) => {
+                        if (!hsnWrapperRef.current?.contains(e.relatedTarget)) {
+                          setHsnDropdownOpen(false)
+                        }
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Escape') setHsnDropdownOpen(false) }}
+                      placeholder="Enter HSN code"
+                      className="w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
+                    />
+                    {hsnDropdownOpen && (() => {
+                      const q = data.hsn_code.trim().toLowerCase()
+                      const filtered = hsnHistory.filter((h) => !q || h.toLowerCase().includes(q))
+                      if (!filtered.length) return null
+                      return (
+                        <ul
+                          className="absolute z-50 left-0 right-0 top-full mt-0.5 bg-white border border-slate-200 rounded shadow-lg max-h-44 overflow-y-auto"
+                          onMouseDown={(e) => e.preventDefault()}
+                        >
+                          {filtered.map((h) => (
+                            <li
+                              key={h}
+                              className="px-2.5 py-1.5 text-[11px] text-slate-700 hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
+                              onClick={() => { setData({ ...data, hsn_code: h }); setHsnDropdownOpen(false) }}
+                            >
+                              {h}
+                            </li>
+                          ))}
+                        </ul>
+                      )
+                    })()}
+                  </div>
                 </label>
                 <div className="block">
                   <span className="text-[10px] font-semibold text-slate-700">Categories*</span>

@@ -175,14 +175,19 @@ def _cash_block(pharmacy_id, date_from, date_to):
     }
 
 
-def _today_sales_block(pharmacy_id, target_date=None):
-    """Selected-day finalized sale split by payment method (defaults to today)."""
-    today = target_date or timezone.now().date()
+def _today_sales_block(pharmacy_id, date_from=None, date_to=None):
+    """Finalized sale split by payment method for a selected date range."""
+    default_date = timezone.now().date()
+    start_date = date_from or default_date
+    end_date = date_to or start_date
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
     qs = PharmacyInvoice.objects.filter(
         pharmacy_id=pharmacy_id,
         status=PharmacyInvoice.Status.FINALIZED,
-        date=today,
-    ).select_related("patient").prefetch_related("items__batch")
+        date__gte=start_date,
+        date__lte=end_date,
+    ).select_related("patient").prefetch_related("items__batch", "items__medicine")
     by_method = {
         "cash": {"amount": ZERO, "margin": ZERO},
         "upi": {"amount": ZERO, "margin": ZERO},
@@ -191,6 +196,7 @@ def _today_sales_block(pharmacy_id, target_date=None):
     }
     invoice_rows = []
     total_margin = ZERO
+    med_map = {}  # medicine_id -> {name, total_qty, total_revenue, total_margin}
 
     for inv in qs:
         method = (inv.payment_method or "").strip().lower()
@@ -201,10 +207,28 @@ def _today_sales_block(pharmacy_id, target_date=None):
         for it in inv.items.all():
             qty = it.qty or ZERO
             rate = it.rate or ZERO
-            unit_cost = ZERO
+            unit_cost = None
             if it.batch_id and it.batch:
-                unit_cost = it.batch.unit_cost or ZERO
-            inv_margin += (rate - unit_cost) * qty
+                raw_cost = it.batch.unit_cost
+                if raw_cost is not None and raw_cost > ZERO:
+                    unit_cost = raw_cost
+            # Only count margin when a valid cost price has been recorded
+            item_margin = (rate - unit_cost) * qty if unit_cost is not None else ZERO
+            inv_margin += item_margin
+
+            # Accumulate per-medicine totals
+            mid = str(it.medicine_id) if it.medicine_id else "__unknown__"
+            med_name = it.medicine.name if it.medicine_id and it.medicine else "Unknown"
+            if mid not in med_map:
+                med_map[mid] = {
+                    "name": med_name,
+                    "total_qty": ZERO,
+                    "total_revenue": ZERO,
+                    "total_margin": ZERO,
+                }
+            med_map[mid]["total_qty"] += qty
+            med_map[mid]["total_revenue"] += qty * rate
+            med_map[mid]["total_margin"] += item_margin
 
         by_method[key]["amount"] += inv_total
         by_method[key]["margin"] += inv_margin
@@ -229,9 +253,38 @@ def _today_sales_block(pharmacy_id, target_date=None):
             }
         )
 
+    # Fetch current stock quantities for medicines sold in this period
+    sold_med_ids = [k for k in med_map.keys() if k != "__unknown__"]
+    stock_qs = (
+        StockLedger.objects.filter(
+            pharmacy_id=pharmacy_id,
+            medicine_id__in=sold_med_ids,
+        )
+        .values("medicine_id")
+        .annotate(qty=Sum("qty_change"))
+    )
+    stock_map = {str(r["medicine_id"]): float(r["qty"] or ZERO) for r in stock_qs}
+
+    medicine_details = sorted(
+        [
+            {
+                "medicine_id": k,
+                "name": v["name"],
+                "total_qty": float(v["total_qty"]),
+                "total_revenue": float(v["total_revenue"]),
+                "total_margin": float(v["total_margin"]),
+                "left_stock": max(0.0, stock_map.get(k, 0.0)),
+            }
+            for k, v in med_map.items()
+        ],
+        key=lambda x: x["total_revenue"],
+        reverse=True,
+    )
+
     total = sum([by_method[k]["amount"] for k in by_method.keys()], ZERO)
     return {
-        "date": str(today),
+        "date_from": str(start_date),
+        "date_to": str(end_date),
         "total": float(total),
         "total_margin": float(total_margin),
         "cash": float(by_method["cash"]["amount"]),
@@ -243,6 +296,7 @@ def _today_sales_block(pharmacy_id, target_date=None):
         "credit": float(by_method["credit"]["amount"]),
         "credit_margin": float(by_method["credit"]["margin"]),
         "details": invoice_rows,
+        "medicine_details": medicine_details,
     }
 
 
@@ -258,9 +312,21 @@ class PharmacyDashboardView(APIView):
             )
         pharmacy_id = pharmacy.id
         date_from, date_to = _parse_dates(request.query_params)
+        today_date_from = parse_date((request.query_params.get("today_date_from") or "").strip() or "")
+        today_date_to = parse_date((request.query_params.get("today_date_to") or "").strip() or "")
+        # Backward compatibility for older clients sending a single selected date.
         today_date = parse_date((request.query_params.get("today_date") or "").strip() or "")
-        if today_date is None:
-            today_date = timezone.now().date()
+        if today_date_from is None and today_date is not None:
+            today_date_from = today_date
+        if today_date_to is None and today_date is not None:
+            today_date_to = today_date
+        if today_date_from is None and today_date_to is None:
+            today_date_from = timezone.now().date()
+            today_date_to = today_date_from
+        elif today_date_from is None:
+            today_date_from = today_date_to
+        elif today_date_to is None:
+            today_date_to = today_date_from
         gst = request.query_params.get("gst", "1") == "1"
 
         data = {
@@ -269,8 +335,16 @@ class PharmacyDashboardView(APIView):
             "stock": _stock_block(pharmacy_id),
             "customers": _customers_block(pharmacy_id, date_from, date_to, gst),
             "cash": _cash_block(pharmacy_id, date_from, date_to),
-            "today_sales": _today_sales_block(pharmacy_id, target_date=today_date),
-            "today_total_for_tab": _today_sales_block(pharmacy_id, target_date=timezone.now().date()).get("total", 0.0),
+            "today_sales": _today_sales_block(
+                pharmacy_id,
+                date_from=today_date_from,
+                date_to=today_date_to,
+            ),
+            "today_total_for_tab": _today_sales_block(
+                pharmacy_id,
+                date_from=timezone.now().date(),
+                date_to=timezone.now().date(),
+            ).get("total", 0.0),
         }
         return success_response(data)
 

@@ -6,6 +6,8 @@ import api from '../api'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '../stores/authStore'
 import DraftPrescriptionModal from '../components/DraftPrescriptionModal'
+import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel'
+import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
 import { useDebouncedValue } from '../pharmacy/useDebouncedValue'
 import { format, addDays } from 'date-fns'
 import {
@@ -77,6 +79,7 @@ const TABS = [
   { id: 'opd', label: 'OPD Queue', icon: Users },
   { id: 'tp', label: 'Treatment Plans', icon: ClipboardList },
   { id: 'analytics', label: 'Analytics', icon: Stethoscope },
+  { id: 'discharge', label: 'Discharge Summary', icon: FileText },
 ]
 
 const DAYS = ['Day 1', 'Day 2', 'Day 3', 'Day 4']
@@ -3212,7 +3215,499 @@ function TPBuilder({ preSelectedAdmission, patientChip, onBack }) {
   )
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
+// ─── Discharge Summary Tab ────────────────────────────────────────────────────
+
+const dsInp = 'w-full [box-sizing:border-box] bg-white border border-slate-300 hover:border-slate-400 shadow-sm rounded-lg px-4 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none [&[type=date]]:pr-10 [&[type=time]]:pr-11 [&[type=datetime-local]]:pr-10'
+const dsLbl = 'text-[10px] font-black text-slate-400 uppercase tracking-wider mb-1 block'
+
+function emptyDischargeSummary() {
+  return {
+    summary_notes: '', treatment_given: '', condition_at_discharge: 'Stable',
+    medications_on_discharge: '', follow_up_advice: '',
+    reason_for_admission: '', diagnosis: '', allergies: '', procedure_surgery: '',
+    medical_history: '', physical_examination: '', investigations: '', course_in_hospital: '',
+    diet_advice: '', activity_advice: '', warning_signs: '',
+    chief_complaints: '', co_morbidities: '', family_history: '', personal_history: '',
+    complications_during_stay: '', blood_transfusion_details: '', implants_used: '',
+    indwelling_devices_on_discharge: '', vaccination_given: '', wound_care_instructions: '',
+    stitch_removal_date: '',
+    vitals_at_discharge: { bp: '', pulse: '', spo2: '', temp: '', weight: '', rbs: '' },
+    surgery_date: '', surgeon_name: '', assistant_name: '', anaesthetist_name: '', anaesthesia_type: '',
+    operative_findings: '', intra_op_complications: '',
+    discharge_date: '', discharge_time: '',
+    discharge_type: 'routine', discharge_status: 'improved', mode_of_admission: 'opd',
+    referred_to_facility: '', referral_reason: '',
+    treating_consultant: '', consultant_registration_no: '', rmo_signed_by: '',
+    next_follow_up_date: '', follow_up_doctor: '', follow_up_department: '',
+    cause_of_death: '', time_of_death: '', notified_to: '', autopsy_required: false,
+    abha_id: '', insurance_provider: '', tpa_name: '', policy_number: '', claim_number: '',
+    patient_education_given: false, attendant_counselled_by: '',
+    investigation_rows: [], surgery_rows: [],
+  }
+}
+
+function emptyDsSurgery() {
+  return { surgery_date: '', procedure_name: '', surgeon_name: '', assistant_name: '', anaesthetist_name: '', anaesthesia_type: '', operative_findings: '', intra_op_complications: '' }
+}
+
+function DischargeSummaryTab() {
+  const user = useAuthStore((s) => s.user) || {}
+  const [admissions, setAdmissions] = useState([])
+  const [summaryMap, setSummaryMap] = useState({})
+  const [selectedId, setSelectedId] = useState(null)
+  const [existingSummaryId, setExistingSummaryId] = useState(null)
+  const [summary, setSummary] = useState(emptyDischargeSummary())
+  const [surgeryDraft, setSurgeryDraft] = useState(emptyDsSurgery())
+  const [editingSurgeryIndex, setEditingSurgeryIndex] = useState(-1)
+  const [dischargeRxItems, setDischargeRxItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [search, setSearch] = useState('')
+  const dischargeScrollRootRef = useRef(null)
+  const [activeDischargeSection, setActiveDischargeSection] = useState('')
+
+  const dischargeSectionNavItems = useMemo(() => {
+    const items = [
+      { id: 'dds-metadata', Icon: ClipboardList, label: 'Metadata & Identifiers' },
+      { id: 'dds-vitals', Icon: Activity, label: 'Vitals at Discharge' },
+      ...(summary.discharge_type === 'death' ? [{ id: 'dds-death', Icon: Stethoscope, label: 'Death Summary' }] : []),
+      { id: 'dds-narrative', Icon: FileText, label: 'Clinical Narrative' },
+      { id: 'dds-operative', Icon: Scissors, label: 'Operative / Procedure' },
+      { id: 'dds-investigations', Icon: Search, label: 'Investigations' },
+      { id: 'dds-course', Icon: Stethoscope, label: 'Hospital Course' },
+      { id: 'dds-prescriptions', Icon: Pill, label: 'Medications' },
+      { id: 'dds-advice', Icon: Receipt, label: 'Advice on Discharge' },
+    ]
+    return items
+  }, [summary.discharge_type])
+
+  // Scroll spy
+  useEffect(() => {
+    const root = dischargeScrollRootRef.current
+    if (!root || !selectedId) return
+    const ids = dischargeSectionNavItems.map((i) => i.id)
+    let raf = 0
+    const observer = new IntersectionObserver((entries) => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const visible = entries.filter((e) => e.isIntersecting && e.target?.id)
+        if (visible.length) {
+          const top = visible.sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
+          setActiveDischargeSection(top.target.id)
+        }
+      })
+    }, { root, threshold: 0.15 })
+    ids.forEach((id) => { const el = root.querySelector(`[id="${id}"]`); if (el) observer.observe(el) })
+    return () => { observer.disconnect(); cancelAnimationFrame(raf) }
+  }, [selectedId, dischargeSectionNavItems])
+
+  // helpers
+  const setVital = (k, v) => setSummary(s => ({ ...s, vitals_at_discharge: { ...(s.vitals_at_discharge || {}), [k]: v } }))
+  const addInvRow = () => setSummary(s => ({ ...s, investigation_rows: [...(s.investigation_rows || []), { category: 'lab', test_name: '', value: '', reference_range: '', test_date: '' }] }))
+  const updateInvRow = (idx, key, val) => setSummary(s => { const rows = [...(s.investigation_rows || [])]; if (rows[idx]) rows[idx] = { ...rows[idx], [key]: val }; return { ...s, investigation_rows: rows } })
+  const removeInvRow = (idx) => setSummary(s => ({ ...s, investigation_rows: (s.investigation_rows || []).filter((_, i) => i !== idx) }))
+  const updateSurgeryField = (k, v) => setSurgeryDraft(d => ({ ...d, [k]: v }))
+  const resetSurgeryDraft = () => { setSurgeryDraft(emptyDsSurgery()); setEditingSurgeryIndex(-1) }
+  const saveSurgeryRow = () => {
+    const proc = (surgeryDraft.procedure_name || '').trim()
+    if (!proc) { toast.error('Procedure name is required'); return }
+    const row = { ...surgeryDraft, procedure_name: proc }
+    setSummary(s => {
+      const rows = [...(s.surgery_rows || [])]
+      if (editingSurgeryIndex >= 0 && rows[editingSurgeryIndex]) rows[editingSurgeryIndex] = row
+      else rows.push(row)
+      return { ...s, surgery_rows: rows }
+    })
+    resetSurgeryDraft()
+  }
+  const editSurgeryRow = (idx) => { const row = (summary.surgery_rows || [])[idx]; if (row) { setSurgeryDraft({ ...emptyDsSurgery(), ...row }); setEditingSurgeryIndex(idx) } }
+  const removeSurgeryRow = (idx) => { setSummary(s => ({ ...s, surgery_rows: (s.surgery_rows || []).filter((_, i) => i !== idx) })); if (editingSurgeryIndex === idx) resetSurgeryDraft() }
+
+  async function loadData() {
+    setLoading(true)
+    try {
+      const admRes = await api.get('/ipd-admissions/?status=admitted&limit=500')
+      const all = admRes.data?.data || admRes.data?.results || admRes.data || []
+      const mine = all.filter((a) => a.assigned_doctor && String(a.assigned_doctor) === String(user.id))
+      setAdmissions(mine.length ? mine : all)
+    } catch { toast.error('Failed to load admissions') }
+    finally { setLoading(false) }
+    try {
+      const sumRes = await api.get('/summaries/?limit=500')
+      const list = sumRes.data?.data || sumRes.data?.results || sumRes.data || []
+      const map = {}; list.forEach((s) => { map[String(s.admission)] = s }); setSummaryMap(map)
+    } catch { /* migration may be pending */ }
+  }
+
+  useEffect(() => { loadData() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function selectAdmission(admission) {
+    setSelectedId(admission.id)
+    setDischargeRxItems([])
+    const existing = summaryMap[String(admission.id)]
+    if (existing) {
+      setExistingSummaryId(existing.id)
+      setSummary({ ...emptyDischargeSummary(), ...existing, investigation_rows: existing.investigation_rows || [], surgery_rows: existing.surgery_rows || [] })
+      if (existing.medication_rows?.length) {
+        try { setDischargeRxItems(medicationRowsToRxItems(existing.medication_rows, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS)) } catch { /* ignore */ }
+      }
+    } else {
+      setExistingSummaryId(null)
+      setSummary({ ...emptyDischargeSummary(), treating_consultant: user.first_name ? `${user.first_name} ${user.last_name || ''}`.trim() : (user.email || '') })
+    }
+  }
+
+  async function handleSave(isDraft) {
+    if (!selectedId) return
+    setSaving(true)
+    try {
+      const payload = {
+        ...summary,
+        admission: selectedId,
+        is_draft: isDraft,
+        medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
+        investigation_rows: Array.isArray(summary.investigation_rows) ? summary.investigation_rows : [],
+        surgery_rows: Array.isArray(summary.surgery_rows) ? summary.surgery_rows : [],
+      }
+      let saved
+      if (existingSummaryId) {
+        const res = await api.patch(`/summaries/${existingSummaryId}/`, payload)
+        saved = res.data?.data || res.data
+      } else {
+        const res = await api.post('/summaries/', payload)
+        saved = res.data?.data || res.data
+        setExistingSummaryId(saved?.id || null)
+      }
+      setSummaryMap((prev) => ({ ...prev, [String(selectedId)]: saved }))
+      toast.success(isDraft ? 'Saved as draft' : 'Discharge summary finalised')
+    } catch (err) {
+      const detail = err?.response?.data?.detail || err?.response?.data?.non_field_errors?.[0]
+      toast.error(detail || 'Failed to save — ensure the server migration has been applied (python manage.py migrate)')
+    } finally { setSaving(false) }
+  }
+
+  const filteredAdmissions = admissions.filter((a) => {
+    const q = search.toLowerCase()
+    return !q || (a.patient_name || '').toLowerCase().includes(q) || (a.ward_name || '').toLowerCase().includes(q) || (a.bed_code || '').toLowerCase().includes(q)
+  })
+
+  const selectedAdmission = admissions.find((a) => a.id === selectedId)
+  const currentSummary = selectedId ? summaryMap[String(selectedId)] : null
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64 text-slate-400 text-sm gap-2">
+      <Loader2 size={18} className="animate-spin" /> Loading admissions…
+    </div>
+  )
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      {/* ── Patient list (left panel) ── */}
+      <div className="w-64 shrink-0 flex flex-col border-r border-slate-200 bg-slate-50">
+        <div className="px-3 pt-3 pb-2">
+          <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5">
+            <Search size={13} className="text-slate-400 shrink-0" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search patient / bed…" className="flex-1 text-[11px] outline-none bg-transparent" />
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 pb-3 space-y-1">
+          {filteredAdmissions.length === 0 && <p className="text-center text-slate-400 text-xs py-8">No active admissions</p>}
+          {filteredAdmissions.map((a) => {
+            const sum = summaryMap[String(a.id)]
+            const isSelected = a.id === selectedId
+            return (
+              <button key={a.id} onClick={() => selectAdmission(a)}
+                className={`w-full text-left rounded-xl border px-3 py-2.5 transition-colors ${isSelected ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 bg-white hover:bg-slate-100'}`}>
+                <p className="text-[11px] font-semibold text-slate-800 truncate">{a.patient_name || a.patient}</p>
+                <p className="text-[10px] text-slate-400 truncate mt-0.5">{a.ward_name || '—'} · Bed {a.bed_code || '—'}</p>
+                <div className="mt-1.5">
+                  {!sum ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 font-semibold">No Summary</span>
+                    : sum.is_draft ? <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold">Draft</span>
+                    : <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold">Final</span>}
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ── Form area (right) ── */}
+      {!selectedAdmission ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-3">
+          <FileText size={40} className="opacity-30" />
+          <p className="text-sm font-medium">Select a patient from the left to write their discharge summary</p>
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* Discharge Process Header */}
+          <div className="relative bg-gradient-to-br from-emerald-600 via-emerald-500 to-teal-500 px-5 py-3 text-white shrink-0 overflow-hidden">
+            <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 rounded-full bg-white opacity-10 mix-blend-overlay" />
+            <div className="absolute bottom-0 right-32 -mb-20 w-48 h-48 rounded-full bg-white opacity-10 mix-blend-overlay" />
+            <div className="relative flex items-center justify-between z-10">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-white/20 backdrop-blur-md flex items-center justify-center shadow-inner border border-white/30">
+                  <Activity size={18} className="text-white" />
+                </div>
+                <div>
+                  <h3 className="font-black text-base tracking-tight leading-none drop-shadow-sm flex items-center gap-2 flex-wrap">
+                    Discharge Summary
+                    <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest">IPD: {selectedAdmission.ipd_no || 'N/A'}</span>
+                    <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest">UHID: {selectedAdmission.patient_uhid || 'N/A'}</span>
+                    {currentSummary && (
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest ${currentSummary.is_draft ? 'bg-amber-400/80 text-amber-900' : 'bg-white/30 text-white'}`}>
+                        {currentSummary.is_draft ? 'Draft' : 'Final'}
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-emerald-50 mt-0.5 text-xs font-medium opacity-90">{selectedAdmission.patient_name}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Sidebar nav + scroll area */}
+          <div className="flex flex-1 min-h-0 bg-slate-50">
+            {/* Section nav icons */}
+            <aside className="shrink-0 w-12 flex flex-col items-center gap-1.5 py-3 px-0.5 border-r border-slate-200/80 bg-gradient-to-b from-white via-slate-50/95 to-slate-100/90 overflow-y-auto">
+              <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 mb-0.5 select-none">Jump</span>
+              {dischargeSectionNavItems.map(({ id, Icon, label }, idx) => (
+                <React.Fragment key={id}>
+                  {idx > 0 && <div className="w-px h-1.5 bg-gradient-to-b from-transparent via-slate-300/80 to-transparent" />}
+                  <button type="button" title={label}
+                    onClick={() => { const el = dischargeScrollRootRef.current?.querySelector(`[id="${id}"]`); el?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }}
+                    className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-200 focus:outline-none ${activeDischargeSection === id ? 'bg-emerald-600 text-white shadow-lg scale-110 ring-2 ring-emerald-200 ring-offset-1' : 'bg-white text-slate-500 shadow-sm border border-slate-200/90 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700'}`}>
+                    <Icon size={activeDischargeSection === id ? 17 : 16} />
+                    {activeDischargeSection === id && <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-white/40 animate-pulse" />}
+                  </button>
+                </React.Fragment>
+              ))}
+            </aside>
+
+            {/* Scrollable form */}
+            <div ref={dischargeScrollRootRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4 scroll-smooth scroll-pt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <div>
+                  <h4 className="text-lg font-black text-slate-800 tracking-tight">Clinical Documentation</h4>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">Use sections below; structured meds &amp; labs print as tables.</p>
+                </div>
+                <div className="text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 px-2.5 py-1 rounded-lg">
+                  Ward: {selectedAdmission.ward_name || 'N/A'} | Bed: {selectedAdmission.bed_code || 'N/A'} | Dept: {selectedAdmission.department || '—'}
+                </div>
+              </div>
+
+              {/* Metadata */}
+              <details id="dds-metadata" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Discharge metadata &amp; identifiers</summary>
+                <div className="px-4 sm:px-5 py-4 space-y-4 bg-slate-50/70 border-t border-slate-200">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div><span className={dsLbl}>Discharge type</span>
+                      <select value={summary.discharge_type} onChange={e => setSummary(s => ({ ...s, discharge_type: e.target.value }))} className={dsInp}>
+                        {[['routine','Routine'],['lama','LAMA'],['dama','DAMA'],['referred','Referred'],['transferred','Transferred'],['death','Death'],['absconded','Absconded']].map(([v,l]) => <option key={v} value={v}>{l}</option>)}
+                      </select></div>
+                    <div><span className={dsLbl}>Condition / status</span>
+                      <select value={summary.discharge_status} onChange={e => setSummary(s => ({ ...s, discharge_status: e.target.value }))} className={dsInp}>
+                        {[['cured','Cured'],['improved','Improved'],['unchanged','Unchanged'],['worsened','Worsened'],['deceased','Deceased']].map(([v,l]) => <option key={v} value={v}>{l}</option>)}
+                      </select></div>
+                    <div><span className={dsLbl}>Mode of admission</span>
+                      <select value={summary.mode_of_admission} onChange={e => setSummary(s => ({ ...s, mode_of_admission: e.target.value }))} className={dsInp}>
+                        <option value="emergency">Emergency</option><option value="opd">OPD</option><option value="referral">Referral</option>
+                      </select></div>
+                    <div><span className={dsLbl}>Condition at discharge (text)</span>
+                      <input value={summary.condition_at_discharge} onChange={e => setSummary(s => ({ ...s, condition_at_discharge: e.target.value }))} className={dsInp} placeholder="e.g. Stable, afebrile" /></div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div><span className={dsLbl}>Discharge date</span><input type="date" value={summary.discharge_date || ''} onChange={e => setSummary(s => ({ ...s, discharge_date: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Discharge time</span><input type="time" value={summary.discharge_time || ''} onChange={e => setSummary(s => ({ ...s, discharge_time: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Next follow-up</span><input type="date" value={summary.next_follow_up_date || ''} onChange={e => setSummary(s => ({ ...s, next_follow_up_date: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Stitch removal</span><input type="date" value={summary.stitch_removal_date || ''} onChange={e => setSummary(s => ({ ...s, stitch_removal_date: e.target.value }))} className={dsInp} /></div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div><span className={dsLbl}>Treating consultant</span><input value={summary.treating_consultant} onChange={e => setSummary(s => ({ ...s, treating_consultant: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Consultant reg. no.</span><input value={summary.consultant_registration_no} onChange={e => setSummary(s => ({ ...s, consultant_registration_no: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>RMO / Signatory name</span><input value={summary.rmo_signed_by} onChange={e => setSummary(s => ({ ...s, rmo_signed_by: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Follow-up doctor</span><input value={summary.follow_up_doctor} onChange={e => setSummary(s => ({ ...s, follow_up_doctor: e.target.value }))} className={dsInp} placeholder="Doctor name" /></div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div><span className={dsLbl}>Follow-up department</span><input value={summary.follow_up_department} onChange={e => setSummary(s => ({ ...s, follow_up_department: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Referred to facility</span><input value={summary.referred_to_facility} onChange={e => setSummary(s => ({ ...s, referred_to_facility: e.target.value }))} className={dsInp} /></div>
+                    <div className="sm:col-span-2"><span className={dsLbl}>Referral reason</span><input value={summary.referral_reason} onChange={e => setSummary(s => ({ ...s, referral_reason: e.target.value }))} className={dsInp} /></div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-200">
+                    <div className="sm:col-span-2"><span className={dsLbl}>ABHA ID</span><input value={summary.abha_id} onChange={e => setSummary(s => ({ ...s, abha_id: e.target.value }))} className={dsInp} /></div>
+                    <div className="sm:col-span-2"><span className={dsLbl}>Insurance provider</span><input value={summary.insurance_provider} onChange={e => setSummary(s => ({ ...s, insurance_provider: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>TPA</span><input value={summary.tpa_name} onChange={e => setSummary(s => ({ ...s, tpa_name: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Policy no.</span><input value={summary.policy_number} onChange={e => setSummary(s => ({ ...s, policy_number: e.target.value }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Claim no.</span><input value={summary.claim_number} onChange={e => setSummary(s => ({ ...s, claim_number: e.target.value }))} className={dsInp} /></div>
+                    <div className="flex items-center gap-2.5 pt-5">
+                      <input type="checkbox" id="dds_edu" checked={summary.patient_education_given} onChange={e => setSummary(s => ({ ...s, patient_education_given: e.target.checked }))} className="w-4 h-4 rounded border-slate-300 text-emerald-600 cursor-pointer" />
+                      <label htmlFor="dds_edu" className="text-xs font-semibold text-slate-600 uppercase tracking-wide cursor-pointer select-none">Patient education given</label>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div className="col-span-2"><span className={dsLbl}>Attendant counselled by</span><input value={summary.attendant_counselled_by} onChange={e => setSummary(s => ({ ...s, attendant_counselled_by: e.target.value }))} className={dsInp} /></div>
+                  </div>
+                </div>
+              </details>
+
+              {/* Vitals */}
+              <details id="dds-vitals" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Vitals at discharge</summary>
+                <div className="px-4 sm:px-5 py-4 grid grid-cols-3 sm:grid-cols-6 gap-4 bg-slate-50/70 border-t border-slate-200">
+                  {['bp','pulse','spo2','temp','weight','rbs'].map(k => (
+                    <div key={k}><span className={dsLbl}>{k === 'bp' ? 'BP' : k.toUpperCase()}</span>
+                      <input value={(summary.vitals_at_discharge || {})[k] || ''} onChange={e => setVital(k, e.target.value)} className={dsInp} /></div>
+                  ))}
+                </div>
+              </details>
+
+              {/* Death summary (conditional) */}
+              {summary.discharge_type === 'death' && (
+                <details id="dds-death" open className="scroll-mt-3 bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-red-800 bg-red-100">Death summary</summary>
+                  <div className="px-5 py-5 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-red-50/60 border-t border-red-200">
+                    <div className="sm:col-span-2"><span className={dsLbl}>Cause of death</span><textarea rows={2} value={summary.cause_of_death} onChange={e => setSummary(s => ({ ...s, cause_of_death: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    <div><span className={dsLbl}>Time of death</span><input type="datetime-local" value={summary.time_of_death ? String(summary.time_of_death).slice(0,16) : ''} onChange={e => setSummary(s => ({ ...s, time_of_death: e.target.value ? `${e.target.value}:00` : '' }))} className={dsInp} /></div>
+                    <div><span className={dsLbl}>Notified to</span><input value={summary.notified_to} onChange={e => setSummary(s => ({ ...s, notified_to: e.target.value }))} className={dsInp} /></div>
+                    <label className="flex items-center gap-2 text-sm text-slate-800 pt-5"><input type="checkbox" checked={summary.autopsy_required} onChange={e => setSummary(s => ({ ...s, autopsy_required: e.target.checked }))} /> Autopsy required</label>
+                  </div>
+                </details>
+              )}
+
+              {/* Clinical narrative */}
+              <details id="dds-narrative" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Clinical narrative</summary>
+                <div className="px-5 py-5 space-y-5 bg-slate-50/70 border-t border-slate-200">
+                  <div><span className={dsLbl}>Discharge summary / overview</span><textarea rows={2} value={summary.summary_notes} onChange={e => setSummary(s => ({ ...s, summary_notes: e.target.value }))} className={`${dsInp} min-h-[52px]`} placeholder="Brief overview..." /></div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {[['chief_complaints','Chief complaints'],['reason_for_admission','Reason for admission'],['diagnosis','Diagnosis'],['co_morbidities','Co-morbidities'],['medical_history','Medical history'],['family_history','Family history'],['personal_history','Personal history'],['physical_examination','Physical examination'],['allergies','Allergies'],['treatment_given','Treatment given']].map(([k,l]) => (
+                      <div key={k}><span className={dsLbl}>{l}</span><textarea rows={2} value={summary[k]} onChange={e => setSummary(s => ({ ...s, [k]: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                    ))}
+                  </div>
+                </div>
+              </details>
+
+              {/* Operative */}
+              <details id="dds-operative" className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Operative / procedure</summary>
+                <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
+                  <div><span className={dsLbl}>Surgery date</span><input type="date" value={surgeryDraft.surgery_date || ''} onChange={e => updateSurgeryField('surgery_date', e.target.value)} className={dsInp} /></div>
+                  <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={surgeryDraft.procedure_name} onChange={e => updateSurgeryField('procedure_name', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
+                  <div><span className={dsLbl}>Surgeon</span><input value={surgeryDraft.surgeon_name} onChange={e => updateSurgeryField('surgeon_name', e.target.value)} className={dsInp} /></div>
+                  <div><span className={dsLbl}>Assistant</span><input value={surgeryDraft.assistant_name} onChange={e => updateSurgeryField('assistant_name', e.target.value)} className={dsInp} /></div>
+                  <div><span className={dsLbl}>Anaesthetist</span><input value={surgeryDraft.anaesthetist_name} onChange={e => updateSurgeryField('anaesthetist_name', e.target.value)} className={dsInp} /></div>
+                  <div><span className={dsLbl}>Anaesthesia</span><input value={surgeryDraft.anaesthesia_type} onChange={e => updateSurgeryField('anaesthesia_type', e.target.value)} className={dsInp} /></div>
+                  <div className="md:col-span-2"><span className={dsLbl}>Operative findings</span><textarea rows={2} value={surgeryDraft.operative_findings} onChange={e => updateSurgeryField('operative_findings', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
+                  <div className="md:col-span-2"><span className={dsLbl}>Intra-op complications</span><textarea rows={2} value={surgeryDraft.intra_op_complications} onChange={e => updateSurgeryField('intra_op_complications', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
+                  <div className="md:col-span-2 flex items-center gap-2 pt-1">
+                    <button type="button" onClick={saveSurgeryRow} className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700">{editingSurgeryIndex >= 0 ? 'Update Surgery' : 'Save Surgery'}</button>
+                    {editingSurgeryIndex >= 0 && <button type="button" onClick={resetSurgeryDraft} className="px-3 py-2 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200">Cancel Edit</button>}
+                  </div>
+                  <div className="md:col-span-2">
+                    <span className={dsLbl}>Saved surgeries</span>
+                    <div className="rounded-lg border border-slate-200 overflow-x-auto bg-white">
+                      <table className="w-full text-xs">
+                        <thead><tr className="bg-slate-50 text-left"><th className="p-2">Date</th><th className="p-2">Procedure</th><th className="p-2">Surgeon</th><th className="p-2">Anaesthesia</th><th className="p-2 w-24">Action</th></tr></thead>
+                        <tbody>
+                          {(summary.surgery_rows || []).length === 0
+                            ? <tr><td colSpan={5} className="p-3 text-slate-400">No surgery rows saved yet.</td></tr>
+                            : (summary.surgery_rows || []).map((row, idx) => (
+                              <tr key={idx} className="border-t border-slate-100">
+                                <td className="p-2">{row.surgery_date || '—'}</td>
+                                <td className="p-2">{row.procedure_name || '—'}</td>
+                                <td className="p-2">{row.surgeon_name || '—'}</td>
+                                <td className="p-2">{row.anaesthesia_type || '—'}</td>
+                                <td className="p-2"><div className="flex items-center gap-2"><button type="button" onClick={() => editSurgeryRow(idx)} className="text-blue-600 font-bold">Edit</button><button type="button" onClick={() => removeSurgeryRow(idx)} className="text-red-600 font-bold">Delete</button></div></td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              {/* Investigations */}
+              <details id="dds-investigations" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Investigations (structured)</summary>
+                <div className="px-5 py-5 bg-slate-50/70 border-t border-slate-200 space-y-3">
+                  <div className="overflow-x-auto rounded-lg border border-slate-200">
+                    <table className="w-full text-xs">
+                      <thead><tr className="bg-slate-50 text-left"><th className="px-2.5 py-2">Type</th><th className="px-2.5 py-2">Test</th><th className="px-2.5 py-2">Value</th><th className="px-2.5 py-2">Ref</th><th className="px-2.5 py-2">Date</th><th className="px-2 py-2 w-8" /></tr></thead>
+                      <tbody>
+                        {(summary.investigation_rows || []).map((row, idx) => (
+                          <tr key={idx} className="border-t border-slate-100">
+                            <td className="px-2.5 py-1.5"><select value={row.category || 'lab'} onChange={e => updateInvRow(idx, 'category', e.target.value)} className={dsInp}><option value="lab">Lab</option><option value="imaging">Imaging</option></select></td>
+                            <td className="px-2.5 py-1.5"><input value={row.test_name} onChange={e => updateInvRow(idx, 'test_name', e.target.value)} className={dsInp} placeholder="Test name" /></td>
+                            <td className="px-2.5 py-1.5"><input value={row.value} onChange={e => updateInvRow(idx, 'value', e.target.value)} className={dsInp} /></td>
+                            <td className="px-2.5 py-1.5"><input value={row.reference_range} onChange={e => updateInvRow(idx, 'reference_range', e.target.value)} className={dsInp} /></td>
+                            <td className="px-2.5 py-1.5"><input type="date" value={row.test_date || ''} onChange={e => updateInvRow(idx, 'test_date', e.target.value)} className={dsInp} /></td>
+                            <td className="px-2 py-1.5"><button type="button" onClick={() => removeInvRow(idx)} className="text-red-600 font-bold px-1">×</button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <button type="button" onClick={addInvRow} className="text-xs font-bold text-emerald-700 hover:underline">+ Add investigation row</button>
+                  <div><span className={dsLbl}>Investigations — free text (extra notes)</span><textarea rows={2} value={summary.investigations} onChange={e => setSummary(s => ({ ...s, investigations: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                </div>
+              </details>
+
+              {/* Hospital course */}
+              <details id="dds-course" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Hospital course &amp; complications</summary>
+                <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
+                  <div className="md:col-span-2"><span className={dsLbl}>Course in hospital</span><textarea rows={2} value={summary.course_in_hospital} onChange={e => setSummary(s => ({ ...s, course_in_hospital: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  {[['complications_during_stay','Complications'],['blood_transfusion_details','Blood transfusion'],['implants_used','Implants'],['indwelling_devices_on_discharge','Indwelling devices'],['vaccination_given','Vaccination']].map(([k,l]) => (
+                    <div key={k}><span className={dsLbl}>{l}</span><textarea rows={2} value={summary[k]} onChange={e => setSummary(s => ({ ...s, [k]: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  ))}
+                </div>
+              </details>
+
+              {/* Prescriptions */}
+              <div id="dds-prescriptions" className="scroll-mt-3 space-y-2">
+                <DischargePrescriptionPanel items={dischargeRxItems} onChange={setDischargeRxItems} dosagePatternOptions={DEFAULT_DOSAGE_PATTERNS} timingOptions={DEFAULT_TIMING_OPTIONS} />
+                <details className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-50 hover:bg-slate-100">Extra medication notes (optional)</summary>
+                  <div className="px-5 py-5 bg-slate-50/70 border-t border-slate-200">
+                    <textarea rows={2} value={summary.medications_on_discharge} onChange={e => setSummary(s => ({ ...s, medications_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px] font-mono w-full`} placeholder="Additional instructions not covered above..." />
+                  </div>
+                </details>
+              </div>
+
+              {/* Advice */}
+              <details id="dds-advice" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Advice on discharge</summary>
+                <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
+                  {[['diet_advice','Diet'],['activity_advice','Activity'],['wound_care_instructions','Wound care'],['follow_up_advice','Follow-up advice']].map(([k,l]) => (
+                    <div key={k}><span className={dsLbl}>{l}</span><textarea rows={2} value={summary[k]} onChange={e => setSummary(s => ({ ...s, [k]: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                  ))}
+                  <div className="md:col-span-2"><span className={dsLbl}>Warning signs</span><textarea rows={2} value={summary.warning_signs} onChange={e => setSummary(s => ({ ...s, warning_signs: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
+                </div>
+              </details>
+
+              {/* Footer actions */}
+              <div className="pt-3 mt-1 border-t border-slate-200/60 flex justify-end gap-3">
+                <button type="button" onClick={() => handleSave(true)} disabled={saving}
+                  className="flex items-center gap-2 border border-amber-300 bg-amber-50 text-amber-800 px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-amber-100 disabled:opacity-50 transition-all active:scale-95">
+                  {saving ? <Loader2 size={15} className="animate-spin" /> : null}
+                  Save as Draft
+                </button>
+                <button type="button" onClick={() => handleSave(false)} disabled={saving}
+                  className="flex items-center gap-2 bg-emerald-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-800 disabled:opacity-50 transition-all active:scale-95 focus:ring-4 focus:ring-emerald-300">
+                  {saving ? <Loader2 size={15} className="animate-spin" /> : null}
+                  Save as Final
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── End Discharge Summary Tab ─────────────────────────────────────────────────
+
 export default function DoctorPortal() {
   const [tab, setTab] = useState('opd')
   const [aiMode, setAiMode] = useState(false)
@@ -3259,6 +3754,7 @@ export default function DoctorPortal() {
           {tab === 'opd' && <OPDTab aiMode={aiMode} />}
           {tab === 'tp' && <TreatmentPlansModule TPBuilderComponent={TPBuilder} />}
           {tab === 'analytics' && <DoctorAnalytics />}
+          {tab === 'discharge' && <DischargeSummaryTab />}
         </Layout>
       </div>
     </>

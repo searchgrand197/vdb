@@ -105,6 +105,8 @@ class DischargeSummary(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     total_paid = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
 
+    is_draft = models.BooleanField(default=True)
+
     def __str__(self) -> str:
         return f"Summary for {self.admission.patient.uhid}"
 

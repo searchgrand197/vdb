@@ -9,7 +9,7 @@ import {
 import {
   TrendingUp, TrendingDown, Package, Users, Wallet,
   IndianRupee, RefreshCw, Calendar, ToggleLeft, ToggleRight,
-  AlertCircle,
+  AlertCircle, Search,
 } from 'lucide-react'
 
 const CHART_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444']
@@ -137,8 +137,11 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
   const [gstEnabled, setGstEnabled] = useState(true)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [todayDate, setTodayDate] = useState(() => format(new Date(), 'yyyy-MM-dd'))
+  const [todayDateFrom, setTodayDateFrom] = useState(() => format(new Date(), 'yyyy-MM-dd'))
+  const [todayDateTo, setTodayDateTo] = useState(() => format(new Date(), 'yyyy-MM-dd'))
+  const [salesView, setSalesView] = useState('patients')
   const [refreshing, setRefreshing] = useState(false)
+  const [medSearch, setMedSearch] = useState('')
 
   const fetchDashboard = useCallback(async (showRefreshLoader = false) => {
     if (showRefreshLoader) setRefreshing(true)
@@ -150,7 +153,8 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
       else params.set('gst', '0')
       if (dateFrom) params.set('date_from', dateFrom)
       if (dateTo) params.set('date_to', dateTo)
-      if (todayDate) params.set('today_date', todayDate)
+      if (todayDateFrom) params.set('today_date_from', todayDateFrom)
+      if (todayDateTo) params.set('today_date_to', todayDateTo)
       const res = await api.get(`/pharmacy/dashboard/?${params}`)
       setData(res.data?.data || res.data)
     } catch (err) {
@@ -161,9 +165,11 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [gstEnabled, dateFrom, dateTo, todayDate])
+  }, [gstEnabled, dateFrom, dateTo, todayDateFrom, todayDateTo])
 
   useEffect(() => { fetchDashboard() }, [fetchDashboard])
+
+  useEffect(() => { setSalesView('patients'); setMedSearch('') }, [todayDateFrom, todayDateTo])
 
   const sales = data?.sales || {}
   const purchase = data?.purchase || {}
@@ -308,16 +314,23 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
         </>
       ) : (
         <>
-          {/* Today's sale split + margin */}
+          {/* Date-range sale split + margin */}
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-[11px] font-bold text-slate-700">Today Sales Breakdown</h3>
+              <h3 className="text-[11px] font-bold text-slate-700">Sales Breakdown</h3>
               <div className="flex items-center gap-1.5">
                 <Calendar size={12} className="text-slate-400" />
                 <input
                   type="date"
-                  value={todayDate}
-                  onChange={e => setTodayDate(e.target.value)}
+                  value={todayDateFrom}
+                  onChange={e => setTodayDateFrom(e.target.value)}
+                  className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
+                />
+                <span className="text-[10px] text-slate-400">to</span>
+                <input
+                  type="date"
+                  value={todayDateTo}
+                  onChange={e => setTodayDateTo(e.target.value)}
                   className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
                 />
               </div>
@@ -340,38 +353,147 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
           </div>
 
           <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <h3 className="text-[11px] font-bold text-slate-700 mb-3">Today Bill Details</h3>
-            {!todaySales.details?.length ? (
-              <EmptyState message="No bills found for today" />
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-[11px]">
-                  <thead className="bg-slate-100 text-[10px] uppercase text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2">Invoice</th>
-                      <th className="px-3 py-2">Patient</th>
-                      <th className="px-3 py-2">Method</th>
-                      <th className="px-3 py-2 text-right">Total</th>
-                      <th className="px-3 py-2 text-right">Margin</th>
-                      <th className="px-3 py-2 text-right">Paid</th>
-                      <th className="px-3 py-2 text-right">Due</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {todaySales.details.map((r) => (
-                      <tr key={r.id} className="hover:bg-slate-50">
-                        <td className="px-3 py-2 font-mono text-blue-700">#{r.invoice_no}</td>
-                        <td className="px-3 py-2 text-slate-700">{r.patient_name || '—'}</td>
-                        <td className="px-3 py-2 uppercase font-semibold text-slate-600">{r.payment_method || 'other'}</td>
-                        <td className="px-3 py-2 text-right font-semibold">{rupeeFull(r.grand_total)}</td>
-                        <td className="px-3 py-2 text-right text-emerald-700 font-semibold">{rupeeFull(r.margin)}</td>
-                        <td className="px-3 py-2 text-right">{rupeeFull(r.paid_amount)}</td>
-                        <td className="px-3 py-2 text-right text-amber-700 font-semibold">{rupeeFull(r.due_amount)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div className="flex items-center justify-between mb-3 gap-2">
+              <h3 className="text-[11px] font-bold text-slate-700">
+                {salesView === 'patients' ? 'Bill Details (Selected Range)' : 'Medicine Sales (Selected Range)'}
+              </h3>
+              <div className="flex items-center gap-2">
+                {salesView === 'medicines' && (
+                  <div className="relative w-40 sm:w-48">
+                    <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                    <input
+                      type="text"
+                      placeholder="Search medicine"
+                      value={medSearch}
+                      onChange={e => setMedSearch(e.target.value)}
+                      className="w-full pl-7 pr-2 py-1 text-[10px] border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    />
+                  </div>
+                )}
+                <div className="flex items-center gap-1 p-1 border border-slate-200 rounded-lg bg-slate-50">
+                  <button
+                    type="button"
+                    onClick={() => setSalesView('patients')}
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${
+                      salesView === 'patients' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Patients
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSalesView('medicines')}
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold transition-colors ${
+                      salesView === 'medicines' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Medicines
+                  </button>
+                </div>
               </div>
+            </div>
+
+            {salesView === 'patients' ? (
+              !todaySales.details?.length ? (
+                <EmptyState message="No bills found for selected date range" />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="bg-slate-100 text-[10px] uppercase text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2">Invoice</th>
+                        <th className="px-3 py-2">Patient</th>
+                        <th className="px-3 py-2">Method</th>
+                        <th className="px-3 py-2 text-right">Total</th>
+                        <th className="px-3 py-2 text-right">Margin</th>
+                        <th className="px-3 py-2 text-right">Paid</th>
+                        <th className="px-3 py-2 text-right">Due</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {todaySales.details.map((r) => (
+                        <tr key={r.id} className="hover:bg-slate-50">
+                          <td className="px-3 py-2 font-mono text-blue-700">#{r.invoice_no}</td>
+                          <td className="px-3 py-2 text-slate-700">{r.patient_name || '—'}</td>
+                          <td className="px-3 py-2 uppercase font-semibold text-slate-600">{r.payment_method || 'other'}</td>
+                          <td className="px-3 py-2 text-right font-semibold">{rupeeFull(r.grand_total)}</td>
+                          <td className="px-3 py-2 text-right text-emerald-700 font-semibold">{rupeeFull(r.margin)}</td>
+                          <td className="px-3 py-2 text-right">{rupeeFull(r.paid_amount)}</td>
+                          <td className="px-3 py-2 text-right text-amber-700 font-semibold">{rupeeFull(r.due_amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : (
+              !todaySales.medicine_details?.length ? (
+                <EmptyState message="No medicine sales found for selected date range" />
+              ) : (
+                <div>
+                  <div className="overflow-x-auto">
+                    {(() => {
+                      const allMeds = todaySales.medicine_details
+                      const meds = medSearch.trim()
+                        ? allMeds.filter(m => m.name.toLowerCase().includes(medSearch.trim().toLowerCase()))
+                        : allMeds
+                      const totQty = meds.reduce((s, m) => s + (m.total_qty || 0), 0)
+                      const totRev = meds.reduce((s, m) => s + (m.total_revenue || 0), 0)
+                      const totMar = meds.reduce((s, m) => s + (m.total_margin || 0), 0)
+                      if (!meds.length) {
+                        return <EmptyState message={`No medicines match "${medSearch}"`} />
+                      }
+                      return (
+                        <table className="w-full text-left text-[11px]">
+                          <thead className="bg-slate-100 text-[10px] uppercase text-slate-500">
+                            <tr>
+                              <th className="px-3 py-2">#</th>
+                              <th className="px-3 py-2">Medicine</th>
+                              <th className="px-3 py-2 text-right">Units Sold</th>
+                              <th className="px-3 py-2 text-right">Left Stock</th>
+                              <th className="px-3 py-2 text-right">Unit Price</th>
+                              <th className="px-3 py-2 text-right">Total Revenue</th>
+                              <th className="px-3 py-2 text-right">Margin</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {meds.map((m, idx) => {
+                              const unitPrice = m.total_qty > 0 ? m.total_revenue / m.total_qty : 0
+                              const lowStock = m.left_stock <= 10
+                              return (
+                                <tr key={m.medicine_id} className="hover:bg-slate-50">
+                                  <td className="px-3 py-2 text-slate-400 font-medium">{idx + 1}</td>
+                                  <td className="px-3 py-2 font-semibold text-slate-800">{m.name}</td>
+                                  <td className="px-3 py-2 text-right text-slate-700 font-medium">{Number(m.total_qty).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                                  <td className={`px-3 py-2 text-right font-bold ${lowStock ? 'text-rose-600' : 'text-slate-700'}`}>
+                                    {Number(m.left_stock ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                                    {lowStock && (
+                                      <span className="ml-1 text-[9px] bg-rose-100 text-rose-600 px-1 py-0.5 rounded-full font-bold">Low</span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2 text-right text-slate-600">{rupeeFull(unitPrice)}</td>
+                                  <td className="px-3 py-2 text-right font-semibold">{rupeeFull(m.total_revenue)}</td>
+                                  <td className="px-3 py-2 text-right text-emerald-700 font-semibold">{rupeeFull(m.total_margin)}</td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                          <tfoot className="bg-slate-50 border-t-2 border-slate-300">
+                            <tr>
+                              <td className="px-3 py-2 font-extrabold text-slate-700" colSpan={2}>Total</td>
+                              <td className="px-3 py-2 text-right font-extrabold text-slate-800">{Number(totQty).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                              <td className="px-3 py-2" />
+                              <td className="px-3 py-2" />
+                              <td className="px-3 py-2 text-right font-extrabold text-slate-900">{rupeeFull(totRev)}</td>
+                              <td className="px-3 py-2 text-right font-extrabold text-emerald-700">{rupeeFull(totMar)}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      )
+                    })()}
+                  </div>
+                </div>
+              )
             )}
           </div>
         </>

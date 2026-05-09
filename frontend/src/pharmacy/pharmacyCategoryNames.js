@@ -32,7 +32,15 @@ export function uniqCategories(values) {
 
 /** Same ordering as the Categories tab: API top-level first, then medicine forms, then presets. */
 export function mergeCategoryNames(medicines, customCategories) {
-  const fromMedicines = medicines.map((m) => m.form).filter(Boolean)
+  const subcategoryNames = new Set(
+    customCategories
+      .filter((c) => c.parent)
+      .map((c) => (c.name || '').trim().toLowerCase())
+      .filter(Boolean)
+  )
+  const fromMedicines = medicines
+    .map((m) => m.form)
+    .filter((f) => f && !subcategoryNames.has(f.trim().toLowerCase()))
   const fromApi = customCategories
     .filter((c) => !c.parent)
     .map((c) => c.name)

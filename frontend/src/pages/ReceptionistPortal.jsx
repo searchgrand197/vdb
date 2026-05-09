@@ -2956,12 +2956,25 @@ function IPDSection({ mode, initialAdmissionDraft }) {
     }
   }
 
+  const [summaryMap, setSummaryMap] = useState({}) // admission_id → summary
+
+  async function fetchSummaries() {
+    try {
+      const { data } = await api.get('/summaries/?limit=500')
+      const list = data?.data || data?.results || data || []
+      const map = {}
+      list.forEach((s) => { map[String(s.admission)] = s })
+      setSummaryMap(map)
+    } catch {}
+  }
+
   useEffect(() => {
     fetchAdmissions()
     fetchPatients()
     fetchDoctors()
     fetchDepartments()
     fetchBedPrices()
+    fetchSummaries()
   }, [mode])
 
   useEffect(() => {
@@ -3440,7 +3453,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
           <Search size={16} className="text-gray-400" />
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search patient, bed, ward…"
             className="flex-1 text-sm outline-none" />
-          <button onClick={fetchAdmissions} className="text-gray-400 hover:text-blue-600"><RefreshCw size={14} /></button>
+          <button onClick={() => { fetchAdmissions(); fetchSummaries() }} className="text-gray-400 hover:text-blue-600"><RefreshCw size={14} /></button>
           <span className="text-xs text-gray-400">{filtered.length} patients</span>
         </div>
         {loading ? (
@@ -3460,6 +3473,13 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                     <span className={`shrink-0 text-[10px] px-2 py-0.5 rounded-full font-medium capitalize ${statusColors[a.status] || 'bg-gray-100 text-gray-600'}`}>
                       {a.status}
                     </span>
+                    {summaryMap[String(a.id)] ? (
+                      summaryMap[String(a.id)].is_draft ? (
+                        <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold">📋 Draft Summary</span>
+                      ) : (
+                        <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold">✅ Summary Ready</span>
+                      )
+                    ) : null}
                   </div>
                   <p className="text-xs text-gray-400 truncate">
                     {a.department || 'No Dept'} · {a.ward_name || 'No Ward'} · Bed {a.bed_code || '—'} · Admitted {a.admission_date ? `${format(new Date(a.admission_date), 'd/M/yyyy')} (${format(new Date(a.created_at || Date.now()), 'HH:mm')})` : '—'}
