@@ -11216,7 +11216,7 @@ function ReceptionSettingsSection({ rooms, setRooms, tvGroups, setTvGroups }) {
       <div className="flex-1 min-h-0">
         {tab === 'opd' && <OpdSettingsSection />}
         {tab === 'opd_template' && (
-          <div className="h-full min-h-[72vh] bg-white rounded-2xl border border-gray-100 shadow-sm overflow-auto p-3">
+          <div className="h-full min-h-[72vh] bg-white rounded-2xl border border-gray-100 shadow-sm p-3">
             <OpdGeneratorTab />
           </div>
         )}
