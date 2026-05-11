@@ -45,7 +45,7 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
     search_fields = ("invoice_no", "patient__uhid", "patient__phone")
 
     permission_classes = [permissions.IsAuthenticated, HasRequiredPermission]
-    http_method_names = ["get", "post"]
+    http_method_names = ["get", "post", "patch"]
 
     required_permission_map = {
         "list": "billing.view_invoice",

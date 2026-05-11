@@ -13,7 +13,13 @@ function esc(str) {
     .replace(/"/g, '&quot;')
 }
 
-export function buildPrintHtml(layout, values, withBackground) {
+/**
+ * @param {{ noPrintScript?: boolean }} [opts]
+ *   noPrintScript – omit the inline window.print() call (use when caller
+ *   triggers print from the parent via iframe.contentWindow.print()).
+ */
+export function buildPrintHtml(layout, values, withBackground, opts = {}) {
+  const { noPrintScript = false } = opts
   const printOffsetX = typeof layout.printOffsetX === 'number' ? layout.printOffsetX : 0
   const printOffsetY = typeof layout.printOffsetY === 'number' ? layout.printOffsetY : 0
   const bgSrc        = layout.backgroundDataUrl || null
@@ -68,8 +74,10 @@ export function buildPrintHtml(layout, values, withBackground) {
   const chromeDisplay = showChrome ? 'flex' : 'none'
   const imgDisplay    = showBg    ? 'block' : 'none'
 
-  // Build inline script as array joined with '' to avoid esbuild parsing the closing tag
-  const inlineScript = [
+  // Build inline script as array joined with '' to avoid esbuild parsing the closing tag.
+  // When noPrintScript=true the caller (printHtmlInFrame) drives printing from the parent
+  // via iframe.contentWindow.print(), so we skip the self-print call to avoid a double dialog.
+  const inlineScript = noPrintScript ? '' : [
     '(function () {',
     '  var finalized = false;',
     '  function finalize() {',

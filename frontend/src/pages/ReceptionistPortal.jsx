@@ -64,6 +64,7 @@ import {
   formatGuardianLineForSlip,
   GUARDIAN_RELATIONSHIP_OPTIONS,
 } from '../utils/opdPrintFormat'
+import { buildPrintHtml } from '../components/OpdTemplateEditor/buildPrintHtml'
 
 /** Maps Patient.preferred_salutation from API to salutation dropdown value. */
 function normalizeSalutationChoiceFromApi(raw) {
@@ -310,125 +311,47 @@ function sanitizePersonName(value) {
   return String(value || '').replace(/[0-9]/g, '')
 }
 
-const PRINT_WINDOW_CLOSE_SCRIPT = `<script>
-  (function () {
-    let finalized = false
-    const finalize = () => {
-      if (finalized) return
-      finalized = true
-      try { window.location.replace('about:blank') } catch {}
-      setTimeout(() => {
-        try { window.close() } catch {}
-      }, 50)
-    }
-
-    window.addEventListener('afterprint', finalize, { once: true })
-    window.addEventListener('focus', () => setTimeout(finalize, 200), { once: true })
-    setTimeout(finalize, 120000)
-
-    window.addEventListener('load', () => {
-      setTimeout(() => {
-        try { window.print() } catch { finalize() }
-      }, 0)
-    }, { once: true })
-  })()
-</script>`
-
-function createSameTabPrintWindow(options = {}) {
-  const { onComplete } = options
-  let html = ''
-  return {
-    document: {
-      write(chunk) {
-        html += String(chunk || '')
-      },
-      close() {
-        const iframe = document.createElement('iframe')
-        iframe.setAttribute('aria-hidden', 'true')
-        iframe.style.position = 'fixed'
-        iframe.style.width = '0'
-        iframe.style.height = '0'
-        iframe.style.border = '0'
-        iframe.style.opacity = '0'
-        iframe.style.pointerEvents = 'none'
-        iframe.style.left = '-9999px'
-        iframe.style.bottom = '0'
-        document.body.appendChild(iframe)
-
-        let cleaned = false
-        let completed = false
-        const notifyComplete = () => {
-          if (completed) return
-          completed = true
-          if (typeof onComplete === 'function') {
-            try { onComplete() } catch {}
-          }
-        }
-        const cleanup = () => {
-          if (cleaned) return
-          cleaned = true
-          try { iframe.remove() } catch {}
-          notifyComplete()
-        }
-
-        const onFrameLoad = () => {
-          const cw = iframe.contentWindow
-          if (!cw) {
-            cleanup()
-            return
-          }
-          cw.addEventListener('afterprint', () => setTimeout(cleanup, 100), { once: true })
-          window.addEventListener('focus', () => setTimeout(cleanup, 300), { once: true })
-          setTimeout(cleanup, 120000)
-        }
-
-        iframe.addEventListener('load', onFrameLoad, { once: true })
-
-        const doc = iframe.contentDocument || iframe.contentWindow?.document
-        if (!doc) {
-          cleanup()
-          return
-        }
-        doc.open('text/html')
-        doc.write(html)
-        doc.close()
-      },
-    },
-  }
-}
-
-function printUrlInSameTab(url) {
+/**
+ * Write HTML into a hidden iframe and trigger print via iframe.contentWindow.print().
+ * Calling print() from the PARENT on the iframe's contentWindow is the only reliable
+ * cross-browser way to print iframe content in production builds — browsers block
+ * window.print() called from *inside* a hidden iframe as a security measure.
+ */
+function printHtmlInFrame(html, { onComplete } = {}) {
   const iframe = document.createElement('iframe')
   iframe.setAttribute('aria-hidden', 'true')
-  iframe.style.position = 'fixed'
-  iframe.style.width = '0'
-  iframe.style.height = '0'
-  iframe.style.border = '0'
-  iframe.style.opacity = '0'
-  iframe.style.pointerEvents = 'none'
-  iframe.style.left = '-9999px'
-  iframe.style.bottom = '0'
+  iframe.style.cssText = 'position:fixed;left:-9999px;bottom:0;width:0;height:0;border:0;opacity:0;pointer-events:none;'
   document.body.appendChild(iframe)
 
   let cleaned = false
+  let completed = false
+  const notifyComplete = () => {
+    if (completed) return
+    completed = true
+    if (typeof onComplete === 'function') { try { onComplete() } catch {} }
+  }
   const cleanup = () => {
     if (cleaned) return
     cleaned = true
     try { iframe.remove() } catch {}
+    notifyComplete()
   }
 
   iframe.addEventListener('load', () => {
     const cw = iframe.contentWindow
-    if (!cw) {
-      cleanup()
-      return
-    }
+    if (!cw) { cleanup(); return }
     cw.addEventListener('afterprint', () => setTimeout(cleanup, 100), { once: true })
     window.addEventListener('focus', () => setTimeout(cleanup, 300), { once: true })
     setTimeout(cleanup, 120000)
+    // Drive print from parent — reliable in production builds
+    setTimeout(() => { try { cw.focus(); cw.print() } catch { cleanup() } }, 150)
   }, { once: true })
 
-  iframe.src = url
+  const doc = iframe.contentDocument || iframe.contentWindow?.document
+  if (!doc) { cleanup(); return }
+  doc.open('text/html')
+  doc.write(html)
+  doc.close()
 }
 
 // ─── Sidebar Nav Config ───────────────────────────────────────────────────────
@@ -598,6 +521,7 @@ function FollowUpAlertBanner() {
 function PrintSlip({ visit, onClose }) {
   const [layoutFields, setLayoutFields] = useState([])
   const [fieldValues, setFieldValues] = useState({})
+  const [templateLayout, setTemplateLayout] = useState(null)
   const [loadingTemplate, setLoadingTemplate] = useState(true)
   const displayToken = visit.display_token || `${visit.room?.prefix || ''}${visit.token_number || visit.queue_number || ''}`
   const patientLine = formatPatientLineForSlip(
@@ -618,6 +542,7 @@ function PrintSlip({ visit, onClose }) {
           if (single?.layout?.fields) {
             const fields = Object.keys(single.layout.fields)
             setLayoutFields(fields)
+            setTemplateLayout(single.layout)
             const initValues = {}
             for (const f of fields) {
               const lowerF = f.toLowerCase()
@@ -666,17 +591,16 @@ function PrintSlip({ visit, onClose }) {
   }, [visit, patientLine, guardianLine])
 
   function printBasicSlip() {
-    const w = createSameTabPrintWindow()
     const slipDateTime =
       visit.visit_date
         ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} ${
             visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')
           }`
         : ''
-    w.document.write(`
-      <html><head><title>OPD Slip</title>
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>OPD Slip</title>
       <style>
-        body { font-family: Arial, sans-serif; padding: 20px; max-width: 300px; }
+        @page { size: 80mm auto; margin: 4mm; }
+        body { font-family: Arial, sans-serif; padding: 4px; max-width: 300px; }
         .logo { font-size: 18px; font-weight: bold; color: #1d4ed8; border-bottom: 2px solid #1d4ed8; padding-bottom: 8px; margin-bottom: 12px; }
         .token { font-size: 64px; font-weight: 900; color: #1d4ed8; text-align: center; margin: 10px 0; }
         .row { display: flex; justify-content: space-between; font-size: 12px; margin: 4px 0; }
@@ -696,18 +620,23 @@ function PrintSlip({ visit, onClose }) {
       ${visit.patient_city ? `<div class="row"><span class="label">City</span><span>${visit.patient_city}${visit.patient_state ? ', ' + visit.patient_state : ''}</span></div>` : ''}
       ${visit.amount ? `<div class="row"><span class="label">Amount</span><span>₹${visit.amount}</span></div>` : ''}
       <div class="footer">Please wait for your token to be called<br>Keep this slip safe</div>
-      ${PRINT_WINDOW_CLOSE_SCRIPT}
-      </body></html>
-    `)
-    w.document.close()
+      </body></html>`
+    printHtmlInFrame(html)
     onClose()
   }
 
   function printFullOpdSheet() {
     const opdSettings = getReceptionOpdSettings()
     const withBg = opdSettings.print_with_background === true
-    const params = new URLSearchParams({ ...fieldValues, _bg: withBg ? '1' : '0' }).toString()
-    printUrlInSameTab(`/print-slip?${params}`)
+    if (templateLayout) {
+      const html = buildPrintHtml(templateLayout, fieldValues, withBg, { noPrintScript: true })
+      printHtmlInFrame(html)
+    } else {
+      // Fallback: load via route if layout isn't cached yet
+      const params = new URLSearchParams({ ...fieldValues, _bg: withBg ? '1' : '0' }).toString()
+      const w = window.open(`/print-slip?${params}`, '_blank', 'noopener')
+      if (!w) toast.error('Please allow popups for printing')
+    }
     onClose()
   }
 
@@ -850,6 +779,7 @@ function OPDSection({ rooms }) {
   const submitActionRef = useRef('thermal')
   const [layoutFields, setLayoutFields] = useState([])
   const [templateValues, setTemplateValues] = useState({})
+  const [templateLayout, setTemplateLayout] = useState(null)
   const opdAmountManuallyEditedRef = useRef(false)
   const normalizeId = (value) => {
     if (value == null) return ''
@@ -1019,6 +949,7 @@ function OPDSection({ rooms }) {
           const single = (data.templates || []).find(t => t.key === 'single')
           if (single?.layout?.fields) {
             setLayoutFields(Object.keys(single.layout.fields))
+            setTemplateLayout(single.layout)
           }
         }
       } catch (err) {}
@@ -1454,8 +1385,15 @@ function OPDSection({ rooms }) {
           }
         }
         const withBg = getReceptionOpdSettings().print_with_background === true
-        const params = new URLSearchParams({ ...finalValues, _bg: withBg ? '1' : '0' }).toString()
-        printUrlInSameTab(`/print-slip?${params}`)
+        if (templateLayout) {
+          const html = buildPrintHtml(templateLayout, finalValues, withBg, { noPrintScript: true })
+          printHtmlInFrame(html)
+        } else {
+          // Fallback: open new tab (layout not loaded yet)
+          const params = new URLSearchParams({ ...finalValues, _bg: withBg ? '1' : '0' }).toString()
+          const w = window.open(`/print-slip?${params}`, '_blank', 'noopener')
+          if (!w) toast.error('Please allow popups for printing')
+        }
       } else {
         setPrintVisit({
           ...payload,
@@ -2768,7 +2706,6 @@ function printIpdAdmitSlip({
   diagnosis,
   notes,
 }) {
-  const w = createSameTabPrintWindow()
   const slipProfile = getPaymentSlipProfile()
   const hospitalName = slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
@@ -2784,7 +2721,7 @@ function printIpdAdmitSlip({
   const safe = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const bedAllocationLine = formatIpdBedAllocationLine(wardName, roomName, bedCode)
 
-  w.document.write(`<!DOCTYPE html><html><head>
+  const ipdSlipHtml = `<!DOCTYPE html><html><head>
     <meta charset="utf-8"/>
     <title>IPD Admit Slip — ${safe(ipdNo || 'New')}</title>
     <style>
@@ -2904,9 +2841,8 @@ function printIpdAdmitSlip({
         </div>
       </div>
     </div>
-    ${PRINT_WINDOW_CLOSE_SCRIPT}
-  </body></html>`)
-  w.document.close()
+  </body></html>`
+  printHtmlInFrame(ipdSlipHtml)
 }
 
 // ─── IPD Admissions ───────────────────────────────────────────────────────────
@@ -4341,7 +4277,7 @@ function EmergencySection() {
   }
 
   function printEmergencyReceipt({ invoiceNo, slipNumber, patientName, patientGender, patientUhid, patientPhone, description, amount, paymentMode }) {
-    const w = createSameTabPrintWindow()
+    // html built below, then printed via printHtmlInFrame
     const slipProfile = getPaymentSlipProfile()
     const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
     const address = escapeHtml(slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address)
@@ -4362,7 +4298,7 @@ function EmergencySection() {
     const genderLabel = patientGender === 'female' ? 'Female' : patientGender === 'male' ? 'Male' : patientGender === 'other' ? 'Other' : ''
     const amountFixed = Number(amount || 0).toFixed(2)
 
-    w.document.write(`<!DOCTYPE html><html><head>
+    const emergencyReceiptHtml = `<!DOCTYPE html><html><head>
       <meta charset="utf-8"/>
       <title>Receipt — ${invoiceNo || 'Payment'}</title>
       <style>
@@ -4438,9 +4374,8 @@ function EmergencySection() {
           <div class="paid-box">✓ PAID</div>
         </div>
       </div>
-      ${PRINT_WINDOW_CLOSE_SCRIPT}
-    </body></html>`)
-    w.document.close()
+    </body></html>`
+    printHtmlInFrame(emergencyReceiptHtml)
   }
 
   /** ER registration / triage slip (no payment) — given to patient at triage. */
@@ -4451,7 +4386,6 @@ function EmergencySection() {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
-    const w = createSameTabPrintWindow()
     const slipProfile = getPaymentSlipProfile()
     const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
     const address = escapeHtml(slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address)
@@ -4468,7 +4402,7 @@ function EmergencySection() {
     const contactEsc = esc(c.contact || '—')
     const statusEsc = esc((c.status || 'waiting').replace(/_/g, ' ').toUpperCase())
 
-    w.document.write(`<!DOCTYPE html><html><head>
+    const erCaseSlipHtml = `<!DOCTYPE html><html><head>
       <meta charset="utf-8"/>
       <title>Emergency Slip — ${caseRef}</title>
       <style>
@@ -4525,9 +4459,8 @@ function EmergencySection() {
           <p>Show this slip at billing if any emergency charges apply. This is not a payment receipt.</p>
         </div>
       </div>
-      ${PRINT_WINDOW_CLOSE_SCRIPT}
-    </body></html>`)
-    w.document.close()
+    </body></html>`
+    printHtmlInFrame(erCaseSlipHtml)
   }
 
   async function resolveEmergencyPatient(caseRow) {
@@ -7412,7 +7345,6 @@ function PaymentSlipSection() {
 
   function printInvoice(options = {}) {
     const { onComplete } = options
-    const w = createSameTabPrintWindow({ onComplete })
     const dateTimeStr = format(new Date(), 'd/M/yyyy HH:mm:ss')
     const patientName = [invoice.patient.first_name, invoice.patient.last_name].filter(Boolean).join(' ').toUpperCase() || 'PATIENT'
     const gender = invoice.patient.gender ? (invoice.patient.gender === 'male' ? 'Male' : invoice.patient.gender === 'female' ? 'Female' : 'Other') : ''
@@ -7448,7 +7380,7 @@ function PaymentSlipSection() {
       </tr>`
     ).join('')
 
-    w.document.write(`<!DOCTYPE html><html><head>
+    const invoiceHtml = `<!DOCTYPE html><html><head>
     <meta charset="utf-8"/>
     <title>Receipt — ${invoice.invoice_no}</title>
     <style>
@@ -7657,9 +7589,8 @@ function PaymentSlipSection() {
       </div>
 
     </div>
-    ${PRINT_WINDOW_CLOSE_SCRIPT}
-    </body></html>`)
-    w.document.close()
+    </body></html>`
+    printHtmlInFrame(invoiceHtml, { onComplete })
   }
 
   useEffect(() => {
@@ -9517,7 +9448,6 @@ function PaymentSlipsListSection() {
 
   function printPaymentSlip(payment) {
     if (!payment) return
-    const w = createSameTabPrintWindow()
     const dateTimeStr = payment.paid_at ? format(new Date(payment.paid_at), 'd/M/yyyy HH:mm:ss') : format(new Date(), 'd/M/yyyy HH:mm:ss')
     const patientName = (payment.patient_name || 'PATIENT').toUpperCase()
     const isCreditDue = payment.status === 'pending' && /credit/i.test(String(payment.transaction_reference || ''))
@@ -9567,7 +9497,7 @@ function PaymentSlipsListSection() {
     const discountFixed = Number(invoiceDetails?.discount_amount ?? 0).toFixed(2)
     const totalFixed = Number(invoiceDetails?.total_amount ?? payment.amount ?? 0).toFixed(2)
 
-    w.document.write(`<!DOCTYPE html><html><head>
+    const paymentSlipHtml = `<!DOCTYPE html><html><head>
       <meta charset="utf-8"/>
       <title>Receipt — ${payment.slip_number || payment.invoice_no || payment.receipt_no || 'Payment'}</title>
       <style>
@@ -9742,9 +9672,8 @@ function PaymentSlipsListSection() {
           <div class="paid-box">✓ PAID</div>
         </div>
       </div>
-      ${PRINT_WINDOW_CLOSE_SCRIPT}
-    </body></html>`)
-    w.document.close()
+    </body></html>`
+    printHtmlInFrame(paymentSlipHtml)
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
