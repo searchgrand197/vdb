@@ -867,8 +867,8 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
             amount = Decimal(str(amount_str))
         except:
             return Response({"error": "Invalid amount format"}, status=status.HTTP_400_BAD_REQUEST)
-        if amount <= 0:
-            return Response({"error": "Amount must be greater than 0"}, status=status.HTTP_400_BAD_REQUEST)
+        if amount == 0:
+            return Response({"error": "Amount must not be zero"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             quantity = Decimal(str(quantity_str if quantity_str is not None else "1"))
@@ -898,7 +898,12 @@ class IPDAdmissionViewSet(viewsets.ModelViewSet):
 
         # 2. Create Invoice
         payment_mode = request.data.get("payment_mode", "credit")
-        amount_paid = amount if payment_mode in ["cash", "upi", "other"] else Decimal("0.00")
+        if amount < 0:
+            # Discounts are negative charge lines and never count as collected payment.
+            payment_mode = "credit"
+            amount_paid = Decimal("0.00")
+        else:
+            amount_paid = amount if payment_mode in ["cash", "upi", "other"] else Decimal("0.00")
 
         invoice = BillingInvoice.objects.create(
             hospital_id=hospital_id,
