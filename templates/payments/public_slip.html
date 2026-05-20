@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Payment Slip — {{ slip_number }}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #f1f5f9; color: #111; padding: 16px; }
+    .toolbar { max-width: 720px; margin: 0 auto 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn { border: none; border-radius: 8px; padding: 10px 16px; font-size: 14px; font-weight: 700; cursor: pointer; background: #1a6b3f; color: #fff; }
+    .btn.secondary { background: #334155; }
+    .slip { max-width: 720px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+    .top { display: flex; justify-content: space-between; gap: 16px; border-bottom: 2px solid #111; padding-bottom: 12px; margin-bottom: 12px; }
+    .hosp-name { font-size: 22px; font-weight: 900; color: #1a6b3f; }
+    .meta { font-size: 11px; line-height: 1.5; color: #444; text-align: right; }
+    .title { text-align: center; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; border-bottom: 1px solid #111; padding-bottom: 8px; margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 12px; margin-bottom: 12px; }
+    .label { color: #666; font-size: 10px; }
+    .val { font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    thead tr { background: #1a6b3f; color: #fff; }
+    th, td { padding: 6px 8px; border: 1px solid #ddd; }
+    td.r, th.r { text-align: right; }
+    .totals { margin-top: 12px; font-size: 13px; }
+    .totals .row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .totals .grand { font-size: 16px; font-weight: 900; color: #1a6b3f; border-top: 2px solid #111; margin-top: 6px; padding-top: 6px; }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .toolbar { display: none !important; }
+      .slip { box-shadow: none; border-radius: 0; max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="btn" type="button" onclick="window.print()">Print</button>
+    <button class="btn secondary" type="button" onclick="window.print()">Download / Save as PDF</button>
+  </div>
+  <div class="slip">
+    <div class="top">
+      <div>
+        <div class="hosp-name">{{ hospital_name }}</div>
+        <div style="font-size:10px;color:#555;margin-top:4px;">Payment Receipt</div>
+      </div>
+      <div class="meta">
+        {% if address %}{{ address }}<br/>{% endif %}
+        {% if pin_code %}Pin: {{ pin_code }}<br/>{% endif %}
+        {% if phone %}Phone: {{ phone }}<br/>{% endif %}
+        {% if email %}{{ email }}<br/>{% endif %}
+        {% if website %}{{ website }}{% endif %}
+      </div>
+    </div>
+    <div class="title">Payment Slip</div>
+    <div class="grid">
+      <div><div class="label">Slip No.</div><div class="val">{{ slip_number }}</div></div>
+      <div><div class="label">Invoice No.</div><div class="val">{{ invoice_no }}</div></div>
+      <div><div class="label">Patient</div><div class="val">{{ patient_name }}</div></div>
+      <div><div class="label">UHID</div><div class="val">{{ patient_uhid }}</div></div>
+      {% if patient_phone %}
+      <div><div class="label">Mobile</div><div class="val">{{ patient_phone }}</div></div>
+      {% endif %}
+      <div><div class="label">Date</div><div class="val">{{ paid_at|date:"d/m/Y H:i" }}</div></div>
+      <div><div class="label">Payment Mode</div><div class="val">{{ payment_mode }}</div></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>#</th><th>Description</th><th class="r">Amount (₹)</th></tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td>{{ forloop.counter }}</td>
+          <td>{{ item.description }}</td>
+          <td class="r">{{ item.line_total }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3">No line items</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="totals">
+      <div class="row"><span>Subtotal</span><span>₹{{ subtotal }}</span></div>
+      {% if discount != "0.00" %}
+      <div class="row"><span>Discount</span><span>₹{{ discount }}</span></div>
+      {% endif %}
+      <div class="row grand"><span>Total Paid</span><span>₹{{ amount }}</span></div>
+    </div>
+    {% if transaction_reference %}
+    <p style="margin-top:10px;font-size:11px;color:#555;">Ref: {{ transaction_reference }}</p>
+    {% endif %}
+  </div>
+</body>
+</html>

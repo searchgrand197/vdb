@@ -20,7 +20,14 @@ function SettingsPanelInner({ onSaved }) {
     default_sale_discount_percent: '0',
     b2b_enabled: false,
     low_stock_threshold: '10',
+    bank_name: '',
+    bank_branch: '',
+    bank_account_no: '',
+    bank_ifsc: '',
+    invoice_terms: '',
+    signature_url: '',
   })
+  const [signatureFile, setSignatureFile] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -39,7 +46,7 @@ function SettingsPanelInner({ onSaved }) {
             dl_number: d.dl_number || '',
             email: d.email || '',
             website: d.website || '',
-            invoice_prefix: String(d.invoice_prefix || 'INV').toUpperCase(),
+            invoice_prefix: String(d.invoice_prefix || 'INV'),
             invoice_next_number:
               d.invoice_next_number != null && d.invoice_next_number !== ''
                 ? String(d.invoice_next_number)
@@ -55,6 +62,12 @@ function SettingsPanelInner({ onSaved }) {
             b2b_enabled: !!d.b2b_enabled,
             low_stock_threshold:
               d.low_stock_threshold != null ? String(d.low_stock_threshold) : '10',
+            bank_name: d.bank_name || '',
+            bank_branch: d.bank_branch || '',
+            bank_account_no: d.bank_account_no || '',
+            bank_ifsc: d.bank_ifsc || '',
+            invoice_terms: d.invoice_terms || '',
+            signature_url: d.signature_url || '',
           }))
       })
       .catch(() => {
@@ -73,10 +86,21 @@ function SettingsPanelInner({ onSaved }) {
     try {
       const payload = {
         ...form,
-        invoice_prefix: String(form.invoice_prefix || 'INV').trim().toUpperCase() || 'INV',
+        invoice_prefix: String(form.invoice_prefix || 'INV').trim() || 'INV',
         invoice_next_number: Math.max(1, Number(form.invoice_next_number || 1) || 1),
       }
-      await api.patch('/pharmacy/settings/', payload)
+      delete payload.signature_url
+      if (signatureFile) {
+        const fd = new FormData()
+        Object.entries(payload).forEach(([k, v]) => fd.append(k, v == null ? '' : String(v)))
+        fd.append('signature', signatureFile)
+        await api.patch('/pharmacy/settings/', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+      } else {
+        await api.patch('/pharmacy/settings/', payload)
+      }
+      setSignatureFile(null)
       toast.success('Settings saved')
       setForm((prev) => ({
         ...prev,
@@ -140,7 +164,7 @@ function SettingsPanelInner({ onSaved }) {
           <span className="text-[10px] font-semibold text-slate-500 uppercase">Invoice Prefix</span>
           <input
             value={form.invoice_prefix}
-            onChange={(e) => setForm({ ...form, invoice_prefix: e.target.value.toUpperCase() })}
+            onChange={(e) => setForm({ ...form, invoice_prefix: e.target.value })}
             className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
             maxLength={20}
             placeholder="INV"
@@ -160,7 +184,7 @@ function SettingsPanelInner({ onSaved }) {
         </label>
       </div>
       <p className="mt-1 text-[10px] text-slate-500">
-        Example: {`${(form.invoice_prefix || 'INV').toUpperCase()}-${new Date().getFullYear()}-${String(Math.max(1, Number(form.invoice_next_number || 1) || 1)).padStart(3, '0')}`}
+        Example: {`${form.invoice_prefix || 'INV'}${Math.max(1, Number(form.invoice_next_number || 1) || 1)}`}
       </p>
       <div className="mt-4">
         <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -175,6 +199,46 @@ function SettingsPanelInner({ onSaved }) {
         <p className="mt-0.5 text-[10px] text-slate-500 ml-6">
           When enabled, the Sales tab will show a party picker instead of a patient search, allowing you to sell to business customers.
         </p>
+      </div>
+      <div className="mt-6 max-w-xl space-y-2 border-t border-slate-200 pt-4">
+        <h3 className="text-xs font-bold text-slate-700">Bank details (invoice footer)</h3>
+        {[
+          ['bank_name', 'Bank name'],
+          ['bank_branch', 'Branch name'],
+          ['bank_account_no', 'Account number'],
+          ['bank_ifsc', 'IFSC code'],
+        ].map(([key, label]) => (
+          <label key={key} className="block">
+            <span className="text-[10px] font-semibold text-slate-500 uppercase">{label}</span>
+            <input
+              value={form[key]}
+              onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+              className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+            />
+          </label>
+        ))}
+        <label className="block">
+          <span className="text-[10px] font-semibold text-slate-500 uppercase">Terms &amp; conditions (one line per row)</span>
+          <textarea
+            value={form.invoice_terms}
+            onChange={(e) => setForm({ ...form, invoice_terms: e.target.value })}
+            rows={4}
+            placeholder="Leave blank for default terms on the bill"
+            className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+          />
+        </label>
+        <label className="block">
+          <span className="text-[10px] font-semibold text-slate-500 uppercase">Authorised signature image</span>
+          {form.signature_url ? (
+            <img src={form.signature_url} alt="Signature" className="mt-1 max-h-16 object-contain border border-slate-200 rounded" />
+          ) : null}
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => setSignatureFile(e.target.files?.[0] || null)}
+            className="mt-1 w-full text-xs"
+          />
+        </label>
       </div>
       <div className="mt-4 max-w-xs">
         <label className="block">

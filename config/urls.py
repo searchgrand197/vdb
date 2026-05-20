@@ -23,6 +23,7 @@ from django.views.static import serve as static_serve
 from drf_spectacular.views import SpectacularAPIView
 
 from apps.attendance.leave_action_view import LeaveActionView
+from apps.payments.public_slip_view import PaymentSlipPublicView, PaymentSlipShortView
 from config.views import ApiConsoleView, FieldPermissionMatrixPageView, frontend_index
 
 urlpatterns = [
@@ -45,6 +46,9 @@ urlpatterns = [
     ),
     # One-click leave approve/deny from email — no login required
     path("leave/action/<str:token>/", LeaveActionView.as_view(), name="leave-action"),
+    # Public payment slip (SMS short link) — view / print / save as PDF
+    path("p/<str:code>/", PaymentSlipShortView.as_view(), name="payment-slip-short"),
+    path("payment-slip/<str:token>/", PaymentSlipPublicView.as_view(), name="payment-slip-public"),
     # OpenAPI schema + branded Swagger UI (HTML/CSS in templates/api_console.html)
     path("api/schema/", SpectacularAPIView.as_view(), name="api-schema"),
     path("api/v1/schema/", SpectacularAPIView.as_view(), name="api-schema-v1"),
@@ -80,7 +84,7 @@ urlpatterns = [
     path("", include("apps.opd_templates.urls")),
     # SPA fallback: direct browser refresh/open for frontend routes should load index.html
     re_path(
-        r"^(?!api/|media/|static/|leave/|ui/|django-admin/|template/|icons/|sw\.js|manifest\.json|manifest-doctor\.json|manifest-staff\.json|manifest-pharmacy\.json|manifest-receptionist\.json|offline\.html).*$",
+        r"^(?!api/|media/|static/|leave/|p/|payment-slip/|ui/|django-admin/|template/|icons/|sw\.js|manifest\.json|manifest-doctor\.json|manifest-staff\.json|manifest-pharmacy\.json|manifest-receptionist\.json|offline\.html).*$",
         frontend_index,
         name="frontend-spa-fallback",
     ),

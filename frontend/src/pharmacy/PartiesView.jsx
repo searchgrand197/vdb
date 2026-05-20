@@ -6,7 +6,7 @@ import toast from 'react-hot-toast'
 import { parseApiError } from './pharmacyCalculations'
 import { useDebouncedValue } from './useDebouncedValue'
 
-const EMPTY_FORM = { name: '', phone: '', address: '', gst_number: '' }
+const EMPTY_FORM = { name: '', phone: '', address: '', gst_number: '', dl_number: '' }
 
 function normalizeList(res) {
   const d = res?.data
@@ -67,6 +67,7 @@ export default function PartiesView() {
       phone: party.phone || '',
       address: party.address || '',
       gst_number: party.gst_number || '',
+      dl_number: party.dl_number || '',
     })
     setModalOpen(true)
   }
@@ -84,6 +85,7 @@ export default function PartiesView() {
           phone: form.phone.trim(),
           address: form.address.trim(),
           gst_number: form.gst_number.trim(),
+          dl_number: form.dl_number.trim(),
         })
         const updated = normalizeEntity(data)
         setParties((prev) => prev.map((p) => (p.id === editingId ? { ...p, ...updated } : p)))
@@ -94,6 +96,7 @@ export default function PartiesView() {
           phone: form.phone.trim(),
           address: form.address.trim(),
           gst_number: form.gst_number.trim(),
+          dl_number: form.dl_number.trim(),
         })
         const created = normalizeEntity(data)
         if (created?.id) setParties((prev) => [created, ...prev])
@@ -162,6 +165,7 @@ export default function PartiesView() {
                   <th className="px-3 py-2 text-left">Name</th>
                   <th className="px-3 py-2 text-left">Phone</th>
                   <th className="px-3 py-2 text-left">GST</th>
+                  <th className="px-3 py-2 text-left">D.L. No.</th>
                   <th className="px-3 py-2 text-left">Address</th>
                   <th className="px-3 py-2 text-right">Actions</th>
                 </tr>
@@ -172,6 +176,7 @@ export default function PartiesView() {
                     <td className="px-3 py-2 font-medium text-slate-900">{p.name}</td>
                     <td className="px-3 py-2 text-slate-600">{p.phone || '—'}</td>
                     <td className="px-3 py-2 text-slate-600 font-mono">{p.gst_number || '—'}</td>
+                    <td className="px-3 py-2 text-slate-600 font-mono">{p.dl_number || '—'}</td>
                     <td className="px-3 py-2 text-slate-500 max-w-[12rem] truncate" title={p.address}>{p.address || '—'}</td>
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-1.5">
@@ -253,6 +258,14 @@ export default function PartiesView() {
                   <input
                     value={form.gst_number}
                     onChange={(e) => setForm((f) => ({ ...f, gst_number: e.target.value }))}
+                    className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[9px] font-semibold text-slate-500 uppercase">D.L. Number</span>
+                  <input
+                    value={form.dl_number}
+                    onChange={(e) => setForm((f) => ({ ...f, dl_number: e.target.value }))}
                     className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
                   />
                 </label>

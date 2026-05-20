@@ -3,11 +3,77 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.opd.models import OPDVisit, OPDVisitStatusHistory
+from unittest.mock import patch
+
+from apps.opd.sms_utils import format_phone_e164, resolve_patient_sms_phone
 from apps.patients.models import Patient
 from apps.shared.models import Hospital
 
 
 User = get_user_model()
+
+
+class OPDPhoneFormatTests(TestCase):
+    def test_adds_india_country_code_for_ten_digit_number(self):
+        self.assertEqual(format_phone_e164("8814067670"), "+918814067670")
+
+    def test_keeps_existing_plus_prefix(self):
+        self.assertEqual(format_phone_e164("+918814067670"), "+918814067670")
+
+    def test_adds_plus_for_ninety_one_prefix_without_plus(self):
+        self.assertEqual(format_phone_e164("918814067670"), "+918814067670")
+
+    def test_returns_none_for_empty_phone(self):
+        self.assertIsNone(format_phone_e164(""))
+        self.assertIsNone(format_phone_e164(None))
+
+
+class OPDSmsSignalTests(TestCase):
+    def setUp(self):
+        self.hospital = Hospital.objects.create(name="SMS Hospital", slug="sms-hospital")
+        self.user = User.objects.create_user(
+            email="sms@test.com",
+            password="x",
+            hospital=self.hospital,
+            is_active=True,
+        )
+        self.patient = Patient.objects.create(
+            hospital=self.hospital,
+            uhid="UHID-SMS-1",
+            first_name="Ravi",
+            last_name="Kumar",
+            gender="male",
+            phone="8295110043",
+            status="active",
+        )
+
+    @patch("apps.opd.sms_utils.send_opd_scheduled_sms")
+    @patch("apps.opd.signals.transaction.on_commit")
+    def test_post_save_signal_sends_sms_on_create(self, mock_on_commit, mock_send):
+        mock_on_commit.side_effect = lambda callback: callback()
+        visit = OPDVisit.objects.create(
+            hospital=self.hospital,
+            patient=self.patient,
+            visit_date="2026-05-17",
+            queue_number=1,
+            doctor_user=self.user,
+            created_by=self.user,
+            status=OPDVisit.Status.WAITING,
+        )
+        mock_send.assert_called_once_with(visit.pk)
+
+    def test_guardian_phone_used_when_patient_phone_empty(self):
+        from apps.patients.models import PatientGuardian
+
+        self.patient.phone = ""
+        self.patient.save(update_fields=["phone"])
+        PatientGuardian.objects.create(
+            patient=self.patient,
+            name="Guardian",
+            phone="8814067670",
+        )
+        self.patient.refresh_from_db()
+        self.assertEqual(resolve_patient_sms_phone(self.patient), "+918814067670")
 
 
 class OPDSkippedStatusTests(TestCase):

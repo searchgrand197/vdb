@@ -127,17 +127,26 @@ export default function PharmacyPortal() {
   const [purchaseSubView, setPurchaseSubView] = useState('entry')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 1200)
 
+  const mergeCreatedMedicine = useCallback((med) => {
+    if (!med?.id) return
+    const key = normalizeMedicineId(med.id)
+    setMedicines((prev) => {
+      if (prev.some((m) => normalizeMedicineId(m.id) === key)) return prev
+      return [...prev, med]
+    })
+  }, [])
+
   const fetchInitialData = useCallback(async () => {
     setLoading(true)
     try {
-      const [mResp, bResp, iResp, sResp] = await Promise.all([
-        api.get('/medicines/?limit=1000'),
-        api.get('/batches/?limit=1000'),
+      const [medRows, batchRows, iResp, sResp] = await Promise.all([
+        fetchAllPaginated('/medicines/'),
+        fetchAllPaginated('/batches/'),
         api.get('/pharmacy/invoices/?limit=100'),
         api.get('/pharmacy/settings/').catch(() => ({ data: null })),
       ])
-      setMedicines(mResp.data?.data || mResp.data?.results || [])
-      setBatches(bResp.data?.data || bResp.data?.results || [])
+      setMedicines(medRows)
+      setBatches(batchRows)
       setInvoices(iResp.data?.data || iResp.data?.results || [])
       const rawS = sResp.data
       const sd =
@@ -353,6 +362,7 @@ export default function PharmacyPortal() {
         <AddMedicineModal
           onClose={() => setShowAddMedicine(false)}
           onRefresh={fetchInitialData}
+          onMedicineCreated={mergeCreatedMedicine}
           defaultGstPercent={outletSettings?.default_gst_percent}
           defaultSaleDiscountPercent={outletSettings?.default_sale_discount_percent}
         />
@@ -373,6 +383,86 @@ export default function PharmacyPortal() {
 }
 
 const INV_ALLOW_NEG_KEY = 'pharmacy_inventory_allow_negative_stock'
+/** Matches API LargeLimitOffsetPagination.max_limit (inventory lists). */
+const INVENTORY_LIST_PAGE_SIZE = 2000
+
+function normalizeMedicineId(id) {
+  const raw = String(id ?? '').trim().toLowerCase()
+  if (!raw) return ''
+  const hex = raw.replace(/-/g, '')
+  if (hex.length === 32) {
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  }
+  return raw
+}
+
+function extractListPageRows(res) {
+  const body = res?.data
+  if (!body) return []
+  if (Array.isArray(body)) return body
+  if (Array.isArray(body.data)) return body.data
+  if (Array.isArray(body.results)) return body.results
+  if (body.data && Array.isArray(body.data.results)) return body.data.results
+  if (body.entity && Array.isArray(body.entity)) return body.entity
+  if (body.entity && Array.isArray(body.entity.results)) return body.entity.results
+  return []
+}
+
+async function fetchAllPaginated(path) {
+  const all = []
+  let offset = 0
+  for (;;) {
+    const res = await api.get(`${path}?limit=${INVENTORY_LIST_PAGE_SIZE}&offset=${offset}`)
+    const rows = extractListPageRows(res)
+    if (!rows.length) break
+    all.push(...rows)
+    if (rows.length < INVENTORY_LIST_PAGE_SIZE) break
+    offset += INVENTORY_LIST_PAGE_SIZE
+    if (offset > 100_000) break
+  }
+  return all
+}
+
+function buildMedicineByIdMap(medicines) {
+  const map = new Map()
+  for (const m of medicines) {
+    if (!m?.id) continue
+    map.set(normalizeMedicineId(m.id), m)
+  }
+  return map
+}
+
+function batchMedicineId(batch) {
+  const m = batch?.medicine
+  if (m == null || m === '') return ''
+  if (typeof m === 'object') return normalizeMedicineId(m.id)
+  return normalizeMedicineId(m)
+}
+
+function productNameForBatch(batch, medicineById) {
+  const fromBatch = String(batch?.medicine_name ?? '').trim()
+  if (fromBatch) return fromBatch
+  const id = batchMedicineId(batch)
+  const mapped = id ? medicineById.get(id) : null
+  const fromMap = String(mapped?.name ?? '').trim()
+  return fromMap || '—'
+}
+
+function medicineForBatch(batch, medicineById) {
+  const id = batchMedicineId(batch)
+  const mapped = id ? medicineById.get(id) : null
+  if (mapped) return mapped
+  const name = productNameForBatch(batch, medicineById)
+  if (name === '—' && !id) return null
+  return {
+    id: id || undefined,
+    name: name === '—' ? '' : name,
+    pack_info: '',
+    unit_name: 'unit',
+    form: '',
+    unit_conversions: {},
+  }
+}
 
 function expiryRowClass(expiryDate) {
   if (!expiryDate) return 'text-slate-500'
@@ -532,13 +622,12 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
   }, [invTab])
 
   const qLower = q.toLowerCase()
-  const medicineById = new Map(medicines.map((m) => [String(m.id), m]))
-  const medIdsWithBatch = new Set(batches.map((b) => String(b.medicine)))
+  const medicineById = buildMedicineByIdMap(medicines)
+  const medIdsWithBatch = new Set(batches.map((b) => batchMedicineId(b)).filter(Boolean))
 
   const filtered = batches
     .filter((b) => {
-      const med = medicineById.get(String(b.medicine))
-      const name = med?.name?.toLowerCase() ?? ''
+      const name = productNameForBatch(b, medicineById).toLowerCase()
       const bn = (b.batch_no ?? '').toLowerCase()
       return name.includes(qLower) || bn.includes(qLower)
     })
@@ -562,7 +651,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
   const totalRows = filtered.length + medicinesWithoutBatch.length
 
   async function handleDeleteBatch(batch, med) {
-    const medName = med?.name || 'this item'
+    const medName = med?.name || productNameForBatch(batch, medicineById) || 'this item'
     const ok = window.confirm(
       `Delete inventory batch ${batch.batch_no || ''} for ${medName}?\n\nThis removes the batch record from inventory.`,
     )
@@ -712,7 +801,8 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((b) => {
-                const med = medicineById.get(String(b.medicine))
+                const med = medicineForBatch(b, medicineById)
+                const productName = productNameForBatch(b, medicineById)
                 const { baseLabel, packLabel, perPack } = inventoryQtyLabels(med, medicineCategoryRows)
                 const qty = Number(b.quantity ?? 0)
                 const stockLabel = formatPackAndBaseStock(qty, perPack, packLabel, baseLabel)
@@ -724,8 +814,8 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
                     className={`hover:bg-slate-50 ${low ? 'bg-amber-50/50' : ''} ${qty < 0 ? 'bg-rose-50/70' : ''}`}
                   >
                     <td className="px-2 py-1 align-top min-w-0">
-                      <div className="font-semibold text-slate-900 truncate" title={med?.name}>
-                        {med?.name ?? '—'}
+                      <div className="font-semibold text-slate-900 truncate" title={productName}>
+                        {productName}
                       </div>
                       <div className="text-[10px] text-slate-400 truncate">{med?.pack_info}</div>
                     </td>
@@ -913,7 +1003,7 @@ function InventoryBatchDetailModal({ batch, medicine, medicineCategoryRows = [],
         <div className="p-3 overflow-y-auto text-[10px] space-y-2">
           <dl className="grid grid-cols-2 gap-x-2 gap-y-1">
             <dt className="text-slate-500">Medicine</dt>
-            <dd className="font-semibold text-slate-900">{medicine?.name ?? '—'}</dd>
+            <dd className="font-semibold text-slate-900">{medicine?.name ?? batch?.medicine_name ?? '—'}</dd>
             <dt className="text-slate-500">Batch</dt>
             <dd className="font-mono">{batch.batch_no}</dd>
             <dt className="text-slate-500">Expiry</dt>
@@ -2338,7 +2428,7 @@ function saveHsnHistory(code) {
   localStorage.setItem(HSN_HISTORY_KEY, JSON.stringify([trimmed, ...prev].slice(0, 20)))
 }
 
-function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDiscountPercent }) {
+function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPercent, defaultSaleDiscountPercent }) {
   const fallbackGstStr = resolveNewMedicineDefaultGst(defaultGstPercent)
   const fallbackDiscountStr = resolveNewMedicineDefaultDiscount(defaultSaleDiscountPercent)
   const [data, setData] = useState({
@@ -2731,6 +2821,14 @@ function AddMedicineModal({ onClose, onRefresh, defaultGstPercent, defaultSaleDi
       })
       const createdMedicine = medRes?.data?.data || medRes?.data?.entity || medRes?.data
       let createdMedicineId = createdMedicine?.id
+      if (createdMedicineId) {
+        onMedicineCreated?.({
+          ...(createdMedicine && typeof createdMedicine === 'object' ? createdMedicine : {}),
+          id: createdMedicineId,
+          name: String(createdMedicine?.name || data.name || '').trim(),
+          pack_info: createdMedicine?.pack_info || `1x${unitsPerPack}`,
+        })
+      }
       if (!createdMedicineId) {
         const lookupRes = await api.get(`/medicines/?search=${encodeURIComponent(createdSku)}&limit=5`)
         const lookupRows = lookupRes?.data?.data || lookupRes?.data?.results || []

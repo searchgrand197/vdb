@@ -10,8 +10,28 @@ from django.db import transaction
 from apps.pharmacy.models import PharmacyInvoice, PharmacyOutletSettings
 
 
+def _invoice_seq_from_number(inv_no: str, prefix: str, legacy_prefix_upper: str) -> int | None:
+    """Extract trailing sequence from invoice_no (new or legacy year-in-middle format)."""
+    s = str(inv_no or "").strip()
+    if not s:
+        return None
+    new_re = re.compile(rf"^{re.escape(prefix)}(\d+)$", re.IGNORECASE)
+    m = new_re.match(s)
+    if m:
+        return int(m.group(1))
+    legacy_re = re.compile(rf"^{re.escape(legacy_prefix_upper)}-(\d{{4}})-(\d+)$", re.IGNORECASE)
+    m = legacy_re.match(s)
+    if m:
+        return int(m.group(2))
+    return None
+
+
 def next_pharmacy_invoice_number(pharmacy_id, year: int | None = None, reserve: bool = False) -> str:
-    y = year or datetime.now().year
+    """
+    Build invoice number as prefix + sequence (e.g. A/111, b-333).
+    Legacy invoices INV-2026-42 still count toward the sequence for the same prefix token.
+    """
+    _ = year or datetime.now().year  # kept for API compatibility; no longer embedded in number
     with transaction.atomic():
         settings_qs = PharmacyOutletSettings.objects
         if reserve:
@@ -20,19 +40,16 @@ def next_pharmacy_invoice_number(pharmacy_id, year: int | None = None, reserve: 
             pharmacy_id=pharmacy_id,
             defaults={"business_name": ""},
         )
-        prefix_token = (settings_obj.invoice_prefix or "INV").strip().upper() or "INV"
-        inv_prefix = f"{prefix_token}-{y}-"
-        inv_re = re.compile(rf"^{re.escape(prefix_token)}-(\d{{4}})-(\d+)$", re.IGNORECASE)
-        qs = PharmacyInvoice.objects.filter(
-            pharmacy_id=pharmacy_id, invoice_no__istartswith=inv_prefix
-        ).values_list("invoice_no", flat=True)
+        prefix = (settings_obj.invoice_prefix or "INV").strip() or "INV"
+        legacy_prefix_upper = prefix.upper()
         max_seq = max(int(settings_obj.invoice_next_number or 1) - 1, 0)
+        qs = PharmacyInvoice.objects.filter(pharmacy_id=pharmacy_id).values_list("invoice_no", flat=True)
         for inv_no in qs:
-            m = inv_re.match(str(inv_no).strip())
-            if m and int(m.group(1)) == y:
-                max_seq = max(max_seq, int(m.group(2)))
+            seq = _invoice_seq_from_number(inv_no, prefix, legacy_prefix_upper)
+            if seq is not None:
+                max_seq = max(max_seq, seq)
         next_seq = max_seq + 1
         if reserve:
             settings_obj.invoice_next_number = next_seq + 1
             settings_obj.save(update_fields=["invoice_next_number"])
-        return f"{inv_prefix}{next_seq}"
+        return f"{prefix}{next_seq}"

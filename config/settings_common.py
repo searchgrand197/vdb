@@ -259,3 +259,9 @@ WEBPUSH_PUBLIC_KEY = env.str("WEBPUSH_PUBLIC_KEY", default="")
 WEBPUSH_PRIVATE_KEY = env.str("WEBPUSH_PRIVATE_KEY", default="")
 WEBPUSH_SUB_EMAIL = env.str("WEBPUSH_SUB_EMAIL", default="")
 
+
+# Twilio SMS (OPD scheduling notifications)
+TWILIO_ACCOUNT_SID = env.str("TWILIO_ACCOUNT_SID", default="")
+TWILIO_AUTH_TOKEN = env.str("TWILIO_AUTH_TOKEN", default="")
+TWILIO_FROM_NUMBER = env.str("TWILIO_FROM_NUMBER", default="")
+

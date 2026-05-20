@@ -28,7 +28,7 @@ export function PurchaseSupplierPicker({ supplierId, supplierName, onChange, req
   const [loading, setLoading] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [createForm, setCreateForm] = useState({ name: '', phone: '', address: '', gst_number: '' })
+  const [createForm, setCreateForm] = useState({ name: '', phone: '', address: '', gst_number: '', dl_number: '' })
   const wrapRef = useRef(null)
 
   useEffect(() => {
@@ -80,6 +80,7 @@ export function PurchaseSupplierPicker({ supplierId, supplierName, onChange, req
         phone: createForm.phone.trim(),
         address: createForm.address.trim(),
         gst_number: createForm.gst_number.trim(),
+        dl_number: createForm.dl_number.trim(),
       })
       const row = normalizeEntity(data)
       const id = row?.id
@@ -88,7 +89,7 @@ export function PurchaseSupplierPicker({ supplierId, supplierName, onChange, req
       onChange(id, name, row)
       setShowCreate(false)
       setOpen(false)
-      setCreateForm({ name: '', phone: '', address: '', gst_number: '' })
+      setCreateForm({ name: '', phone: '', address: '', gst_number: '', dl_number: '' })
       toast.success('Party created')
     } catch (e) {
       toast.error(parseApiError(e))
@@ -208,6 +209,15 @@ export function PurchaseSupplierPicker({ supplierId, supplierName, onChange, req
                   <input
                     value={createForm.gst_number}
                     onChange={(e) => setCreateForm((f) => ({ ...f, gst_number: e.target.value }))}
+                    className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-[9px] font-semibold text-slate-500 uppercase">D.L. Number</span>
+                  <input
+                    value={createForm.dl_number}
+                    onChange={(e) => setCreateForm((f) => ({ ...f, dl_number: e.target.value }))}
                     className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
                   />
                 </label>

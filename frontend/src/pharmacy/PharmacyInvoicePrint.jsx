@@ -173,6 +173,229 @@ function invoicePartyDisplayGst(inv) {
   return '—'
 }
 
+function invoicePartyDisplayDl(inv) {
+  const details = partyDetailsObject(inv)
+  const dl = details?.dl_number
+  if (dl != null && String(dl).trim() !== '') return String(dl).trim()
+  return '—'
+}
+
+const DEFAULT_INVOICE_TERMS = [
+  'Please consult the Doctor before using medicine.',
+  'Medicine without batch and expiry date will not be taken back.',
+  'All disputes subject to local Jurisdiction only.',
+]
+
+function invoiceTermsLines(outlet) {
+  const raw = String(outlet?.invoice_terms || '').trim()
+  if (!raw) return DEFAULT_INVOICE_TERMS
+  return raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function formatTermsHtml(outlet) {
+  return invoiceTermsLines(outlet)
+    .map((line) => `<div>${escapeHtml(line)}</div>`)
+    .join('')
+}
+
+function hasBankDetails(outlet) {
+  const o = outlet || {}
+  return Boolean(
+    String(o.bank_name || '').trim() ||
+      String(o.bank_branch || '').trim() ||
+      String(o.bank_account_no || '').trim() ||
+      String(o.bank_ifsc || '').trim(),
+  )
+}
+
+function formatBankHtml(outlet) {
+  const o = outlet || {}
+  const rows = [
+    ['Bank Name', o.bank_name],
+    ['Branch Name', o.bank_branch],
+    ['Account No', o.bank_account_no],
+    ['IFSC Code', o.bank_ifsc],
+  ].filter(([, v]) => v != null && String(v).trim() !== '')
+  if (!rows.length) return '<div style="color:#888">—</div>'
+  return rows
+    .map(
+      ([label, val]) =>
+        `<div><strong>${escapeHtml(label)} :</strong> ${escapeHtml(String(val).trim())}</div>`,
+    )
+    .join('')
+}
+
+function absoluteMediaUrl(url) {
+  if (!url) return ''
+  if (/^https?:\/\//i.test(url)) return url
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}${url.startsWith('/') ? url : `/${url}`}`
+  }
+  return url
+}
+
+function formatSignatureHtml(outlet, businessTitle) {
+  const signUrl = absoluteMediaUrl(outlet?.signature_url || '')
+  if (signUrl) {
+    return `<div style="min-height:52px;display:flex;align-items:center;justify-content:center;margin:8px 0">
+      <img src="${escapeHtml(signUrl)}" alt="Signature" style="max-height:52px;max-width:140px;object-fit:contain" />
+    </div>`
+  }
+  return `<div style="min-height:52px;margin:8px 0">&nbsp;</div>`
+}
+
+/** Line MRP for qty sold (unit MRP × qty), not full pack/strip MRP. */
+function lineMrpFromItem(it, rateFallback = 0) {
+  const unitMrp = unitMrpFromItem(it, rateFallback)
+  const qty = Number(it?.qty || 0)
+  if (unitMrp > 0 && qty > 0) return Math.round(unitMrp * qty * 100) / 100
+  return unitMrp
+}
+
+/** Line selling rate for qty sold (unit rate × qty), matches billing MRP column basis. */
+function lineRateFromItem(it) {
+  const qty = Number(it?.qty || 0)
+  const unitRate = Number(it?.rate || 0)
+  if (qty > 0) return Math.round(unitRate * qty * 100) / 100
+  return unitRate
+}
+
+function bankDetailRows(outlet) {
+  const o = outlet || {}
+  return [
+    ['Bank Name', o.bank_name],
+    ['Branch Name', o.bank_branch],
+    ['Account No', o.bank_account_no],
+    ['IFSC Code', o.bank_ifsc],
+  ].filter(([, v]) => v != null && String(v).trim() !== '')
+}
+
+function InvoiceFooterPreview({
+  outlet,
+  title,
+  notesAdvice,
+  showGst,
+  subtotal,
+  totalDiscount,
+  totalDiscountPercent,
+  cgst,
+  sgst,
+  paidAmount,
+  dueAmount,
+  grandTotal,
+}) {
+  const terms = invoiceTermsLines(outlet)
+  const bankRows = bankDetailRows(outlet)
+  const signUrl = absoluteMediaUrl(outlet?.signature_url || '')
+
+  return (
+    <div style={{ display: 'flex', borderBottom: '1px solid #000', alignItems: 'stretch' }}>
+      <div style={{ flex: 1, padding: '8px 10px', borderRight: '1px solid #000', fontSize: '8px', minWidth: 0 }}>
+        <div style={{ fontWeight: 'bold', marginBottom: '4px', textDecoration: 'underline' }}>Terms & Conditions</div>
+        <div style={{ lineHeight: 1.6 }}>
+          {terms.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+        <div style={{ marginTop: '8px' }}>
+          {notesAdvice ? (
+            <>
+              <strong>Notes/Advice :</strong>
+              <div style={{ marginTop: '3px', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>{notesAdvice}</div>
+            </>
+          ) : (
+            <><strong>Remark :</strong> ___________________________</>
+          )}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, padding: '8px 10px', borderRight: '1px solid #000', fontSize: '8px', minWidth: 0 }}>
+        <div style={{ fontWeight: 'bold', marginBottom: '4px', textDecoration: 'underline' }}>BANK DETAILS :-</div>
+        <div style={{ lineHeight: 1.6 }}>
+          {bankRows.length ? (
+            bankRows.map(([label, val]) => (
+              <div key={label}>
+                <strong>{label} :</strong> {String(val).trim()}
+              </div>
+            ))
+          ) : (
+            <div style={{ color: '#888' }}>—</div>
+          )}
+        </div>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          padding: '8px 10px',
+          borderRight: '1px solid #000',
+          textAlign: 'center',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          minHeight: '100px',
+        }}
+      >
+        <div style={{ fontSize: '8px', marginBottom: '4px' }}>For {title}</div>
+        {signUrl ? (
+          <div style={{ minHeight: '52px', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '8px 0' }}>
+            <img src={signUrl} alt="Signature" style={{ maxHeight: '52px', maxWidth: '140px', objectFit: 'contain' }} />
+          </div>
+        ) : (
+          <div style={{ minHeight: '52px', margin: '8px 0' }}>&nbsp;</div>
+        )}
+        <div style={{ borderTop: '1px solid #000', paddingTop: '4px', fontSize: '8px', marginTop: 'auto' }}>
+          Authorised Signatory
+        </div>
+      </div>
+
+      <div style={{ width: '160px', flexShrink: 0, fontSize: '9px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
+          <span>SUB TOTAL</span><span style={{ fontWeight: 'bold' }}>{formatMoney(subtotal)}</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
+          <span>TOTAL DIS ({totalDiscountPercent.toFixed(2)}%)</span><span>{formatMoney(totalDiscount)}</span>
+        </div>
+        {showGst ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
+              <span>CGST</span><span>{formatMoney(cgst)}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
+              <span>SGST</span><span>{formatMoney(sgst)}</span>
+            </div>
+          </>
+        ) : null}
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
+          <span>PAID</span><span>{formatMoney(paidAmount)}</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
+          <span>DUE</span><span>{formatMoney(dueAmount)}</span>
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            padding: '6px 8px',
+            background: '#000',
+            color: '#fff',
+            fontWeight: 'bold',
+            fontSize: '10px',
+          }}
+        >
+          <span>GRAND TOTAL</span><span>{formatMoney(grandTotal)}</span>
+        </div>
+        <div style={{ padding: '4px 8px', fontSize: '8px', textAlign: 'center', fontStyle: 'italic' }}>
+          Computer Generated Invoice
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** Referred doctor: nested doctor_details.name (API) or legacy string. */
 function invoiceDoctorDisplayName(inv) {
   if (!inv || typeof inv !== 'object') return '—'
@@ -261,11 +484,13 @@ function buildInvoiceHtml({ invoice, outlet }) {
       : 0
   const paidAmount = Number(invoice.paid_amount || 0)
   const dueAmount = Math.max(0, Number(invoice.due_amount ?? grandTotal - paidAmount))
-  const paymentMethod = String(invoice.payment_method || 'cash').toUpperCase()
   const items = invoice.items || []
 
   const biz = outlet || {}
   const title = (biz.business_name || 'Pharmacy').toUpperCase()
+  const termsHtml = formatTermsHtml(biz)
+  const bankHtml = formatBankHtml(biz)
+  const signatureHtml = formatSignatureHtml(biz, title)
   const addrLines = (biz.address || '')
     .split(/\n/)
     .map((s) => s.trim())
@@ -281,10 +506,11 @@ function buildInvoiceHtml({ invoice, outlet }) {
   const itemRows = items
     .map((it, idx) => {
       const qty = Number(it.qty || 0)
-      const rate = Number(it.rate || 0)
-      const mrpStrip = stripMrpFromItem(it, rate)
+      const unitRate = Number(it.rate || 0)
+      const mrpLine = lineMrpFromItem(it, unitRate)
+      const lineRate = lineRateFromItem(it)
       const discPct = lineDiscountPercentFromItem(it)
-      const amount = qty * rate
+      const amount = qty > 0 ? lineRate : 0
       const sgstR = showGst ? Number(it.sgst_rate ?? 0) : 0
       const cgstR = showGst ? Number(it.cgst_rate ?? 0) : 0
       const gstCols = showGst
@@ -298,9 +524,9 @@ function buildInvoiceHtml({ invoice, outlet }) {
         <td style="border:1px solid #ccc;padding:3px;text-align:center;font-size:8px">${it.medicine?.hsn_code || it.hsn_code || '—'}</td>
         <td style="border:1px solid #ccc;padding:3px;text-align:center;font-size:8px">${it.batch?.batch_no ?? it.batch_no ?? '—'}</td>
         <td style="border:1px solid #ccc;padding:3px;text-align:center;font-size:8px">${safeFormat(it.batch?.expiry_date || it.expiry_date, 'MM/yy')}</td>
-        <td style="border:1px solid #ccc;padding:3px;text-align:right">${formatMoney(mrpStrip)}</td>
+        <td style="border:1px solid #ccc;padding:3px;text-align:right">${formatMoney(mrpLine)}</td>
         <td style="border:1px solid #ccc;padding:3px;text-align:center">${discPct.toFixed(2)}</td>
-        <td style="border:1px solid #ccc;padding:3px;text-align:right">${formatMoney(rate)}</td>
+        <td style="border:1px solid #ccc;padding:3px;text-align:right">${formatMoney(lineRate)}</td>
         ${gstCols}
         <td style="border:1px solid #ccc;padding:3px;text-align:center;font-size:8px">${formatQtyCell(it)}</td>
         <td style="border:1px solid #ccc;padding:3px;text-align:right;font-weight:bold">${formatMoney(amount)}</td>
@@ -346,12 +572,14 @@ function buildInvoiceHtml({ invoice, outlet }) {
   const partyAddr = invoicePartyDisplayAddress(invoice)
   const partyPhone = invoicePartyDisplayPhone(invoice)
   const partyGst = invoicePartyDisplayGst(invoice)
+  const partyDl = invoicePartyDisplayDl(invoice)
   const patientNameHtml = escapeHtml(patientDisplayName(pd) || '—')
   const patientAddrHtml = escapeHtml(patientDisplayAddress(pd))
   const partyNameHtml = escapeHtml(partyName)
   const partyAddrHtml = escapeHtml(partyAddr)
   const partyPhoneHtml = escapeHtml(partyPhone)
   const partyGstHtml = escapeHtml(partyGst)
+  const partyDlHtml = escapeHtml(partyDl)
   const doctorNameHtml = escapeHtml(invoiceDoctorDisplayName(invoice))
   const invoiceDate = safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy HH:mm')
   const notesAdviceText = extractNotesAdviceFromRemarks(invoice.remarks)
@@ -377,7 +605,7 @@ function buildInvoiceHtml({ invoice, outlet }) {
     <div style="display:flex;border-bottom:1px solid #000">
       <div style="flex:1;padding:8px 10px;border-right:1px solid #000">
         <div style="font-size:14px;font-weight:bold">${title}</div>
-        <div style="font-size:8px;font-style:italic;margin-bottom:4px">${showGst ? 'GST Invoice' : 'Retail invoice'}</div>
+        ${showGst ? '<div style="font-size:8px;font-style:italic;margin-bottom:4px">GST Invoice</div>' : ''}
         <div style="font-size:8px;line-height:1.5">
           ${addrLines.length > 0 ? addrLines.map((l) => `<div>${l}</div>`).join('') : '<div>&mdash;</div>'}
           ${biz.mobile ? `<div>Phone: ${biz.mobile}</div>` : ''}
@@ -394,11 +622,10 @@ function buildInvoiceHtml({ invoice, outlet }) {
         <div><strong>${isB2B ? 'Party Address' : 'Patient Address'} :</strong> ${isB2B ? partyAddrHtml : patientAddrHtml}</div>
         ${
           isB2B
-            ? `<div><strong>Party Phone :</strong> ${partyPhoneHtml}</div><div><strong>Party GSTIN :</strong> ${partyGstHtml}</div>`
+            ? `<div><strong>Party Phone :</strong> ${partyPhoneHtml}</div><div><strong>Party D.L.No. :</strong> ${partyDlHtml}</div><div><strong>Party GSTIN :</strong> ${partyGstHtml}</div>`
             : `<div><strong>UHID No. :</strong> ${escapeHtml(invoice.patient_details?.uhid || '—')}</div>`
         }
         ${isB2B ? '' : `<div><strong>Dr. Name :</strong> ${doctorNameHtml}</div>`}
-        <div><strong>Payment :</strong> ${paymentMethod}</div>
         <div style="display:flex;justify-content:space-between;margin-top:4px;border-top:1px solid #000;padding-top:4px">
           <span><strong>Invoice No. : ${invoice.invoice_no || ''}</strong></span>
           <span><strong>Date: ${invoiceDate}</strong></span>
@@ -440,27 +667,26 @@ function buildInvoiceHtml({ invoice, outlet }) {
       </tfoot>
     </table>
 
-    <div style="display:flex;border-bottom:1px solid #000">
-      <div style="flex:1;padding:8px 10px;border-right:1px solid #000;font-size:8px">
+    <div style="display:flex;border-bottom:1px solid #000;align-items:stretch">
+      <div style="flex:1;padding:8px 10px;border-right:1px solid #000;font-size:8px;min-width:0">
         <div style="font-weight:bold;margin-bottom:4px;text-decoration:underline">Terms &amp; Conditions</div>
-        <div>Please consult the Doctor before using medicine.</div>
-        <div>Medicine without batch and expiry date will not be taken back.</div>
-        <div>All disputes subject to local Jurisdiction only.</div>
+        <div style="line-height:1.6">${termsHtml}</div>
         ${
           notesAdviceHtml
             ? `<div style="margin-top:8px"><strong>Notes/Advice :</strong><div style="margin-top:3px;line-height:1.4">${notesAdviceHtml}</div></div>`
             : `<div style="margin-top:8px"><strong>Remark :</strong> ___________________________</div>`
         }
       </div>
-      <div style="flex:1;padding:8px;text-align:center;border-right:1px solid #000;display:flex;flex-direction:column;justify-content:space-between">
-        <div style="font-size:8px;margin-bottom:4px">For ${title}</div>
-        <div>
-          <div style="font-style:italic;font-weight:bold;font-size:12px;margin-bottom:8px">PHARMACIST</div>
-          <div style="font-style:italic;font-size:10px">${biz.business_name || 'Pharmacy'}</div>
-        </div>
-        <div style="border-top:1px solid #000;padding-top:4px;font-size:8px">Authorised Signatory</div>
+      <div style="flex:1;padding:8px 10px;border-right:1px solid #000;font-size:8px;min-width:0">
+        <div style="font-weight:bold;margin-bottom:4px;text-decoration:underline">BANK DETAILS :-</div>
+        <div style="line-height:1.6">${bankHtml}</div>
       </div>
-      <div style="width:160px;font-size:9px">
+      <div style="flex:1;padding:8px 10px;border-right:1px solid #000;text-align:center;display:flex;flex-direction:column;justify-content:space-between;min-height:100px">
+        <div style="font-size:8px;margin-bottom:4px">For ${title}</div>
+        ${signatureHtml}
+        <div style="border-top:1px solid #000;padding-top:4px;font-size:8px;margin-top:auto">Authorised Signatory</div>
+      </div>
+      <div style="width:160px;flex-shrink:0;font-size:9px">
         <div style="display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px solid #ccc">
           <span>SUB TOTAL</span><span style="font-weight:bold">${formatMoney(subtotal)}</span>
         </div>
@@ -526,7 +752,6 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
       : 0
   const paidAmount = Number(invoice.paid_amount || 0)
   const dueAmount = Math.max(0, Number(invoice.due_amount ?? grandTotal - paidAmount))
-  const paymentMethod = String(invoice.payment_method || 'cash').toUpperCase()
   const items = invoice.items || []
   const isB2B = Boolean(invoice?.party)
   const pd = invoice.patient_details
@@ -536,6 +761,7 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
   const partyAddrLabel = invoicePartyDisplayAddress(invoice)
   const partyPhoneLabel = invoicePartyDisplayPhone(invoice)
   const partyGstLabel = invoicePartyDisplayGst(invoice)
+  const partyDlLabel = invoicePartyDisplayDl(invoice)
   const doctorLabel = invoiceDoctorDisplayName(invoice)
   const notesAdvice = extractNotesAdviceFromRemarks(invoice.remarks)
 
@@ -571,7 +797,7 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
           <div style={{ flex: 1, padding: '8px 10px', borderRight: '1px solid #000' }}>
             <div style={{ fontSize: '14px', fontWeight: 'bold' }}>{title}</div>
             <div style={{ fontSize: '8px', fontStyle: 'italic', marginBottom: '4px' }}>
-              {showGst ? 'GST Invoice' : 'Retail invoice'}
+              {showGst ? 'GST Invoice' : ''}
             </div>
             <div style={{ fontSize: '8px', lineHeight: '1.5' }}>
               {addrLines.length > 0 ? addrLines.map((line, i) => <div key={i}>{line}</div>) : <div>—</div>}
@@ -603,13 +829,13 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
             {isB2B ? (
               <>
                 <div><strong>Party Phone :</strong> {partyPhoneLabel}</div>
+                <div><strong>Party D.L.No. :</strong> {partyDlLabel}</div>
                 <div><strong>Party GSTIN :</strong> {partyGstLabel}</div>
               </>
             ) : (
               <div><strong>UHID No. :</strong> {invoice.patient_details?.uhid || '—'}</div>
             )}
             {!isB2B ? <div><strong>Dr. Name :</strong> {doctorLabel}</div> : null}
-            <div><strong>Payment :</strong> {paymentMethod}</div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', borderTop: '1px solid #000', paddingTop: '4px' }}>
               <span><strong>Invoice No. : {invoice.invoice_no}</strong></span>
               <span><strong>Date: {safeFormat(invoice.created_at || new Date(), 'dd-MM-yyyy HH:mm')}</strong></span>
@@ -673,10 +899,10 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
           <tbody>
             {items.map((it, idx) => {
               const qty = Number(it.qty || 0)
-              const rate = Number(it.rate || 0)
-              const mrpStrip = stripMrpFromItem(it, rate)
+              const mrpLine = lineMrpFromItem(it, Number(it.rate || 0))
+              const lineRate = lineRateFromItem(it)
               const discPct = lineDiscountPercentFromItem(it)
-              const amount = qty * rate
+              const amount = qty > 0 ? lineRate : 0
               const sgstR = showGst ? Number(it.sgst_rate ?? 0) : 0
               const cgstR = showGst ? Number(it.cgst_rate ?? 0) : 0
               return (
@@ -697,9 +923,9 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
                   <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'center', fontSize: '8px' }}>
                     {safeFormat(it.batch?.expiry_date || it.expiry_date, 'MM/yy')}
                   </td>
-                  <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'right' }}>{formatMoney(mrpStrip)}</td>
+                  <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'right' }}>{formatMoney(mrpLine)}</td>
                   <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'center' }}>{discPct.toFixed(2)}</td>
-                  <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'right' }}>{formatMoney(rate)}</td>
+                  <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'right' }}>{formatMoney(lineRate)}</td>
                   {showGst ? (
                     <>
                       <td style={{ border: '1px solid #ccc', padding: '3px', textAlign: 'center' }}>{sgstR.toFixed(2)}</td>
@@ -743,64 +969,21 @@ export default function PharmacyInvoicePrint({ invoice, outlet, onClose }) {
           </tfoot>
         </table>
 
-        <div style={{ display: 'flex', borderBottom: '1px solid #000' }}>
-          <div style={{ flex: 1, padding: '8px 10px', borderRight: '1px solid #000', fontSize: '8px' }}>
-            <div style={{ fontWeight: 'bold', marginBottom: '4px', textDecoration: 'underline' }}>Terms & Conditions</div>
-            <div>Please consult the Doctor before using medicine.</div>
-            <div>Medicine without batch and expiry date will not be taken back.</div>
-            <div>All disputes subject to local Jurisdiction only.</div>
-            <div style={{ marginTop: '8px' }}>
-              {notesAdvice ? (
-                <>
-                  <strong>Notes/Advice :</strong>
-                  <div style={{ marginTop: '3px', lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>{notesAdvice}</div>
-                </>
-              ) : (
-                <><strong>Remark :</strong> ___________________________</>
-              )}
-            </div>
-          </div>
+        <InvoiceFooterPreview
+          outlet={biz}
+          title={title}
+          notesAdvice={notesAdvice}
+          showGst={showGst}
+          subtotal={subtotal}
+          totalDiscount={totalDiscount}
+          totalDiscountPercent={totalDiscountPercent}
+          cgst={cgst}
+          sgst={sgst}
+          paidAmount={paidAmount}
+          dueAmount={dueAmount}
+          grandTotal={grandTotal}
+        />
 
-          <div style={{ flex: 1, padding: '8px', textAlign: 'center', borderRight: '1px solid #000', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-            <div style={{ fontSize: '8px', marginBottom: '4px' }}>For {title}</div>
-            <div>
-              <div style={{ fontStyle: 'italic', fontWeight: 'bold', fontSize: '12px', marginBottom: '8px' }}>PHARMACIST</div>
-              <div style={{ fontStyle: 'italic', fontSize: '10px' }}>{biz.business_name || 'Pharmacy'}</div>
-            </div>
-            <div style={{ borderTop: '1px solid #000', paddingTop: '4px', fontSize: '8px' }}>Authorised Signatory</div>
-          </div>
-
-          <div style={{ width: '160px', fontSize: '9px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
-              <span>SUB TOTAL</span><span style={{ fontWeight: 'bold' }}>{formatMoney(subtotal)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
-              <span>TOTAL DIS ({totalDiscountPercent.toFixed(2)}%)</span><span>{formatMoney(totalDiscount)}</span>
-            </div>
-            {showGst ? (
-              <>
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
-                  <span>CGST</span><span>{formatMoney(cgst)}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
-                  <span>SGST</span><span>{formatMoney(sgst)}</span>
-                </div>
-              </>
-            ) : null}
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
-              <span>PAID</span><span>{formatMoney(paidAmount)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px', borderBottom: '1px solid #ccc' }}>
-              <span>DUE</span><span>{formatMoney(dueAmount)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 8px', background: '#000', color: '#fff', fontWeight: 'bold', fontSize: '10px' }}>
-              <span>GRAND TOTAL</span><span>{formatMoney(grandTotal)}</span>
-            </div>
-            <div style={{ padding: '4px 8px', fontSize: '8px', textAlign: 'center', fontStyle: 'italic' }}>
-              Computer Generated Invoice
-            </div>
-          </div>
-        </div>
 
       </div>
 

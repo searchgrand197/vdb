@@ -98,7 +98,7 @@ class PharmacySupplierViewSet(viewsets.ModelViewSet):
 
 
 class PharmacyNextInvoiceNumberView(APIView):
-    """GET /api/v1/pharmacy/invoice/next-number/ — preview next INV-{YYYY}-{seq} (not reserved)."""
+    """GET /api/v1/pharmacy/invoice/next-number/ — preview next {prefix}{seq} (not reserved)."""
 
     permission_classes = [permissions.IsAuthenticated]
 

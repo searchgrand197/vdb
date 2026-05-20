@@ -7,9 +7,13 @@ import { format, isValid, parseISO } from 'date-fns'
 import {
   computeMargGstOnBase,
   computeSaleGstTotals,
+  isPartialPercentInput,
   lineDiscountRupeesFromPercent,
   lineSaleBaseAmount,
+  lineSellingRateDisplay,
+  normalizePercentInputString,
   parseApiError,
+  parseCompletePercentInput,
   parseOutletDefaultGstPercent,
   resolveEffectiveGstPercent,
 } from './pharmacyCalculations'
@@ -27,7 +31,7 @@ function newBillingRowId() {
   return `br-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-/** # | Product | Batch | HSN | PACK | EXP | MRP | Pack | Loose | Rate | Disc | GST | Margin | Amount | Del */
+/** # | Product | Batch | HSN | PACK | EXP | MRP | Pack | Loose | Disc | Rate | GST | Margin | Amount | Del */
 const GRID_BILL =
   'grid-cols-[1.25rem_minmax(0,2fr)_1.1fr_0.9fr_0.9fr_0.9fr_0.9fr_0.8fr_0.8fr_0.9fr_0.8fr_0.8fr_0.9fr_1fr_1.25rem]'
 
@@ -431,8 +435,12 @@ function ErpBillingViewInner({
       const hasMrp = Number.isFinite(mrpNum) && mrpNum > 0 && merged.medicine
       if (hasMrp) {
         if ('line_discount' in partial) {
-          const p = Math.min(100, Math.max(0, Number(merged.line_discount) || 0))
-          merged.rate = Math.round(mrpNum * (1 - p / 100) * 100) / 100
+          const pRaw = merged.line_discount
+          if (!(typeof pRaw === 'string' && isPartialPercentInput(pRaw))) {
+            const p = parseCompletePercentInput(pRaw) ?? 0
+            merged.line_discount = p
+            merged.rate = Math.round(mrpNum * (1 - p / 100) * 100) / 100
+          }
         } else if ('rate' in partial) {
           merged.line_discount = discountPercentFromMrpAndRate(mrpNum, Number(merged.rate) || 0)
         }
@@ -448,9 +456,8 @@ function ErpBillingViewInner({
     [rows, defaultGst, gstEnabled],
   )
   const billDiscountAmount = useMemo(() => {
-    const v = Number(billDiscountPercent)
-    if (!Number.isFinite(v) || v <= 0) return 0
-    const pct = Math.min(100, Math.max(0, v))
+    const pct = parseCompletePercentInput(billDiscountPercent)
+    if (pct == null || pct <= 0) return 0
     return Math.round((grandTotal * pct) / 100 * 100) / 100
   }, [billDiscountPercent, grandTotal])
   const netGrandTotal = useMemo(
@@ -502,6 +509,7 @@ function ErpBillingViewInner({
             phone: partyDetails?.phone || '',
             address: partyDetails?.address || '',
             gst_number: partyDetails?.gst_number || '',
+            dl_number: partyDetails?.dl_number || '',
           }
         : selectedPt
           ? {
@@ -515,7 +523,7 @@ function ErpBillingViewInner({
       lines: activeLines.map((r) => {
         const netAmount = Math.round(Number(r.qty) * Number(r.rate) * 100) / 100
         const mrp = Number(r.batch?.mrp) || null
-        const discPct = Number(r.line_discount) || 0
+        const discPct = parseCompletePercentInput(r.line_discount) ?? (Number(r.line_discount) || 0)
         return {
           name: r.medicine?.name || '',
           qty: r.qty,
@@ -761,15 +769,15 @@ function ErpBillingViewInner({
       } else if (field === 'packs') {
         const row = rows[idx]
         if ((Number(row?.pack_size) || 1) <= 1) {
-          setTimeout(() => rateRefs.current[rowId]?.focus(), 40)
+          setTimeout(() => discRefs.current[rowId]?.focus(), 40)
         } else {
           setTimeout(() => looseRefs.current[rowId]?.focus(), 40)
         }
       } else if (field === 'loose') {
-        setTimeout(() => rateRefs.current[rowId]?.focus(), 40)
-      } else if (field === 'rate') {
         setTimeout(() => discRefs.current[rowId]?.focus(), 40)
       } else if (field === 'disc') {
+        setTimeout(() => rateRefs.current[rowId]?.focus(), 40)
+      } else if (field === 'rate') {
         setTimeout(() => gstRefs.current[rowId]?.focus(), 40)
       } else if (field === 'gst') {
         if (idx < rows.length - 1) {
@@ -890,21 +898,10 @@ function ErpBillingViewInner({
       const builtItems = itemResults.map((res, i) => {
         const saved = res.data?.data || res.data
         const r = valid[i]
-        const stripSize =
-          Math.max(
-            1,
-            Number(r.pack_size) ||
-              Number(r.medicine?.unit_conversions?.strip) ||
-              Number(r.medicine?.unit_conversions?.STRIP) ||
-              1,
-          )
-        const mrpUnit = Number(r.batch?.mrp || 0)
         return {
           ...r,
           ...saved,
           pack_size: r.pack_size,
-          strip_size_for_print: stripSize,
-          mrp_strip_for_print: Math.round(mrpUnit * stripSize * 100) / 100,
           pack_info: r.pack || r.medicine?.pack_info || '',
           medicine: {
             ...r.medicine,
@@ -1130,8 +1127,8 @@ function ErpBillingViewInner({
               <span className="text-right pr-0.5">MRP</span>
               <span className="text-right pr-0.5">Qty/Pack</span>
               <span className="text-right pr-0.5">Loose</span>
-              <span className="text-right pr-0.5">Rate</span>
               <span className="text-right pr-0.5">Disc %</span>
+              <span className="text-right pr-0.5" title="Line rate (unit selling rate × qty sold)">Rate</span>
               <span className={`text-right pr-0.5 ${gstEnabled ? '' : 'text-slate-300'}`}>GST</span>
               <span
                 className="text-right pr-0.5"
@@ -1286,10 +1283,15 @@ function ErpBillingViewInner({
                     </div>
                     <div
                       className={`${CELL_NUM} text-[10px] text-slate-700`}
-                      title="Unit MRP from batch"
+                      title="Line MRP (unit MRP × qty sold)"
                     >
                       {row.batch?.mrp != null && Number(row.batch.mrp) > 0
-                        ? Number(row.batch.mrp).toFixed(2)
+                        ? (() => {
+                            const unitMrp = Number(row.batch.mrp)
+                            const q = Number(row.qty) || 0
+                            const lineMrp = q > 0 ? unitMrp * q : unitMrp
+                            return lineMrp.toFixed(2)
+                          })()
                         : ''}
                     </div>
                     <div className={CELL_INP_WRAP}>
@@ -1338,6 +1340,43 @@ function ErpBillingViewInner({
                         />
                       )}
                     </div>
+                    <div className={`${CELL_INP_WRAP} gap-0.5`}>
+                      <input
+                        ref={(el) => {
+                          if (el) discRefs.current[row.id] = el
+                          else delete discRefs.current[row.id]
+                        }}
+                        disabled={!row.medicine}
+                        type="text"
+                        inputMode="decimal"
+                        title="% off MRP vs rate: changes selling rate to MRP × (1 − %/100)"
+                        value={
+                          row.line_discount === 0 && typeof row.line_discount !== 'string'
+                            ? ''
+                            : String(row.line_discount)
+                        }
+                        onChange={(e) => {
+                          const raw = normalizePercentInputString(e.target.value)
+                          if (raw === '' || raw === '-' || raw === '.') {
+                            patchRowById(row.id, { line_discount: 0, discount_user_set: true })
+                            return
+                          }
+                          if (isPartialPercentInput(raw)) {
+                            patchRowById(row.id, { line_discount: raw, discount_user_set: true })
+                            return
+                          }
+                          const n = parseCompletePercentInput(raw)
+                          if (n == null) return
+                          patchRowById(row.id, {
+                            line_discount: n,
+                            discount_user_set: true,
+                          })
+                        }}
+                        onKeyDown={(e) => handleRowEnter(e, row.id, 'disc')}
+                        className={`${INP_NUM} flex-1 min-w-0`}
+                      />
+                      <span className="text-[8px] text-slate-400 shrink-0 pr-0.5">%</span>
+                    </div>
                     <div className={CELL_INP_WRAP}>
                       <input
                         ref={(el) => {
@@ -1352,7 +1391,18 @@ function ErpBillingViewInner({
                         }}
                         type="text"
                         inputMode="decimal"
-                        value={!row.medicine ? '' : Number(row.rate) === 0 ? '' : String(row.rate)}
+                        title="Line rate (unit selling rate × qty). Stored per unit for tax/margin."
+                        value={
+                          !row.medicine
+                            ? ''
+                            : (() => {
+                                const q = Number(row.qty) || 0
+                                const unit = Number(row.rate) || 0
+                                if (unit === 0) return ''
+                                const line = q > 0 ? lineSellingRateDisplay(row) : unit
+                                return String(line)
+                              })()
+                        }
                         onChange={(e) => {
                           const raw = e.target.value.trim()
                           if (raw === '' || raw === '.' || raw === '-') {
@@ -1361,40 +1411,13 @@ function ErpBillingViewInner({
                           }
                           const v = Number(raw)
                           if (!Number.isFinite(v)) return
-                          patchRowById(row.id, { rate: v })
+                          const q = Number(row.qty) || 0
+                          const unitRate = q > 0 ? Math.round((v / q) * 100) / 100 : v
+                          patchRowById(row.id, { rate: unitRate })
                         }}
                         onKeyDown={(e) => handleRowEnter(e, row.id, 'rate')}
                         className={INP_NUM}
                       />
-                    </div>
-                    <div className={`${CELL_INP_WRAP} gap-0.5`}>
-                      <input
-                        ref={(el) => {
-                          if (el) discRefs.current[row.id] = el
-                          else delete discRefs.current[row.id]
-                        }}
-                        disabled={!row.medicine}
-                        type="text"
-                        inputMode="decimal"
-                        title="% off MRP vs rate: changes selling rate to MRP × (1 − %/100)"
-                        value={row.line_discount === 0 ? '' : String(row.line_discount)}
-                        onChange={(e) => {
-                          const raw = e.target.value.trim()
-                          if (raw === '' || raw === '.' || raw === '-') {
-                            patchRowById(row.id, { line_discount: 0, discount_user_set: true })
-                            return
-                          }
-                          const n = Number(raw)
-                          if (!Number.isFinite(n)) return
-                          patchRowById(row.id, {
-                            line_discount: Math.min(100, Math.max(0, n)),
-                            discount_user_set: true,
-                          })
-                        }}
-                        onKeyDown={(e) => handleRowEnter(e, row.id, 'disc')}
-                        className={`${INP_NUM} flex-1 min-w-0`}
-                      />
-                      <span className="text-[8px] text-slate-400 shrink-0 pr-0.5">%</span>
                     </div>
                     <div className={CELL_INP_WRAP}>
                       <input
@@ -1524,15 +1547,18 @@ function ErpBillingViewInner({
                   inputMode="decimal"
                   value={billDiscountPercent}
                   onChange={(e) => {
-                    const raw = e.target.value.trim()
-                    if (raw === '' || raw === '.' || raw === '-') {
-                      setBillDiscountPercent('')
+                    const raw = normalizePercentInputString(e.target.value)
+                    if (raw === '' || raw === '-' || raw === '.') {
+                      setBillDiscountPercent(raw === '.' ? '.' : '')
                       return
                     }
-                    const v = Number(raw)
-                    if (!Number.isFinite(v)) return
-                    const clamped = Math.min(Math.max(0, v), 100)
-                    setBillDiscountPercent(String(clamped))
+                    if (isPartialPercentInput(raw)) {
+                      setBillDiscountPercent(raw)
+                      return
+                    }
+                    const v = parseCompletePercentInput(raw)
+                    if (v == null) return
+                    setBillDiscountPercent(String(v))
                   }}
                   className="w-full bg-white/90 border border-blue-200 rounded-md px-2 pr-6 py-1.5 text-right tabular-nums text-[12px] font-semibold text-slate-900 outline-none shadow-inner transition-all focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                   placeholder="0"

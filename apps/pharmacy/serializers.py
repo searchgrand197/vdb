@@ -10,6 +10,8 @@ from apps.doctors.serializers import DoctorProfileSerializer
 
 
 class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
+    signature_url = serializers.SerializerMethodField()
+
     class Meta:
         model = PharmacyOutletSettings
         fields = (
@@ -27,12 +29,29 @@ class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
             "default_sale_discount_percent",
             "b2b_enabled",
             "low_stock_threshold",
+            "bank_name",
+            "bank_branch",
+            "bank_account_no",
+            "bank_ifsc",
+            "invoice_terms",
+            "signature",
+            "signature_url",
             "created_at",
             "updated_at",
         )
+        read_only_fields = ("signature_url",)
+
+    def get_signature_url(self, obj):
+        if not obj.signature:
+            return ""
+        request = self.context.get("request")
+        url = obj.signature.url
+        if request is not None:
+            return request.build_absolute_uri(url)
+        return url
 
     def validate_invoice_prefix(self, value):
-        normalized = str(value or "").strip().upper()
+        normalized = str(value or "").strip()
         if not normalized:
             return "INV"
         if len(normalized) > 20:
@@ -169,6 +188,7 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "name": party.name or "",
             "phone": party.phone or "",
             "gst_number": party.gst_number or "",
+            "dl_number": party.dl_number or "",
             "address": party.address or "",
         }
 
@@ -220,6 +240,7 @@ class PharmacySupplierSerializer(serializers.ModelSerializer):
             "name",
             "phone",
             "gst_number",
+            "dl_number",
             "address",
             "is_active",
             "created_at",

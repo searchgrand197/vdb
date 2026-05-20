@@ -9,10 +9,21 @@ import {
   formatStockDual,
   formatStripsAndTablets,
   lineDiscountRupeesFromPercent,
+  lineSellingRateDisplay,
   parseOutletDefaultGstPercent,
   resolveEffectiveGstPercent,
   splitGstEqually,
 } from './pharmacyCalculations'
+
+describe('lineSellingRateDisplay', () => {
+  it('returns unit rate × qty for line display', () => {
+    expect(lineSellingRateDisplay({ qty: 3, rate: 10.5 })).toBe(31.5)
+    expect(lineSellingRateDisplay({ qty: 2, rate: 61.43 })).toBe(122.86)
+  })
+  it('returns unit rate when qty is zero', () => {
+    expect(lineSellingRateDisplay({ qty: 0, rate: 12 })).toBe(12)
+  })
+})
 
 describe('computeBillingTotals', () => {
   it('sums rows with GST', () => {

@@ -174,6 +174,7 @@ class MedicineCategoryViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
 class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = Medicine.objects.all().select_related("unit")
+    pagination_class = LargeLimitOffsetPagination
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("sku", "name")
 
@@ -369,6 +370,7 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
 class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = MedicineBatch.objects.all().select_related("medicine", "medicine__unit")
+    pagination_class = LargeLimitOffsetPagination
     filter_backends = (DjangoFilterBackend, SearchFilter)
     search_fields = ("batch_no", "medicine__name")
 

@@ -30,6 +30,7 @@ class PharmacySupplier(TimeStampedModel, UUIDPrimaryKeyModel):
     name = models.CharField(max_length=200)
     phone = models.CharField(max_length=40, blank=True, default="")
     gst_number = models.CharField(max_length=40, blank=True, default="")
+    dl_number = models.CharField(max_length=80, blank=True, default="", help_text="Party drug license number for B2B invoices.")
     address = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True, db_index=True)
 
@@ -163,6 +164,16 @@ class PharmacyOutletSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     default_sale_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
     b2b_enabled = models.BooleanField(default=False, help_text="When enabled, sales are made to business parties instead of patients.")
     low_stock_threshold = models.PositiveIntegerField(default=10, help_text="Medicines with total stock below this value are flagged as low stock.")
+    bank_name = models.CharField(max_length=120, blank=True, default="")
+    bank_branch = models.CharField(max_length=120, blank=True, default="")
+    bank_account_no = models.CharField(max_length=40, blank=True, default="")
+    bank_ifsc = models.CharField(max_length=20, blank=True, default="")
+    invoice_terms = models.TextField(
+        blank=True,
+        default="",
+        help_text="Terms & conditions printed on pharmacy invoices (one line per row in the editor).",
+    )
+    signature = models.ImageField(upload_to="pharmacy/signatures/", blank=True, null=True)
 
     def __str__(self) -> str:
         return f"Pharmacy settings ({self.pharmacy_id})"

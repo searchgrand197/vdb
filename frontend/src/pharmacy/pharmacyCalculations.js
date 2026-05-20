@@ -3,6 +3,27 @@
 /** Global default when outlet + product do not apply (Marg-style). */
 export const DEFAULT_OUTLET_GST_PERCENT = 5
 
+/** Normalize percent text (comma decimal → dot). */
+export function normalizePercentInputString(raw) {
+  return String(raw ?? '').trim().replace(',', '.')
+}
+
+/** True while user is typing a decimal (e.g. "23.") — avoid coercing to integer mid-entry. */
+export function isPartialPercentInput(raw) {
+  const t = normalizePercentInputString(raw)
+  return t === '.' || /^\d+\.$/.test(t) || /^\d*\.$/.test(t)
+}
+
+/** Parse a finished percent value; returns null for empty/invalid/partial input. */
+export function parseCompletePercentInput(raw, max = 100, min = 0) {
+  const t = normalizePercentInputString(raw)
+  if (!t || t === '-' || isPartialPercentInput(t)) return null
+  if (!/^\d*\.?\d+$/.test(t)) return null
+  const n = Number(t)
+  if (!Number.isFinite(n)) return null
+  return Math.min(max, Math.max(min, n))
+}
+
 /** Outlet setting: supports 0% (unlike `Number(x) || fallback`, which treats 0 as missing). */
 export function parseOutletDefaultGstPercent(raw, fallback = DEFAULT_OUTLET_GST_PERCENT) {
   if (raw === null || raw === undefined) return fallback
@@ -108,6 +129,14 @@ export function lineSaleBaseAmount(row) {
   return Math.round(q * rate * 100) / 100
 }
 
+/** Line selling rate for invoice/grid display: unit rate × qty (same basis as line MRP). */
+export function lineSellingRateDisplay(rowOrItem) {
+  const q = Number(rowOrItem?.qty) || 0
+  const unitRate = Number(rowOrItem?.rate) || 0
+  if (q > 0) return Math.round(q * unitRate * 100) / 100
+  return unitRate
+}
+
 /**
  * Line discount in ₹ applied in totals:
  * - If batch MRP exists, line_discount% already updates selling rate from MRP in the editor,
@@ -120,7 +149,7 @@ export function lineDiscountRupeesFromPercent(row) {
   const mrp = Number(row?.batch?.mrp)
   if (Number.isFinite(mrp) && mrp > 0) return 0
   const base = Math.round(q * (Number(row?.rate) || 0) * 100) / 100
-  const pct = Math.min(100, Math.max(0, Number(row?.line_discount) || 0))
+  const pct = parseCompletePercentInput(row?.line_discount) ?? (Number(row?.line_discount) || 0)
   return Math.round((base * pct) / 100 * 100) / 100
 }
 
