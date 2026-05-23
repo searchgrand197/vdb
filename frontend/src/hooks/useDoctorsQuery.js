@@ -7,7 +7,7 @@ export function useDoctorsQuery(params = {}) {
   return useQuery({
     queryKey: [...doctorsQueryKey, params],
     queryFn: () => fetchDoctors(params),
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
 }
 

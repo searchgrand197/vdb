@@ -7,7 +7,7 @@ export function useStaffQuery(params = {}) {
   return useQuery({
     queryKey: [...staffQueryKey, params],
     queryFn: () => fetchStaff(params),
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
 }
 

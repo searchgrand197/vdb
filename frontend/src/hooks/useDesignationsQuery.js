@@ -12,7 +12,7 @@ export function useDesignationsQuery(params = {}) {
   return useQuery({
     queryKey: [...designationsQueryKey, params],
     queryFn: () => fetchDesignations(params),
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
 }
 

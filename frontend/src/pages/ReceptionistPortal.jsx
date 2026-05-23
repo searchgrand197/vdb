@@ -517,6 +517,31 @@ function FollowUpAlertBanner() {
   );
 }
 
+// Module-level cache for the OPD template layout.
+// Survives re-renders and component unmounts within the same browser session.
+// Invalidated when the user explicitly saves a new layout (update_layout endpoint).
+let _opdTemplateCached = null
+
+async function fetchOpdTemplate() {
+  if (_opdTemplateCached !== null) return _opdTemplateCached
+  try {
+    const res = await fetch('/api/templates')
+    if (res.ok) {
+      const data = await res.json()
+      const single = (data.templates || []).find(t => t.key === 'single')
+      _opdTemplateCached = single?.layout ?? false
+    }
+  } catch {
+    // Leave cache null so next call retries.
+  }
+  return _opdTemplateCached
+}
+
+// Clear module cache whenever the OPD template editor saves a new layout.
+if (typeof window !== 'undefined') {
+  window.addEventListener('opd-template-updated', () => { _opdTemplateCached = null })
+}
+
 // ─── OPD Slip Print ──────────────────────────────────────────────────────────
 function PrintSlip({ visit, onClose }) {
   const [layoutFields, setLayoutFields] = useState([])
@@ -535,51 +560,47 @@ function PrintSlip({ visit, onClose }) {
   useEffect(() => {
     const loadOpdLayout = async () => {
       try {
-        const res = await fetch('/api/templates')
-        if (res.ok) {
-          const data = await res.json()
-          const single = (data.templates || []).find(t => t.key === 'single')
-          if (single?.layout?.fields) {
-            const fields = Object.keys(single.layout.fields)
-            setLayoutFields(fields)
-            setTemplateLayout(single.layout)
-            const initValues = {}
-            for (const f of fields) {
-              const lowerF = f.toLowerCase()
-              const compactF = lowerF.replace(/[\s_-]/g, '')
-              const tokenDateTime = visit.visit_date
-                ? `${displayToken} · ${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})`
-                : displayToken
-              const registeredAtRaw = visit.patient_registered_at || ''
-              const registeredAt = registeredAtRaw ? format(new Date(registeredAtRaw), 'd/M/yyyy (HH:mm)') : ''
-              const gAbbr = (visit.patient_gender === 'female' ? 'F' : visit.patient_gender === 'male' ? 'M' : 'O')
-              const ageSexVal = [gAbbr, visit.patient_age ? String(visit.patient_age) : ''].filter(Boolean).join(' ')
-              let fullAddress = [visit.patient_address, visit.patient_city, visit.patient_state].filter(Boolean).join(', ')
-              if (fullAddress.length > 35) fullAddress = fullAddress.substring(0, 32) + '...'
-              // NOTE: guardian must be checked BEFORE generic 'name' check
-              if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) initValues[f] = guardianLine
-              else if (lowerF.includes('patient') && !lowerF.includes('guardian')) initValues[f] = patientLine
-              else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) initValues[f] = patientLine
-              else if ((lowerF.includes('token') && lowerF.includes('date')) || compactF.includes('tokendate')) initValues[f] = tokenDateTime
-              else if (lowerF.includes('registration')) initValues[f] = registeredAt
-              else if (lowerF.includes('date')) initValues[f] = visit.visit_date ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})` : ''
-              else if (lowerF.includes('reg') || lowerF.includes('uhid')) initValues[f] = visit.patient_uhid || ''
-              else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) initValues[f] = visit.patient_phone || ''
-              else if (lowerF.includes('token') || lowerF.includes('queue') || lowerF.includes('opd') || lowerF.includes('no')) initValues[f] = displayToken
-              else if (compactF.includes('chiefcomplaint') || lowerF.includes('complaint') || lowerF.includes('reason')) initValues[f] = visit.chief_complaint || ''
-              else if (lowerF.includes('doctor') || lowerF.includes('doc')) initValues[f] = visit.doc_name || ''
-              else if (lowerF.includes('age') || lowerF.includes('sex')) initValues[f] = ageSexVal
-              else if (lowerF.includes('gender')) initValues[f] = visit.patient_gender || ''
-              else if (lowerF.includes('address')) initValues[f] = fullAddress
-              else if (lowerF.includes('city') || lowerF.includes('town')) initValues[f] = visit.patient_city || ''
-              else if (lowerF.includes('state')) initValues[f] = visit.patient_state || ''
-              else if (lowerF.includes('amount') || lowerF.includes('fee') || lowerF.includes('charge')) {
-                initValues[f] = visit.amount ? `${visit.amount} (${visit.payment_mode || 'cash'})` : ''
-              }
-              else initValues[f] = ''
+        const layout = await fetchOpdTemplate()
+        if (layout?.fields) {
+          const fields = Object.keys(layout.fields)
+          setLayoutFields(fields)
+          setTemplateLayout(layout)
+          const initValues = {}
+          for (const f of fields) {
+            const lowerF = f.toLowerCase()
+            const compactF = lowerF.replace(/[\s_-]/g, '')
+            const tokenDateTime = visit.visit_date
+              ? `${displayToken} · ${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})`
+              : displayToken
+            const registeredAtRaw = visit.patient_registered_at || ''
+            const registeredAt = registeredAtRaw ? format(new Date(registeredAtRaw), 'd/M/yyyy (HH:mm)') : ''
+            const gAbbr = (visit.patient_gender === 'female' ? 'F' : visit.patient_gender === 'male' ? 'M' : 'O')
+            const ageSexVal = [gAbbr, visit.patient_age ? String(visit.patient_age) : ''].filter(Boolean).join(' ')
+            let fullAddress = [visit.patient_address, visit.patient_city, visit.patient_state].filter(Boolean).join(', ')
+            if (fullAddress.length > 35) fullAddress = fullAddress.substring(0, 32) + '...'
+            // NOTE: guardian must be checked BEFORE generic 'name' check
+            if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) initValues[f] = guardianLine
+            else if (lowerF.includes('patient') && !lowerF.includes('guardian')) initValues[f] = patientLine
+            else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) initValues[f] = patientLine
+            else if ((lowerF.includes('token') && lowerF.includes('date')) || compactF.includes('tokendate')) initValues[f] = tokenDateTime
+            else if (lowerF.includes('registration')) initValues[f] = registeredAt
+            else if (lowerF.includes('date')) initValues[f] = visit.visit_date ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})` : ''
+            else if (lowerF.includes('reg') || lowerF.includes('uhid')) initValues[f] = visit.patient_uhid || ''
+            else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) initValues[f] = visit.patient_phone || ''
+            else if (lowerF.includes('token') || lowerF.includes('queue') || lowerF.includes('opd') || lowerF.includes('no')) initValues[f] = displayToken
+            else if (compactF.includes('chiefcomplaint') || lowerF.includes('complaint') || lowerF.includes('reason')) initValues[f] = visit.chief_complaint || ''
+            else if (lowerF.includes('doctor') || lowerF.includes('doc')) initValues[f] = visit.doc_name || ''
+            else if (lowerF.includes('age') || lowerF.includes('sex')) initValues[f] = ageSexVal
+            else if (lowerF.includes('gender')) initValues[f] = visit.patient_gender || ''
+            else if (lowerF.includes('address')) initValues[f] = fullAddress
+            else if (lowerF.includes('city') || lowerF.includes('town')) initValues[f] = visit.patient_city || ''
+            else if (lowerF.includes('state')) initValues[f] = visit.patient_state || ''
+            else if (lowerF.includes('amount') || lowerF.includes('fee') || lowerF.includes('charge')) {
+              initValues[f] = visit.amount ? `${visit.amount} (${visit.payment_mode || 'cash'})` : ''
             }
-            setFieldValues(initValues)
+            else initValues[f] = ''
           }
+          setFieldValues(initValues)
         }
       } catch (err) {
         // silently fail and fallback to basic slip
@@ -943,14 +964,10 @@ function OPDSection({ rooms }) {
 
     const loadOpdLayout = async () => {
       try {
-        const res = await fetch('/api/templates')
-        if (res.ok) {
-          const data = await res.json()
-          const single = (data.templates || []).find(t => t.key === 'single')
-          if (single?.layout?.fields) {
-            setLayoutFields(Object.keys(single.layout.fields))
-            setTemplateLayout(single.layout)
-          }
+        const layout = await fetchOpdTemplate()
+        if (layout?.fields) {
+          setLayoutFields(Object.keys(layout.fields))
+          setTemplateLayout(layout)
         }
       } catch (err) {}
     }

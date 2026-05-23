@@ -8,6 +8,6 @@ export function usePatientsQuery(params) {
   return useQuery({
     queryKey: patientsQueryKey(params),
     queryFn: () => fetchPatients(params),
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
 }

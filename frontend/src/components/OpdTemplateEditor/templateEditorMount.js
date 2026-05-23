@@ -563,6 +563,7 @@ export function mountTemplateEditor(root) {
       }
       if (res.ok && data.success) {
         setSaveStatus('Layout saved on server and locally.', '');
+        window.dispatchEvent(new CustomEvent('opd-template-updated'));
       } else {
         const hint =
           data.error ||

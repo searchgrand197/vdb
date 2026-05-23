@@ -155,6 +155,14 @@ class OPDVisitSerializer(serializers.ModelSerializer):
         return None
 
     def get_doctor_name(self, obj):
+        if obj.doctor_user is not None:
+            profiles = getattr(obj.doctor_user, '_active_doctor_profiles', None)
+            if profiles is not None:
+                hospital_id = getattr(obj, 'hospital_id', None)
+                for p in profiles:
+                    if str(p.hospital_id) == str(hospital_id):
+                        return p.name.strip()
+                return ""
         return resolve_opd_doctor_name(
             doctor_user=obj.doctor_user,
             hospital_id=getattr(obj, "hospital_id", None),

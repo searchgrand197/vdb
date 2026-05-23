@@ -120,6 +120,7 @@ if POSTGRES_DB:
             "PASSWORD": env("POSTGRES_PASSWORD", default="postgres"),
             "HOST": env("POSTGRES_HOST", default="localhost"),
             "PORT": env("POSTGRES_PORT", default="5432"),
+            "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=60),
         }
     }
 else:
@@ -129,6 +130,15 @@ else:
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
+
+# In-process cache — no extra dependencies, ideal for single-server deployments.
+# All cached keys are scoped per-process and cleared on restart.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "curevice-default",
+    }
+}
 
 
 # Password validation
