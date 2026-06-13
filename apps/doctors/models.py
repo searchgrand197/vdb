@@ -6,7 +6,7 @@ from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUID
 from apps.staff.models import Department
 
 
-class Specialty(TimeStampedModel, UUIDPrimaryKeyModel):
+class Specialty(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="specialties")
     code = models.CharField(max_length=50)
     name = models.CharField(max_length=200)
@@ -14,8 +14,14 @@ class Specialty(TimeStampedModel, UUIDPrimaryKeyModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("hospital", "code")]
         indexes = [models.Index(fields=["hospital", "name"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["hospital", "code"],
+                condition=models.Q(is_deleted=False),
+                name="specialty_hospital_active_code_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -42,7 +48,7 @@ class DoctorProfile(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     specialty = models.ForeignKey(Specialty, on_delete=models.PROTECT, related_name="doctors")
     doctor_type = models.CharField(max_length=20, choices=DoctorType.choices, default=DoctorType.CONSULTANT)
 
-    doctor_code = models.CharField(max_length=80, blank=True, default="")
+    doctor_code = models.CharField(max_length=80)
     name = models.CharField(max_length=200)
     mobile_number = models.CharField(max_length=25, blank=True, default="")
     alternate_mobile_number = models.CharField(max_length=25, blank=True, default="")
@@ -54,6 +60,13 @@ class DoctorProfile(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     class Meta:
         indexes = [
             models.Index(fields=["hospital", "is_active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["hospital", "doctor_code"],
+                condition=models.Q(is_deleted=False),
+                name="doctorprofile_hospital_active_doctor_code_uniq",
+            ),
         ]
 
     def __str__(self) -> str:

@@ -3,6 +3,7 @@ import { Search, Trash2 } from 'lucide-react'
 import { PurchaseSupplierPicker } from './PurchaseSupplierPicker'
 import api from '../api'
 import toast from 'react-hot-toast'
+import { withTimeTokens } from '../utils/dateTimeFormat'
 import { format, isValid, parseISO } from 'date-fns'
 import {
   computeMargGstOnBase,
@@ -18,8 +19,20 @@ import {
   resolveEffectiveGstPercent,
 } from './pharmacyCalculations'
 import { useDebouncedValue } from './useDebouncedValue'
-import { computeBaseQtyFromPacksLoose, expiryBadgeClass, expiryMeta } from './billingUtils'
+import {
+  computeBaseQtyFromPacksLoose,
+  expiryBadgeClass,
+  expiryMeta,
+  formatBillQtyForOutlet,
+  medicineBillAlias,
+  medicineBillName,
+  medicineNickName,
+  qtySuffixFromMedicine,
+  sanitizePackLooseInput,
+} from './billingUtils'
 import { resolveCategoryRules } from './categoryRulePresets'
+import { categoryPathFromId } from './pharmacyCategoryNames'
+import { resolveOutletForChannel } from './outletSettingsUtils'
 
 const MIN_ROWS = 5
 const TAIL_EMPTY = 1
@@ -63,7 +76,7 @@ function safeFormat(dateVal, fmtStr) {
       d = new Date(dateVal)
     }
     if (!isValid(d)) return '--/--'
-    return format(d, fmtStr)
+    return format(d, withTimeTokens(fmtStr))
   } catch {
     return '--/--'
   }
@@ -133,6 +146,7 @@ function createNewRow() {
     loose: '',
     pack_size: 1,
     qty: 0,
+    free_qty: 0,
     rate: 0,
     amount: 0,
     hsn: '',
@@ -181,6 +195,11 @@ function rowExpiryStatus(row) {
 }
 
 const SearchHitRow = memo(function SearchHitRow({ pick, disabled, onPick, categoryRows }) {
+  const categoryPath = React.useMemo(() => {
+    const catId = pick?.medicine?.category
+    if (catId) return categoryPathFromId(catId, categoryRows)
+    return ''
+  }, [pick?.medicine?.category, categoryRows])
   const st = pick.expiry_status
   const badge =
     st === 'expired' ? (
@@ -198,12 +217,26 @@ const SearchHitRow = memo(function SearchHitRow({ pick, disabled, onPick, catego
       className={`w-full text-left px-3 py-2 hover:bg-blue-50 hover:border-l-2 hover:border-l-blue-500 flex gap-2 items-start border-b border-slate-100 transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
       <div className="min-w-0 flex-1">
-        <div className="font-semibold text-[12px] uppercase text-slate-900 truncate">{pick.medicine.name}</div>
+        <div className="font-semibold text-[12px] uppercase text-slate-900 truncate">
+          {medicineNickName(pick.medicine)}
+          {medicineBillAlias(pick.medicine) ? (
+            <span className="normal-case text-slate-400 font-normal ml-1">
+              ({medicineBillAlias(pick.medicine)})
+            </span>
+          ) : null}
+        </div>
+        {categoryPath ? (
+          <div className="text-[9px] text-slate-400 truncate mt-0.5" title={categoryPath}>
+            {categoryPath}
+          </div>
+        ) : null}
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-slate-600">
           <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded">Batch {pick.batch.batch_no}</span>
-          <span className="bg-violet-50 text-violet-700 border border-violet-100 px-1.5 py-0.5 rounded">
-            Category {pick.medicine.form || '—'}
-          </span>
+          {pick.medicine.form ? (
+            <span className="bg-violet-50 text-violet-700 border border-violet-100 px-1.5 py-0.5 rounded">
+              {pick.medicine.form}
+            </span>
+          ) : null}
           <span className="font-medium whitespace-nowrap">
             Exp {safeFormat(pick.batch.expiry_date, 'dd/MM/yyyy')}
           </span>
@@ -220,13 +253,27 @@ const SearchHitRow = memo(function SearchHitRow({ pick, disabled, onPick, catego
   )
 })
 
+function mergePatientDetailsForInvoice(selectedPt, fromApi) {
+  if (!selectedPt) return fromApi || null
+  const base = fromApi && typeof fromApi === 'object' ? { ...fromApi } : {}
+  return {
+    ...base,
+    ...selectedPt,
+    phone: String(selectedPt.phone ?? base.phone ?? '').trim(),
+    address_line1: String(selectedPt.address_line1 ?? base.address_line1 ?? '').trim(),
+    city: String(selectedPt.city ?? base.city ?? '').trim(),
+    state: String(selectedPt.state ?? base.state ?? '').trim(),
+    _walkInBilling: Boolean(selectedPt._walkInBilling),
+  }
+}
+
 function ErpBillingViewInner({
   medicines: _medicines,
   batches: _batches,
   setInvoices,
   setPrintingInvoice,
   setShowAddMedicine,
-  setShowAddPatient,
+  openAddPatient,
   fetchInitialData,
   selectedPt,
   setSelectedPt,
@@ -239,8 +286,12 @@ function ErpBillingViewInner({
   const defaultInvoiceTime = format(now, 'HH:mm')
   const [rows, setRows] = useState(() => normalizeRows(Array.from({ length: MIN_ROWS }, () => createNewRow()), createNewRow))
   const [activeRow, setActiveRow] = useState(0)
-  const [activeField, setActiveField] = useState('product')
+  const [activeField, setActiveField] = useState(null)
   const b2bEnabled = !!outletSettings?.b2b_enabled
+  const channelOutlet = useMemo(
+    () => resolveOutletForChannel(outletSettings, b2bEnabled ? 'b2b' : 'b2c'),
+    [outletSettings, b2bEnabled],
+  )
   const [partyId, setPartyId] = useState(null)
   const [partyName, setPartyName] = useState('')
   const [partyDetails, setPartyDetails] = useState(null)
@@ -253,8 +304,7 @@ function ErpBillingViewInner({
   const [searchLoading, setSearchLoading] = useState(false)
   /** When set, this row shows product search to replace medicine/batch (same row id). */
   const [replacingRowId, setReplacingRowId] = useState(null)
-  /** Default off so new sale bills start as Non-GST unless user enables GST. */
-  const [gstEnabled, setGstEnabled] = useState(false)
+  const [gstEnabled, setGstEnabled] = useState(() => !!channelOutlet?.default_sale_gst_enabled)
   const [invoiceNo, setInvoiceNo] = useState('')
   const [invoiceDate, setInvoiceDate] = useState(defaultInvoiceDate)
   const [invoiceTime, setInvoiceTime] = useState(defaultInvoiceTime)
@@ -273,20 +323,37 @@ function ErpBillingViewInner({
   const rateRefs = useRef({})
   const discRefs = useRef({})
   const gstRefs = useRef({})
+  const patientSearchRef = useRef(null)
+
+  const focusPatientSearch = useCallback(() => {
+    if (b2bEnabled) return
+    window.setTimeout(() => patientSearchRef.current?.focus(), 0)
+  }, [b2bEnabled])
 
   const refreshInvoiceNo = useCallback(() => {
+    const channel = b2bEnabled ? 'b2b' : 'b2c'
     api
-      .get('/pharmacy/invoice/next-number/')
+      .get(`/pharmacy/invoice/next-number/?channel=${channel}`)
       .then((res) => {
         const d = res.data?.data ?? res.data
         setInvoiceNo(d?.invoice_no || '')
       })
       .catch(() => {})
-  }, [])
+  }, [b2bEnabled])
 
   React.useEffect(() => {
     refreshInvoiceNo()
   }, [refreshInvoiceNo])
+
+  React.useEffect(() => {
+    if (!b2bEnabled && !selectedPt) {
+      focusPatientSearch()
+    }
+  }, [b2bEnabled, selectedPt, focusPatientSearch])
+
+  React.useEffect(() => {
+    setGstEnabled(!!channelOutlet?.default_sale_gst_enabled)
+  }, [channelOutlet?.default_sale_gst_enabled])
 
   React.useEffect(() => {
     if (debouncedPtSearch.length <= 2) {
@@ -416,7 +483,7 @@ function ErpBillingViewInner({
     }
   }, [])
 
-  const defaultGst = parseOutletDefaultGstPercent(outletSettings?.default_gst_percent)
+  const defaultGst = parseOutletDefaultGstPercent(channelOutlet?.default_gst_percent)
 
   const patchRowById = useCallback((rowId, partial) => {
     setRows((prev) => {
@@ -429,7 +496,9 @@ function ErpBillingViewInner({
         merged.loose = ''
       }
       if ('packs' in partial || 'loose' in partial || 'pack_size' in partial) {
-        merged.qty = computeBaseQtyFromPacksLoose(merged.packs, merged.loose, merged.pack_size)
+        const { qty, freeQty } = computeBaseQtyFromPacksLoose(merged.packs, merged.loose, merged.pack_size)
+        merged.qty = qty
+        merged.free_qty = freeQty
       }
       const mrpNum = Number(merged.batch?.mrp)
       const hasMrp = Number.isFinite(mrpNum) && mrpNum > 0 && merged.medicine
@@ -492,13 +561,15 @@ function ErpBillingViewInner({
 
   // Broadcast current bill to sales-display tab via localStorage
   React.useEffect(() => {
-    const activeLines = rows.filter((r) => r.medicine && Number(r.qty) > 0)
+    const activeLines = rows.filter(
+      (r) => r.medicine && (Number(r.qty) > 0 || Number(r.free_qty) > 0),
+    )
     if (!activeLines.length && !selectedPt && !partyId) {
       localStorage.removeItem('pharmacy_bill_display')
       return
     }
     localStorage.setItem('pharmacy_bill_display', JSON.stringify({
-      pharmacyName: outletSettings?.business_name || 'Pharmacy',
+      pharmacyName: channelOutlet?.business_name || outletSettings?.business_name || 'Pharmacy',
       customerName: b2bEnabled
         ? partyName
         : selectedPt ? `${selectedPt.first_name} ${selectedPt.last_name}` : '',
@@ -524,9 +595,22 @@ function ErpBillingViewInner({
         const netAmount = Math.round(Number(r.qty) * Number(r.rate) * 100) / 100
         const mrp = Number(r.batch?.mrp) || null
         const discPct = parseCompletePercentInput(r.line_discount) ?? (Number(r.line_discount) || 0)
-        return {
-          name: r.medicine?.name || '',
+        const packSize = Math.max(1, Number(r.pack_size) || 1)
+        const qtyDisplayMode =
+          channelOutlet?.sale_bill_qty_display === 'pack_and_loose' ? 'pack_and_loose' : 'base_units'
+        const qtyLabel = formatBillQtyForOutlet({
+          mode: qtyDisplayMode,
+          packs: r.packs,
+          loose: r.loose,
           qty: r.qty,
+          freeQty: r.free_qty || 0,
+          packSize,
+          baseSuffix: qtySuffixFromMedicine(r.medicine),
+        })
+        return {
+          name: medicineBillName(r.medicine) || r.medicine?.name || '',
+          qty: r.qty,
+          qtyLabel,
           mrp: mrp,
           rate: r.rate,
           discountPct: discPct,
@@ -539,7 +623,7 @@ function ErpBillingViewInner({
       grandTotal: netGrandTotal,
       updatedAt: Date.now(),
     }))
-  }, [rows, selectedPt, partyId, partyName, partyDetails, netGrandTotal, taxableSubtotal, cgst, sgst, outletSettings, b2bEnabled])
+  }, [rows, selectedPt, partyId, partyName, partyDetails, netGrandTotal, taxableSubtotal, cgst, sgst, channelOutlet, outletSettings, b2bEnabled])
 
   React.useEffect(() => {
     if (!replacingRowId) return
@@ -694,6 +778,8 @@ function ErpBillingViewInner({
       const m = {
         id: pick.medicine.id,
         name: pick.medicine.name,
+        name_on_bill: pick.medicine.name_on_bill || '',
+        category: pick.medicine.category,
         sku: pick.medicine.sku,
         pack_info: pick.medicine.pack_info,
         form: pick.medicine.form,
@@ -807,7 +893,9 @@ function ErpBillingViewInner({
       toast.error(b2bEnabled ? 'Select Party' : 'Select Patient')
       return
     }
-    const valid = rows.filter((r) => r.medicine && r.batch && Number(r.qty) > 0)
+    const valid = rows.filter(
+      (r) => r.medicine && r.batch && (Number(r.qty) > 0 || Number(r.free_qty) > 0),
+    )
     if (!valid.length) {
       toast.error('No items')
       return
@@ -828,12 +916,15 @@ function ErpBillingViewInner({
         setDraftInvoiceToLoad(null)
       }
 
+      const walkInMeta = !b2bEnabled && selectedPt?._walkInBilling
       const { data: invData } = await api.post('/pharmacy/invoices/', {
         patient: b2bEnabled ? null : selectedPt.id,
         party: b2bEnabled ? partyId : null,
         ipd_admission: b2bEnabled ? null : (linkedAdmission?.id || null),
         // IPD assigned_doctor is a User id; invoice referred_by expects DoctorProfile id.
         referred_by: b2bEnabled ? null : (doctorProfileIdByUserId[String(linkedAdmission?.assigned_doctor || '')] || null),
+        billing_doctor_name: walkInMeta ? (selectedPt._billingDoctorName || '') : '',
+        billing_hospital_name: walkInMeta ? (selectedPt._billingHospitalName || '') : '',
         invoice_no: invoiceNo || undefined,
         date: invoiceDate || undefined,
         gst_enabled: gstEnabled,
@@ -885,6 +976,7 @@ function ErpBillingViewInner({
             medicine: r.medicine.id,
             batch: r.batch.id,
             qty: r.qty,
+            free_qty: r.free_qty || 0,
             mrp: r.batch?.mrp ?? 0,
             rate: r.rate,
             amount: marg.taxableAmount.toFixed(2),
@@ -908,6 +1000,10 @@ function ErpBillingViewInner({
             pack_info: r.pack || r.medicine?.pack_info || '',
           },
           batch: r.batch,
+          packs_display: r.packs,
+          loose_display: r.loose,
+          pack_size: r.pack_size,
+          free_qty: r.free_qty || 0,
         }
       })
       let invForPrint = invoice
@@ -921,7 +1017,9 @@ function ErpBillingViewInner({
         ...invForPrint,
         gst_enabled: gstEnabled,
         items: builtItems,
-        patient_details: invForPrint.patient_details || (b2bEnabled ? null : selectedPt),
+        patient_details: b2bEnabled
+          ? null
+          : mergePatientDetailsForInvoice(selectedPt, invForPrint.patient_details),
         party_name: invForPrint.party_name || (b2bEnabled ? partyName : ''),
         party_details:
           invForPrint.party_details ||
@@ -988,22 +1086,62 @@ function ErpBillingViewInner({
               ) : (
                 <div className="space-y-1">
                   {selectedPt ? (
-                    <div className="flex items-center justify-between bg-blue-50 border border-blue-200 px-2 py-0.5 rounded text-[11px] font-semibold">
-                      <span className="truncate text-blue-800">
-                        {selectedPt.first_name} {selectedPt.last_name} ({selectedPt.uhid})
-                      </span>
-                      <button type="button" onClick={() => setSelectedPt(null)} className="text-blue-500 shrink-0 ml-1">
-                        ×
-                      </button>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between bg-blue-50 border border-blue-200 px-2 py-0.5 rounded text-[11px] font-semibold">
+                        <span className="truncate text-blue-800">
+                          {selectedPt.first_name} {selectedPt.last_name}
+                          {!selectedPt._walkInBilling && selectedPt.uhid ? ` (${selectedPt.uhid})` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedPt(null)
+                            focusPatientSearch()
+                          }}
+                          className="text-blue-500 shrink-0 ml-1"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1">
+                        <label className="min-w-0">
+                          <span className="text-[8px] font-bold text-slate-500 uppercase">Mobile</span>
+                          <input
+                            type="text"
+                            value={selectedPt.phone || ''}
+                            onChange={(e) =>
+                              setSelectedPt((prev) => (prev ? { ...prev, phone: e.target.value } : prev))
+                            }
+                            placeholder="Optional"
+                            className="mt-0.5 w-full bg-white border border-slate-200 rounded px-1.5 py-0.5 text-[10px] outline-none focus:border-blue-500"
+                          />
+                        </label>
+                        <label className="min-w-0">
+                          <span className="text-[8px] font-bold text-slate-500 uppercase">Address</span>
+                          <input
+                            type="text"
+                            value={selectedPt.address_line1 || ''}
+                            onChange={(e) =>
+                              setSelectedPt((prev) =>
+                                prev ? { ...prev, address_line1: e.target.value } : prev,
+                              )
+                            }
+                            placeholder="Optional"
+                            className="mt-0.5 w-full bg-white border border-slate-200 rounded px-1.5 py-0.5 text-[10px] outline-none focus:border-blue-500"
+                          />
+                        </label>
+                      </div>
                     </div>
                   ) : (
                     <div className="relative">
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-300" size={12} />
                       <input
+                        ref={patientSearchRef}
                         type="text"
                         placeholder="NAME / UHID / MOBILE"
                         value={ptSearch}
                         onChange={(e) => setPtSearch(e.target.value)}
+                        onFocus={() => setActiveField('patient')}
                         className="w-full bg-slate-50 border border-slate-200 pl-7 pr-2 py-0.5 rounded text-[11px] font-medium focus:bg-white focus:border-blue-500 outline-none uppercase"
                       />
                       {ptSearch.length > 2 && (
@@ -1025,8 +1163,10 @@ function ErpBillingViewInner({
                                   <div className="font-semibold text-slate-900">
                                     {p.first_name} {p.last_name}
                                   </div>
-                                  <div className="text-[9px] text-slate-400 flex items-center gap-1.5">
-                                    <span>{p.phone} | {p.uhid}</span>
+                                  <div className="text-[9px] text-slate-400 flex items-center gap-1.5 flex-wrap">
+                                    {p.phone ? <span>{p.phone}</span> : null}
+                                    {p.phone && p.uhid ? <span>|</span> : null}
+                                    {p.uhid ? <span>{p.uhid}</span> : null}
                                     {activeAdmissionByPatientId[String(p.id)] ? (
                                       <span className="px-1 py-0.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 font-semibold">
                                         Admitted · {activeAdmissionByPatientId[String(p.id)]?.bed_code || 'IPD'}
@@ -1046,7 +1186,7 @@ function ErpBillingViewInner({
                           <div className="border-t border-slate-100 p-1.5 bg-slate-50/70">
                             <button
                               type="button"
-                              onClick={() => setShowAddPatient(true)}
+                              onClick={() => openAddPatient?.(ptSearch)}
                               className="w-full text-left text-[10px] font-semibold text-blue-600 hover:text-blue-700"
                             >
                               + Add patient
@@ -1249,7 +1389,12 @@ function ErpBillingViewInner({
                         >
                           <div className="flex items-center gap-1 min-w-0">
                             <span className="font-semibold text-slate-900 uppercase truncate text-[11px]">
-                              {row.medicine.name}
+                              {medicineNickName(row.medicine)}
+                              {medicineBillAlias(row.medicine) ? (
+                                <span className="normal-case text-slate-400 font-normal ml-1">
+                                  ({medicineBillAlias(row.medicine)})
+                                </span>
+                              ) : null}
                             </span>
                             {expSt === 'expired' && (
                               <span className="shrink-0 text-[6px] font-bold px-1 rounded bg-rose-600 text-white">EXPIRED</span>
@@ -1308,7 +1453,7 @@ function ErpBillingViewInner({
                         }}
                         inputMode="numeric"
                         value={row.packs}
-                        onChange={(e) => patchRowById(row.id, { packs: e.target.value.replace(/\D/g, '') })}
+                        onChange={(e) => patchRowById(row.id, { packs: sanitizePackLooseInput(e.target.value) })}
                         onKeyDown={(e) => handleRowEnter(e, row.id, 'packs')}
                         className={INP_NUM}
                         title={isSingleUnitPack ? 'Quantity' : 'Packs (integer)'}
@@ -1333,7 +1478,7 @@ function ErpBillingViewInner({
                           }}
                           inputMode="decimal"
                           value={row.loose}
-                          onChange={(e) => patchRowById(row.id, { loose: e.target.value })}
+                          onChange={(e) => patchRowById(row.id, { loose: sanitizePackLooseInput(e.target.value) })}
                           onKeyDown={(e) => handleRowEnter(e, row.id, 'loose')}
                           className={INP_NUM}
                           title="Loose units"

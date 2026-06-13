@@ -25,8 +25,48 @@ import { AppTable } from '@/components/AppTable';
 import { AppDialog } from '@/components/AppDialog';
 import { AppStatusBadge } from '@/components/AppStatusBadge';
 import { useToast } from '@admin/context/ToastContext';
-import { doctorFormSchema } from '@admin/modules/doctors/doctorSchema';
-import { getApiErrorMessage } from '@/utils/apiError';
+import {
+  doctorFormSchema,
+  DOCTOR_TYPE_OPTIONS,
+  DOCTOR_TYPE_VALUES,
+} from '@admin/modules/doctors/doctorSchema';
+import { getApiErrorMessage, getApiFieldErrors } from '@/utils/apiError';
+import { focusAndScrollToFormField } from '@/utils/formFocus';
+
+const DOCTOR_API_FIELD_FOCUS_ORDER = [
+  'doctor_code',
+  'name',
+  'doctor_type',
+  'departments',
+  'specialty',
+  'mobile_number',
+  'alternate_mobile_number',
+  'address',
+  'consultation_fee',
+  'user',
+];
+
+const DOCTOR_FORM_FIELD_KEYS = new Set([...DOCTOR_API_FIELD_FOCUS_ORDER, 'is_active']);
+
+/** Collapse `departments.0` → `departments` for RHF field names. */
+function normalizeApiFieldErrors(fieldErrors) {
+  const out = {};
+  if (!fieldErrors) return out;
+  for (const [k, msg] of Object.entries(fieldErrors)) {
+    const base = k.includes('.') ? k.slice(0, k.indexOf('.')) : k;
+    if (!out[base]) out[base] = msg;
+  }
+  return out;
+}
+
+function pickFirstDoctorFieldForFocus(normalizedErrors) {
+  if (!normalizedErrors || !Object.keys(normalizedErrors).length) return null;
+  for (const key of DOCTOR_API_FIELD_FOCUS_ORDER) {
+    if (normalizedErrors[key]) return key;
+  }
+  const keys = Object.keys(normalizedErrors).filter((k) => DOCTOR_FORM_FIELD_KEYS.has(k));
+  return keys[0] ?? null;
+}
 
 function doctorRowMeta(raw, departmentLookup, specialtyLookup) {
   const id = raw?.id ?? raw?.pk;
@@ -139,11 +179,16 @@ export function DoctorsPage() {
     return map;
   }, [specialtyOptions]);
 
+  const allDoctorsRaw = useMemo(() => data?.data ?? [], [data?.data]);
+
   const {
     register,
     handleSubmit,
     control,
     reset,
+    setError,
+    setFocus,
+    clearErrors,
     formState: { errors },
   } = useForm({
     resolver: zodResolver(doctorFormSchema),
@@ -184,7 +229,7 @@ export function DoctorsPage() {
     reset({
       doctor_code: raw.doctor_code || '',
       name: raw.name || '',
-      doctor_type: raw.doctor_type || 'consultant',
+      doctor_type: DOCTOR_TYPE_VALUES.has(raw.doctor_type) ? raw.doctor_type : 'consultant',
       departments: Array.isArray(raw.departments) ? raw.departments.map(String) : [],
       specialty: raw.specialty != null ? String(raw.specialty) : '',
       mobile_number: raw.mobile_number || '',
@@ -204,6 +249,25 @@ export function DoctorsPage() {
 
   const onSubmit = async (values) => {
     setFormError('');
+    clearErrors();
+    const codeNorm = values.doctor_code.trim().toLowerCase();
+    const duplicate = allDoctorsRaw.some((raw) => {
+      const rid = raw?.id ?? raw?.pk;
+      const existing = (raw?.doctor_code ?? '').trim().toLowerCase();
+      if (!existing) return false;
+      if (formMode === 'edit' && editingId != null && String(rid) === String(editingId)) return false;
+      return existing === codeNorm;
+    });
+    if (duplicate) {
+      setError('doctor_code', {
+        type: 'manual',
+        message: 'This doctor code is already in use at your hospital.',
+      });
+      setFormError('This doctor code is already in use at your hospital.');
+      focusAndScrollToFormField('doctor_code', setFocus);
+      return;
+    }
+
     const payload = toApiPayload(values);
     try {
       if (formMode === 'create') {
@@ -215,7 +279,24 @@ export function DoctorsPage() {
       }
       closeForm();
     } catch (e) {
-      setFormError(getApiErrorMessage(e));
+      const fieldErrors = getApiFieldErrors(e);
+      if (fieldErrors) {
+        const normalized = normalizeApiFieldErrors(fieldErrors);
+        for (const [key, msg] of Object.entries(normalized)) {
+          if (DOCTOR_FORM_FIELD_KEYS.has(key)) {
+            setError(key, { type: 'server', message: msg });
+          }
+        }
+        const focusField = pickFirstDoctorFieldForFocus(normalized);
+        if (focusField) {
+          setFormError(normalized[focusField] ?? getApiErrorMessage(e));
+          focusAndScrollToFormField(focusField, setFocus);
+        } else {
+          setFormError(getApiErrorMessage(e));
+        }
+      } else {
+        setFormError(getApiErrorMessage(e));
+      }
     }
   };
 
@@ -385,12 +466,24 @@ export function DoctorsPage() {
             error={Boolean(errors.name)}
             helperText={errors.name?.message}
           />
-          <AppTextField
-            label="Doctor type"
-            placeholder="e.g. consultant"
-            {...register('doctor_type')}
-            error={Boolean(errors.doctor_type)}
-            helperText={errors.doctor_type?.message}
+          <Controller
+            name="doctor_type"
+            control={control}
+            render={({ field, fieldState }) => (
+              <AppSelect
+                label="Doctor type"
+                id="doctor_type"
+                required
+                {...field}
+                error={fieldState.error}
+              >
+                {DOCTOR_TYPE_OPTIONS.map((opt) => (
+                  <MenuItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </MenuItem>
+                ))}
+              </AppSelect>
+            )}
           />
           <Controller
             name="departments"

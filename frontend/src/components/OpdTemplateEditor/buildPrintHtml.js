@@ -1,6 +1,13 @@
+import { formatDateTime } from '../../utils/dateTimeFormat'
+
 // Builds a standalone OPD print HTML page from the current layout + values.
 // Kept as a plain JS file (not JSX) to avoid Vite parse issues with
 // raw HTML string literals that contain <script> and </script> tags.
+
+import { computeSlipLabelChCount, slipColumnAlignEnabled } from './slipLabelColumn.js'
+import { useStyledTableHeaderRow } from './opdTableHeaderRow.js'
+import { normalizeOpdFieldConfig, resolveSlipFieldLabel } from './opdCoreFields.js'
+import { filterLayoutFieldsForSlip } from './syncCoreFieldsIntoLayout.js'
 
 const CANVAS_W = 1024
 const CANVAS_H = 1451
@@ -13,18 +20,23 @@ function esc(str) {
     .replace(/"/g, '&quot;')
 }
 
-/**
- * @param {{ noPrintScript?: boolean }} [opts]
- *   noPrintScript – omit the inline window.print() call (use when caller
- *   triggers print from the parent via iframe.contentWindow.print()).
- */
-export function buildPrintHtml(layout, values, withBackground, opts = {}) {
-  const { noPrintScript = false } = opts
-  const printOffsetX = typeof layout.printOffsetX === 'number' ? layout.printOffsetX : 0
-  const printOffsetY = typeof layout.printOffsetY === 'number' ? layout.printOffsetY : 0
-  const bgSrc        = layout.backgroundDataUrl || null
-  const fieldNames   = layout.fields ? Object.keys(layout.fields) : []
-  const noteIds      = layout.notes  ? Object.keys(layout.notes)  : []
+export function buildPrintHtml(layout, values, withBackground, opdFieldConfig) {
+  const printOffsetX    = typeof layout.printOffsetX === 'number' ? layout.printOffsetX : 0
+  const printOffsetY    = typeof layout.printOffsetY === 'number' ? layout.printOffsetY : 0
+  const showFieldLabels = layout.showFieldLabels === true
+  const slipColumns = slipColumnAlignEnabled(layout)
+  const bgSrc           = layout.backgroundDataUrl || null
+  const normalizedFieldConfig = normalizeOpdFieldConfig(opdFieldConfig)
+  const slipFields = filterLayoutFieldsForSlip(layout, normalizedFieldConfig)
+  const fieldNames      = Object.keys(slipFields)
+  const noteIds         = layout.notes  ? Object.keys(layout.notes)  : []
+  const shapeIds        = layout.shapes ? Object.keys(layout.shapes) : []
+  const tableIds        = layout.tables ? Object.keys(layout.tables) : []
+
+  const slipLabelChStyle =
+    slipColumns && fieldNames.length > 0
+      ? ' style="--opd-slip-label-ch:' + computeSlipLabelChCount({ ...layout, fields: slipFields }, normalizedFieldConfig) + 'ch"'
+      : ''
 
   const hasBg      = !!bgSrc
   const showBg     = withBackground && hasBg
@@ -33,22 +45,120 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     ? 'template-editor-canvas opd-sheet opd-sheet--with-bg'
     : 'template-editor-canvas opd-sheet'
 
+  // ── Shapes ──────────────────────────────────────────────────────────────────
+  const shapeBoxes = shapeIds.map((id) => {
+    const cfg  = layout.shapes[id] || {}
+    const x    = typeof cfg.x === 'number' ? cfg.x : 0
+    const y    = typeof cfg.y === 'number' ? cfg.y : 0
+    const left = (((x + printOffsetX) / CANVAS_W) * 100).toFixed(4)
+    const top  = (((y + printOffsetY) / CANVAS_H) * 100).toFixed(4)
+
+    if (cfg.type === 'line') {
+      const isH   = cfg.orientation !== 'vertical'
+      const len   = cfg.length    || 200
+      const thick = cfg.thickness || 1
+      const color = cfg.color     || '#000000'
+      const style = cfg.style     || 'solid'
+      const fs    = ((thick / 600) * 100).toFixed(4)
+      if (isH) {
+        const w = ((len / CANVAS_W) * 100).toFixed(4)
+        return '<div style="position:absolute;left:' + left + '%;top:' + top + '%;width:' + w + '%;height:0;border-top:' + fs + 'cqw ' + style + ' ' + esc(color) + ';z-index:1;"></div>'
+      } else {
+        const h = ((len / CANVAS_H) * 100).toFixed(4)
+        return '<div style="position:absolute;left:' + left + '%;top:' + top + '%;width:0;height:' + h + '%;border-left:' + fs + 'cqw ' + style + ' ' + esc(color) + ';z-index:1;"></div>'
+      }
+    }
+
+    // rect
+    const w    = (((cfg.width  || 200) / CANVAS_W) * 100).toFixed(4)
+    const h    = (((cfg.height || 60)  / CANVAS_H) * 100).toFixed(4)
+    const bw   = (((cfg.borderWidth || 1) / 600) * 100).toFixed(4)
+    const bc   = cfg.borderColor || '#000000'
+    const bs   = cfg.borderStyle || 'solid'
+    const fill = cfg.fillColor   || 'transparent'
+    const br   = cfg.borderRadius
+      ? (((cfg.borderRadius / CANVAS_W) * 100).toFixed(4) + '%')
+      : '0'
+    return '<div style="position:absolute;left:' + left + '%;top:' + top + '%;width:' + w + '%;height:' + h + '%;border:' + bw + 'cqw ' + bs + ' ' + esc(bc) + ';background-color:' + esc(fill) + ';border-radius:' + br + ';z-index:2;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;"></div>'
+  }).join('\n')
+
+  // ── Tables ───────────────────────────────────────────────────────────────────
+  const tableBoxes = tableIds.map((id) => {
+    const cfg       = layout.tables[id] || {}
+    const x         = typeof cfg.x === 'number' ? cfg.x : 0
+    const y         = typeof cfg.y === 'number' ? cfg.y : 0
+    const left      = (((x + printOffsetX) / CANVAS_W) * 100).toFixed(4)
+    const top       = (((y + printOffsetY) / CANVAS_H) * 100).toFixed(4)
+    const cols      = cfg.cols      || 2
+    const rows      = cfg.rows      || 2
+    const colWidths = cfg.colWidths || Array(cols).fill(200)
+    const totalW    = colWidths.reduce((a, b) => a + b, 0)
+    const rowHeight = cfg.rowHeight || 50
+    const headers   = cfg.headers   || []
+    const styledHdr = useStyledTableHeaderRow(cfg)
+    const bc        = cfg.borderColor || '#374151'
+    const bw        = cfg.borderWidth  || 1
+    const hBg       = cfg.headerBg || '#f3f4f6'
+    const tableW    = ((totalW / CANVAS_W) * 100).toFixed(4)
+    const tableH    = (((rows * rowHeight) / CANVAS_H) * 100).toFixed(4)
+    const cellFs    = ((10 / 600) * 100).toFixed(4)
+    const rowH      = (100 / rows).toFixed(2)
+
+    let tHtml = '<div style="position:absolute;left:' + left + '%;top:' + top + '%;width:' + tableW + '%;height:' + tableH + '%;z-index:2;overflow:hidden;box-sizing:border-box;">'
+    tHtml += '<table style="border-collapse:collapse;width:100%;height:100%;table-layout:fixed;">'
+    for (let ri = 0; ri < rows; ri++) {
+      tHtml += '<tr style="height:' + rowH + '%;">'
+      for (let ci = 0; ci < cols; ci++) {
+        const isHdr    = styledHdr && ri === 0
+        const hText    = isHdr ? esc(headers[ci] || '') : ''
+        const bg       = isHdr ? hBg : 'transparent'
+        const fw       = isHdr ? '600' : 'normal'
+        const colPct   = ((colWidths[ci] / totalW) * 100).toFixed(2)
+        tHtml += '<td style="width:' + colPct + '%;border:' + bw + 'px solid ' + esc(bc) + ';background:' + bg + ';font-weight:' + fw + ';font-size:' + cellFs + 'cqw;padding:0 2px;overflow:hidden;color:#000;font-family:system-ui,sans-serif;">' + hText + '</td>'
+      }
+      tHtml += '</tr>'
+    }
+    tHtml += '</table></div>'
+    return tHtml
+  }).join('\n')
+
+  // ── Fields ───────────────────────────────────────────────────────────────────
   const fieldBoxes = fieldNames.map((name) => {
-    const cfg   = layout.fields[name] || {}
-    const x     = typeof cfg.x === 'number' ? cfg.x : CANVAS_W / 2
-    const y     = typeof cfg.y === 'number' ? cfg.y : CANVAS_H / 2
-    const left  = (((x + printOffsetX) / CANVAS_W) * 100).toFixed(4)
-    const top   = (((y + printOffsetY) / CANVAS_H) * 100).toFixed(4)
-    const size  = cfg.size || 13
-    const fs    = ((size / 600) * 100).toFixed(4)
+    const cfg  = slipFields[name] || {}
+    const x    = typeof cfg.x === 'number' ? cfg.x : CANVAS_W / 2
+    const y    = typeof cfg.y === 'number' ? cfg.y : CANVAS_H / 2
+    const left = (((x + printOffsetX) / CANVAS_W) * 100).toFixed(4)
+    const top  = (((y + printOffsetY) / CANVAS_H) * 100).toFixed(4)
+    const size = cfg.size || 13
+    const fs   = ((size / 600) * 100).toFixed(4)
+    const fw   = cfg.bold   ? 'bold'   : 'normal'
+    const fi   = cfg.italic ? 'italic' : 'normal'
+    const fc   = esc(cfg.color  || '#000000')
+
     let val = values[name] ?? ''
     if (name.toLowerCase().includes('address') && val.length > 35) {
       val = val.substring(0, 32) + '...'
     }
-    const text  = esc(val)
-    return '<div class="field-box" style="left:' + left + '%;top:' + top + '%;font-size:' + fs + 'cqw;">' + text + '</div>'
+    const labelText = resolveSlipFieldLabel(name, cfg, layout, normalizedFieldConfig)
+    const slipRow = slipColumns && val && labelText
+    const rowClass = slipRow ? 'field-box field-box--slip-row' : 'field-box'
+    const inner =
+      slipRow
+        ? '<span class="field-box-slip-label">' + esc(labelText) + '</span>' +
+          '<span class="field-box-value-text">' + esc(val) + '</span>'
+        : labelText && val
+          ? esc(labelText + val)
+          : esc(val)
+    const taAttr = slipRow ? 'start' : 'left'
+    return (
+      '<div class="' + rowClass + '" style="left:' + left + '%;top:' + top + '%;font-size:' + fs +
+      'cqw;font-weight:' + fw + ';font-style:' + fi + ';color:' + fc + ';text-align:' + taAttr + ';">' +
+      inner +
+      '</div>'
+    )
   }).join('\n')
 
+  // ── Notes ────────────────────────────────────────────────────────────────────
   const noteBoxes = noteIds.map((id) => {
     const cfg  = layout.notes[id] || {}
     const x    = typeof cfg.x === 'number' ? cfg.x : CANVAS_W / 2
@@ -57,27 +167,23 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     const top  = (((y + printOffsetY) / CANVAS_H) * 100).toFixed(4)
     const size = cfg.size || 11
     const fs   = ((size / 600) * 100).toFixed(4)
+    const fw   = cfg.bold   ? 'bold'   : 'normal'
+    const fi   = cfg.italic ? 'italic' : 'normal'
+    const fc   = esc(cfg.color || '#000000')
     const text = esc(cfg.text || '')
-    return '<div class="field-box" style="left:' + left + '%;top:' + top + '%;font-size:' + fs + 'cqw;">' + text + '</div>'
+    return '<div class="field-box" style="left:' + left + '%;top:' + top + '%;font-size:' + fs + 'cqw;font-weight:' + fw + ';font-style:' + fi + ';color:' + fc + ';text-align:left;">' + text + '</div>'
   }).join('\n')
 
+  // ── Timestamp ────────────────────────────────────────────────────────────────
   const dPrinted = new Date()
-  const pad2 = (n) => String(n).padStart(2, '0')
-  const printedAtStr = esc(
-    `${pad2(dPrinted.getDate())}/${pad2(dPrinted.getMonth() + 1)}/${dPrinted.getFullYear()} ${pad2(dPrinted.getHours())}:${pad2(dPrinted.getMinutes())}:${pad2(dPrinted.getSeconds())}`
-  )
-  const printedAtHtml =
-    '<div class="opd-printed-at">Printed at: ' + printedAtStr + '</div>'
+  const printedAtStr = esc(formatDateTime(dPrinted, { withSeconds: true }))
+  const printedAtHtml = '<div class="opd-printed-at">Printed at: ' + printedAtStr + '</div>'
 
-  const bgTag = showBg ? '<img src="' + bgSrc + '" alt="" />' : ''
-
+  const bgTag         = showBg ? '<img src="' + bgSrc + '" alt="" />' : ''
   const chromeDisplay = showChrome ? 'flex' : 'none'
   const imgDisplay    = showBg    ? 'block' : 'none'
 
-  // Build inline script as array joined with '' to avoid esbuild parsing the closing tag.
-  // When noPrintScript=true the caller (printHtmlInFrame) drives printing from the parent
-  // via iframe.contentWindow.print(), so we skip the self-print call to avoid a double dialog.
-  const inlineScript = noPrintScript ? '' : [
+  const inlineScript = [
     '(function () {',
     '  var finalized = false;',
     '  function finalize() {',
@@ -91,11 +197,13 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     '  window.addEventListener("afterprint", finalize, { once: true });',
     '  window.addEventListener("focus", function () { setTimeout(finalize, 200); }, { once: true });',
     '  setTimeout(finalize, 120000);',
-    '  window.addEventListener("load", function () {',
+    '  function triggerPrint() {',
     '    setTimeout(function () {',
     '      try { window.print(); } catch (e) { finalize(); }',
     '    }, 0);',
-    '  }, { once: true });',
+    '  }',
+    '  if (document.readyState === "complete") { triggerPrint(); }',
+    '  else { window.addEventListener("load", triggerPrint, { once: true }); }',
     '})();',
   ].join('\n')
 
@@ -108,7 +216,9 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     '<style>',
     '@page { size: A4 portrait; margin: 0; marks: none; }',
     '*, *::before, *::after { box-sizing: border-box; }',
-    'html, body { margin: 0; padding: 0; background: #fff; }',
+    'html, body { margin: 0; padding: 0; background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }',
+    'table { border-collapse: collapse; }',
+    'td, th { box-sizing: border-box; overflow: hidden; }',
     '.opd-generator-wrap {',
     '  width: 210mm; aspect-ratio: 210 / 297; height: auto;',
     '  position: relative; background: #ffffff;',
@@ -124,6 +234,21 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     '  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
     '  background: transparent; z-index: 2;',
     '}',
+    '.field-box--slip-row {',
+    '  display: flex; flex-direction: row; align-items: baseline; gap: 0.55em;',
+    '  max-width: 100%;',
+    '}',
+    '.field-box-slip-label {',
+    '  flex: 0 0 var(--opd-slip-label-ch, max-content);',
+    '  width: var(--opd-slip-label-ch, max-content);',
+    '  min-width: 0; text-align: right; white-space: nowrap; box-sizing: border-box;',
+    '  padding-inline-end: 0.4ch;',
+    '}',
+    '.field-box-value-text, .field-box-value-slot {',
+    '  flex: 1 1 auto; min-width: 0; text-align: right; white-space: nowrap;',
+    '}',
+    '.field-box-value-text { font-style: normal; font-weight: inherit; opacity: 1; }',
+    '.field-box-preview-part { opacity: 0.42; font-style: italic; font-weight: 400; }',
     '.opd-printed-at {',
     '  position: absolute; bottom: 2mm; right: 3mm; font-size: 8px; color: #555;',
     '  z-index: 6; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
@@ -169,7 +294,7 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     '</head>',
     '<body>',
     '<div class="opd-generator-wrap">',
-    '  <div class="' + sheetClass + '">',
+    '  <div class="' + sheetClass + '"' + slipLabelChStyle + '>',
     '    ' + bgTag,
     '    <div class="opd-sheet-chrome" aria-hidden="true">',
     '      <header class="opd-header">',
@@ -233,6 +358,8 @@ export function buildPrintHtml(layout, values, withBackground, opts = {}) {
     '        <div class="opd-bar-teal"></div>',
     '      </footer>',
     '    </div>',
+    '    ' + shapeBoxes,
+    '    ' + tableBoxes,
     '    ' + fieldBoxes,
     '    ' + noteBoxes,
     '    ' + printedAtHtml,

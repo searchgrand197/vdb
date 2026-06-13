@@ -11,10 +11,18 @@ function readBootAuthState() {
       role: null,
       pharmacyBranchId: null,
       pharmacyBranchLabel: null,
+      allowedPharmacyIds: [],
     };
   }
 
-  const fromPersist = { user: null, tokens: { access: null, refresh: null }, role: null, pharmacyBranchId: null, pharmacyBranchLabel: null };
+  const fromPersist = {
+    user: null,
+    tokens: { access: null, refresh: null },
+    role: null,
+    pharmacyBranchId: null,
+    pharmacyBranchLabel: null,
+    allowedPharmacyIds: [],
+  };
   try {
     const persistedRaw = localStorage.getItem('hms-auth');
     if (persistedRaw) {
@@ -28,6 +36,9 @@ function readBootAuthState() {
       fromPersist.role = state.role || null;
       fromPersist.pharmacyBranchId = state.pharmacyBranchId || null;
       fromPersist.pharmacyBranchLabel = state.pharmacyBranchLabel || null;
+      fromPersist.allowedPharmacyIds = Array.isArray(state.allowedPharmacyIds)
+        ? state.allowedPharmacyIds
+        : [];
     }
   } catch {
     // Ignore malformed persisted payload and fall back to legacy keys.
@@ -49,12 +60,19 @@ function readBootAuthState() {
     }
   }
 
+  const allowedPharmacyIds = Array.isArray(fromPersist.allowedPharmacyIds)
+    ? fromPersist.allowedPharmacyIds
+    : Array.isArray(user?.allowed_pharmacy_ids)
+      ? user.allowed_pharmacy_ids
+      : [];
+
   return {
     user,
     tokens: { access, refresh },
     role,
     pharmacyBranchId,
     pharmacyBranchLabel,
+    allowedPharmacyIds,
   };
 }
 
@@ -94,6 +112,16 @@ function normalizeUser(raw) {
     is_active: isActive !== false,
     is_staff: isStaff !== false,
     is_superuser: isSuperuser,
+    allowed_portals: Array.isArray(raw?.allowed_portals)
+      ? raw.allowed_portals
+      : Array.isArray(u?.allowed_portals)
+        ? u.allowed_portals
+        : [],
+    allowed_pharmacy_ids: Array.isArray(raw?.allowed_pharmacy_ids)
+      ? raw.allowed_pharmacy_ids
+      : Array.isArray(u?.allowed_pharmacy_ids)
+        ? u.allowed_pharmacy_ids
+        : [],
     ...(hospitalId != null && hospitalId !== ''
       ? { hospital_id: String(hospitalId), hospital_name: hospitalName ?? null }
       : {}),
@@ -155,6 +183,7 @@ export const useAuthStore = create(
       role: bootAuthState.role,
       pharmacyBranchId: bootAuthState.pharmacyBranchId,
       pharmacyBranchLabel: bootAuthState.pharmacyBranchLabel,
+      allowedPharmacyIds: bootAuthState.allowedPharmacyIds,
       hasHydrated: false,
 
       /** Internal: marks persist rehydration completion */
@@ -173,7 +202,15 @@ export const useAuthStore = create(
        * @param {{ id?: string, label?: string }} [pharmacyBranch] — for pharmacy role
        */
       login: async (email, password, role, pharmacyBranch = null) => {
-        const { data } = await api.post('/auth/login/', { email, password });
+        const body = {
+          email,
+          password,
+          intended_portal: role,
+        };
+        if (role === 'pharmacy' && pharmacyBranch?.id) {
+          body.pharmacy_branch_id = pharmacyBranch.id;
+        }
+        const { data } = await api.post('/auth/login/', body);
         const payload = data?.data || data;
 
         const accessToken = payload.access;
@@ -183,6 +220,30 @@ export const useAuthStore = create(
         }
 
         const user = normalizeUser(payload);
+        const allowedPharmacyIds = Array.isArray(payload.allowed_pharmacy_ids)
+          ? payload.allowed_pharmacy_ids.map(String)
+          : [];
+
+        if (
+          role === 'pharmacy' &&
+          pharmacyBranch?.id &&
+          allowedPharmacyIds.length > 0 &&
+          !allowedPharmacyIds.includes(String(pharmacyBranch.id))
+        ) {
+          const err = new Error(
+            'Your account is not allowed to access this pharmacy branch.'
+          );
+          err.response = {
+            status: 403,
+            data: {
+              errors: {
+                detail: [err.message],
+                allowed_pharmacy_ids: allowedPharmacyIds,
+              },
+            },
+          };
+          throw err;
+        }
 
         const newState = {
           user,
@@ -190,12 +251,13 @@ export const useAuthStore = create(
           role,
           pharmacyBranchId: pharmacyBranch?.id || null,
           pharmacyBranchLabel: pharmacyBranch?.label || null,
+          allowedPharmacyIds,
         };
 
         set(newState);
         syncToLegacyKeys(newState);
 
-        return { user, tokens: { access: accessToken, refresh: refreshToken } };
+        return { user, tokens: { access: accessToken, refresh: refreshToken }, allowedPharmacyIds };
       },
 
       /**
@@ -212,6 +274,7 @@ export const useAuthStore = create(
           role: null,
           pharmacyBranchId: null,
           pharmacyBranchLabel: null,
+          allowedPharmacyIds: [],
         };
         set(clearedState);
         syncToLegacyKeys(clearedState);
@@ -290,6 +353,7 @@ export const useAuthStore = create(
         role: state.role,
         pharmacyBranchId: state.pharmacyBranchId,
         pharmacyBranchLabel: state.pharmacyBranchLabel,
+        allowedPharmacyIds: state.allowedPharmacyIds,
       }),
       // After rehydration, sync to legacy keys and always mark hydration
       // complete so route guards don't hang when storage is empty or errors.

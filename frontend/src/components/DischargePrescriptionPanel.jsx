@@ -7,6 +7,7 @@ import {
   DEFAULT_DOSAGE_PATTERNS,
   DEFAULT_TIMING_OPTIONS,
   calculateRxQty,
+  pickDefaultPharmacyBranchId,
 } from '../pharmacy/rxConstants'
 
 function newKey() {
@@ -41,7 +42,7 @@ export default function DischargePrescriptionPanel({
       .then(r => {
         const list = r.data?.data || r.data?.results || []
         setBranches(list)
-        if (list.length) setBranchId(String(list[0].id))
+        if (list.length) setBranchId(pickDefaultPharmacyBranchId(list))
       })
       .catch(() => {})
   }, [open, branches.length])

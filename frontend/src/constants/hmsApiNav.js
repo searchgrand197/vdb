@@ -15,11 +15,14 @@ import HotelOutlined from '@mui/icons-material/HotelOutlined';
 import MedicalServicesOutlined from '@mui/icons-material/MedicalServicesOutlined';
 import PeopleOutline from '@mui/icons-material/PeopleOutlined';
 import PaymentsOutlined from '@mui/icons-material/PaymentsOutlined';
+import AccountBalanceWalletOutlined from '@mui/icons-material/AccountBalanceWalletOutlined';
+import BarChartOutlined from '@mui/icons-material/BarChartOutlined';
 import ScheduleOutlined from '@mui/icons-material/ScheduleOutlined';
 import CategoryOutlined from '@mui/icons-material/CategoryOutlined';
 import GroupsOutlined from '@mui/icons-material/GroupsOutlined';
 import ConfirmationNumberOutlined from '@mui/icons-material/ConfirmationNumberOutlined';
 import SecurityOutlined from '@mui/icons-material/SecurityOutlined';
+import LocalOfferOutlined from '@mui/icons-material/LocalOfferOutlined';
 
 import { ALL_ROLES, ROLES } from '@/constants/roles';
 
@@ -29,10 +32,11 @@ const ALL = ALL_ROLES;
 export const HMS_API_RESOURCES = [
   {
     segment: 'permissions',
-    title: 'My permissions',
-    apiListPath: '/api/v1/me/permissions/',
+    title: 'Portal access',
+    apiListPath: '/api/v1/designations/',
     Icon: SecurityOutlined,
     roles: ALL,
+    customElement: true,
   },
   {
     segment: 'appointments',
@@ -88,6 +92,14 @@ export const HMS_API_RESOURCES = [
     roles: ALL,
   },
   {
+    segment: 'beds',
+    title: 'Bed Management',
+    apiListPath: '/api/v1/beds/beds/',
+    Icon: HotelOutlined,
+    roles: ALL,
+    customElement: true,
+  },
+  {
     segment: 'invoices',
     title: 'Invoices',
     apiListPath: '/api/v1/invoices/',
@@ -124,6 +136,22 @@ export const HMS_API_RESOURCES = [
     roles: [ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN],
   },
   {
+    segment: 'cash-collection',
+    title: 'Cash collection',
+    apiListPath: '/api/v1/handovers/balance/',
+    Icon: AccountBalanceWalletOutlined,
+    roles: [ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN],
+    customElement: true,
+  },
+  {
+    segment: 'daily-report',
+    title: 'Daily Report',
+    apiListPath: '/api/v1/reports/collection-summary/',
+    Icon: BarChartOutlined,
+    roles: [ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN],
+    customElement: true,
+  },
+  {
     segment: 'shifts',
     title: 'Shifts',
     apiListPath: '/api/v1/shifts/',
@@ -144,6 +172,14 @@ export const HMS_API_RESOURCES = [
     apiListPath: '/api/v1/specialties/',
     Icon: CategoryOutlined,
     roles: ALL,
+    customElement: true,
+  },
+  {
+    segment: 'schemes',
+    title: 'Schemes',
+    apiListPath: '/api/v1/schemes/',
+    Icon: LocalOfferOutlined,
+    roles: [ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN],
     customElement: true,
   },
   {

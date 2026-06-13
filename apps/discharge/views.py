@@ -4,14 +4,24 @@ from django.db.models import Q, Sum
 from django.utils.dateparse import parse_date, parse_datetime, parse_time
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from apps.discharge.models import DischargeInvestigation, DischargeMedication, DischargeSummary, DischargeSurgery
-from apps.discharge.serializers import DischargeSummarySerializer
+from apps.discharge.catalog import build_discharge_field_catalog, sanitize_discharge_template_payload
+from apps.discharge.constants import DISCHARGE_TEXT_FIELDS
+from apps.discharge.models import (
+    DischargeInvestigation,
+    DischargeMedication,
+    DischargeSummary,
+    DischargeSummaryTemplate,
+    DischargeSurgery,
+)
+from apps.discharge.serializers import DischargeSummarySerializer, DischargeSummaryTemplateSerializer
 from apps.ipd.models import IPDAdmission
 from apps.billing.models import BillingInvoice
+from apps.billing.collection_attribution import apply_attribution_to_invoice
 from apps.payments.models import PaymentTransaction
-from apps.pharmacy.models import PharmacyInvoice
+from apps.settings_management.document_number_service import render_document_number
 
 
 def _parse_bool(val):
@@ -61,8 +71,9 @@ def _doctor_display_name(user):
 class DischargeSummaryViewSet(viewsets.ModelViewSet):
     queryset = (
         DischargeSummary.objects.all()
-        .select_related("admission", "admission__patient", "admission__assigned_doctor")
+        .select_related("admission", "admission__patient", "admission__assigned_doctor", "admission__scheme")
         .prefetch_related("medication_rows", "investigation_rows", "surgery_rows")
+        .order_by("-updated_at", "-created_at")
     )
     serializer_class = DischargeSummarySerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -76,13 +87,12 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
 
         admission_id = self.request.query_params.get("admission_id")
         if admission_id:
-            filtered_qs = filtered_qs.filter(admission_id=admission_id).order_by(
-                "-updated_at", "-created_at"
-            )
-        return filtered_qs
+            filtered_qs = filtered_qs.filter(admission_id=admission_id)
+        return filtered_qs.order_by("-updated_at", "-created_at")
 
     def _finalize_admission(self, admission, hospital_id, summary=None):
         # 1. Finalize Room Charges before closing (skip for death/abscond discharge types)
+        from django.db import transaction
         from django.utils import timezone
 
         from apps.beds.models import Bed
@@ -93,60 +103,82 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
             DischargeSummary.DischargeType.ABSCONDED,
         )
 
-        end_date = timezone.now().date()
-        delta = end_date - admission.admission_date
-        stay_days = max(1, delta.days)
+        from apps.ipd.services import ipd_stay_days
 
-        if not skip_room_invoice and admission.bed_code:
-            bed = Bed.objects.filter(bed_code=admission.bed_code, hospital_id=hospital_id).select_related("room").first()
-            if bed and bed.room:
-                daily_rate = bed.room.daily_charge
-                total_room_amount = stay_days * daily_rate
+        stay_days = ipd_stay_days(admission)
+        end_date = (
+            summary.discharge_date
+            if summary and summary.discharge_date
+            else timezone.now().date()
+        )
 
-                if total_room_amount > 0:
-                    year = end_date.year
-                    seq, _ = InvoiceNumberSequence.objects.select_for_update().get_or_create(
-                        hospital_id=hospital_id, year=year
-                    )
-                    seq.last_seq += 1
-                    seq.save(update_fields=["last_seq"])
+        with transaction.atomic():
+            if not skip_room_invoice and admission.bed_code:
+                room_invoice_exists = BillingInvoice.objects.filter(
+                    ipd_admission=admission,
+                    invoice_no__startswith="IPDROOM-",
+                    status=BillingInvoice.Status.FINALIZED,
+                ).exists()
+                bed = Bed.objects.filter(bed_code=admission.bed_code, hospital_id=hospital_id).select_related("room").first()
+                if not room_invoice_exists and bed and bed.room:
+                    daily_rate = bed.room.daily_charge
+                    if admission.room_rent_daily_charge_override is not None:
+                        daily_rate = admission.room_rent_daily_charge_override
+                        total_room_amount = stay_days * daily_rate
+                    elif admission.room_rent_override is not None:
+                        total_room_amount = admission.room_rent_override
+                        daily_rate = (
+                            (total_room_amount / Decimal(stay_days))
+                            if stay_days
+                            else total_room_amount
+                        )
+                    else:
+                        total_room_amount = stay_days * daily_rate
 
-                    slug_part = (admission.hospital.slug or admission.hospital.name or "HOSP")[:5].upper()
-                    room_inv_no = f"IPDROOM-{slug_part}-{year}-{seq.last_seq:04d}"
+                    if total_room_amount > 0:
+                        year = end_date.year
+                        seq, _ = InvoiceNumberSequence.objects.select_for_update().get_or_create(
+                            hospital_id=hospital_id, year=year
+                        )
+                        seq.last_seq += 1
+                        seq.save(update_fields=["last_seq"])
 
-                    room_invoice = BillingInvoice.objects.create(
-                        hospital_id=hospital_id,
-                        invoice_no=room_inv_no,
-                        encounter_type=BillingInvoice.EncounterType.IPD,
-                        patient=admission.patient,
-                        ipd_admission=admission,
-                        status=BillingInvoice.Status.FINALIZED,
-                        subtotal_amount=total_room_amount,
-                        total_amount=total_room_amount,
-                        amount_paid=Decimal("0.00"),
-                        currency="INR",
-                        invoice_date=end_date,
-                    )
-                    InvoiceItem.objects.create(
-                        invoice=room_invoice,
-                        description=f"Room Charges: {admission.bed_code} ({stay_days} days @ ₹{daily_rate})",
-                        quantity=Decimal(str(stay_days)),
-                        unit_price=daily_rate,
-                        line_total=total_room_amount,
-                    )
+                        room_inv_no = render_document_number(admission.hospital, "ipd_room", year, seq.last_seq)
 
-        # 2. Mark the admission as discharged
-        if admission.status != IPDAdmission.Status.DISCHARGED:
-            admission.status = IPDAdmission.Status.DISCHARGED
-            admission.discharged_at = timezone.now()
-            admission.save(update_fields=["status", "discharged_at"])
+                        room_invoice = BillingInvoice.objects.create(
+                            hospital_id=hospital_id,
+                            invoice_no=room_inv_no,
+                            encounter_type=BillingInvoice.EncounterType.IPD,
+                            patient=admission.patient,
+                            ipd_admission=admission,
+                            status=BillingInvoice.Status.FINALIZED,
+                            subtotal_amount=total_room_amount,
+                            total_amount=total_room_amount,
+                            amount_paid=Decimal("0.00"),
+                            currency="INR",
+                            invoice_date=end_date,
+                        )
+                        apply_attribution_to_invoice(room_invoice, ipd_admission=admission)
+                        InvoiceItem.objects.create(
+                            invoice=room_invoice,
+                            description=f"Room Charges: {admission.bed_code} ({stay_days} days @ ₹{daily_rate})",
+                            quantity=Decimal(str(stay_days)),
+                            unit_price=daily_rate,
+                            line_total=total_room_amount,
+                        )
 
-        # 3. Release occupied bed immediately after discharge (vacant/available).
-        if admission.bed_code:
-            Bed.objects.filter(
-                bed_code=admission.bed_code,
-                hospital_id=hospital_id,
-            ).update(status=Bed.Status.AVAILABLE)
+            # 2. Mark the admission as discharged
+            if admission.status != IPDAdmission.Status.DISCHARGED:
+                admission.status = IPDAdmission.Status.DISCHARGED
+                admission.discharged_at = timezone.now()
+                admission.save(update_fields=["status", "discharged_at"])
+
+            # 3. Release occupied bed immediately after discharge (vacant/available).
+            if admission.bed_code:
+                Bed.objects.filter(
+                    bed_code=admission.bed_code,
+                    hospital_id=hospital_id,
+                ).update(status=Bed.Status.AVAILABLE)
 
     def create(self, request, *args, **kwargs):
         admission_id = request.data.get("admission")
@@ -170,55 +202,7 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
             defaults={"hospital_id": hospital_id},
         )
 
-        TEXT_FIELDS = [
-            "summary_notes",
-            "treatment_given",
-            "condition_at_discharge",
-            "medications_on_discharge",
-            "follow_up_advice",
-            "reason_for_admission",
-            "diagnosis",
-            "allergies",
-            "procedure_surgery",
-            "medical_history",
-            "physical_examination",
-            "investigations",
-            "course_in_hospital",
-            "diet_advice",
-            "activity_advice",
-            "warning_signs",
-            "chief_complaints",
-            "co_morbidities",
-            "family_history",
-            "personal_history",
-            "complications_during_stay",
-            "blood_transfusion_details",
-            "implants_used",
-            "indwelling_devices_on_discharge",
-            "vaccination_given",
-            "wound_care_instructions",
-            "operative_findings",
-            "intra_op_complications",
-            "referral_reason",
-            "cause_of_death",
-            "surgeon_name",
-            "assistant_name",
-            "anaesthetist_name",
-            "anaesthesia_type",
-            "referred_to_facility",
-            "treating_consultant",
-            "consultant_registration_no",
-            "rmo_signed_by",
-            "follow_up_doctor",
-            "follow_up_department",
-            "notified_to",
-            "abha_id",
-            "insurance_provider",
-            "tpa_name",
-            "policy_number",
-            "claim_number",
-            "attendant_counselled_by",
-        ]
+        TEXT_FIELDS = list(DISCHARGE_TEXT_FIELDS)
 
         CHOICE_FIELDS = ["discharge_type", "discharge_status", "mode_of_admission"]
 
@@ -286,6 +270,9 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
                     {"detail": "Invalid financial values in finalize payload."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            summary.is_draft = False
+        elif "is_draft" in request.data:
+            summary.is_draft = _parse_bool(request.data.get("is_draft"))
 
         summary.hospital_id = hospital_id
         summary.save()
@@ -447,24 +434,14 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
             description__icontains="Room Rent" # Double-check exclusion by description
         ).aggregate(total=Sum("line_total"))["total"] or Decimal("0.00")
 
-        pharmacy_invoices = PharmacyInvoice.objects.filter(
-            ipd_admission=admission,
-            status=PharmacyInvoice.Status.FINALIZED,
-        )
-        pharmacy_services_total = (
-            pharmacy_invoices.aggregate(total=Sum("grand_total"))["total"] or Decimal("0.00")
-        )
-        total_services += pharmacy_services_total
-
         # 2. Dynamic Room Charges
         room_total = Decimal("0.00")
         stay_days = 0
         daily_rate = Decimal("0.00")
         
-        # Determine stay duration (minimum 1 day) - Nights calculation matches ledger
-        end_date = admission.discharged_at.date() if admission.discharged_at else timezone.now().date()
-        delta = end_date - admission.admission_date
-        stay_days = max(1, delta.days)
+        from apps.ipd.services import ipd_stay_days
+
+        stay_days = ipd_stay_days(admission)
 
         # Get room rate (respect per-day or total ledger overrides when set)
         if admission.room_rent_daily_charge_override is not None:
@@ -491,18 +468,6 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
             status=PaymentTransaction.Status.SUCCESS
         ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
-        pharmacy_paid = Decimal("0.00")
-        for pinv in pharmacy_invoices:
-            grand_total = pinv.grand_total or Decimal("0.00")
-            method = (pinv.payment_method or "cash").lower()
-            if method == "credit":
-                paid_amount = max(Decimal("0.00"), pinv.paid_amount or Decimal("0.00"))
-                paid_amount = min(paid_amount, grand_total)
-            else:
-                paid_amount = grand_total
-            pharmacy_paid += paid_amount
-        total_paid += pharmacy_paid
-
         total_billed = total_services + room_total
         outstanding = total_billed - total_paid
 
@@ -518,3 +483,60 @@ class DischargeSummaryViewSet(viewsets.ModelViewSet):
             "total_paid": total_paid,
             "outstanding": outstanding
         })
+
+    @action(detail=False, methods=["get"], url_path="field-catalog")
+    def field_catalog(self, request):
+        """Hospital-wide discharge field suggestions for autocomplete."""
+        hospital_id = getattr(request.user, "hospital_id", None)
+        if request.user.is_superuser:
+            raw = (request.query_params.get("hospital_id") or "").strip()
+            if raw:
+                hospital_id = raw
+        return Response(build_discharge_field_catalog(hospital_id))
+
+
+class DischargeSummaryTemplateViewSet(viewsets.ModelViewSet):
+    queryset = DischargeSummaryTemplate.objects.filter(is_active=True).order_by("name")
+    serializer_class = DischargeSummaryTemplateSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.user.is_superuser:
+            return qs
+        return qs.filter(hospital_id=self.request.user.hospital_id)
+
+    def create(self, request, *args, **kwargs):
+        hospital_id = getattr(request.user, "hospital_id", None)
+        if not hospital_id:
+            return Response({"detail": "User must belong to a hospital."}, status=status.HTTP_400_BAD_REQUEST)
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response({"name": ["This field is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if DischargeSummaryTemplate.objects.filter(hospital_id=hospital_id, name=name, is_active=True).exists():
+            return Response({"name": ["Template with this name already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+        return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        hospital_id = getattr(self.request.user, "hospital_id", None)
+        if not hospital_id:
+            raise ValidationError({"detail": "User must belong to a hospital."})
+        payload = sanitize_discharge_template_payload(self.request.data.get("payload"))
+        serializer.save(
+            hospital_id=hospital_id,
+            payload=payload,
+            created_by=self.request.user,
+            updated_by=self.request.user,
+        )
+
+    def perform_update(self, serializer):
+        save_kwargs = {"updated_by": self.request.user}
+        if "payload" in self.request.data:
+            save_kwargs["payload"] = sanitize_discharge_template_payload(self.request.data.get("payload"))
+        serializer.save(**save_kwargs)
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.updated_by = self.request.user
+        instance.save(update_fields=["is_active", "updated_by", "updated_at"])

@@ -129,19 +129,28 @@ const SummaryCard = React.memo(function SummaryCard({ icon: Icon, iconBg, title,
   )
 })
 
+const todayDefault = () => format(new Date(), 'yyyy-MM-dd')
+
 const PharmacyDashboard = React.memo(function PharmacyDashboard() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [dashboardTab, setDashboardTab] = useState('overview')
   const [gstEnabled, setGstEnabled] = useState(true)
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
-  const [todayDateFrom, setTodayDateFrom] = useState(() => format(new Date(), 'yyyy-MM-dd'))
-  const [todayDateTo, setTodayDateTo] = useState(() => format(new Date(), 'yyyy-MM-dd'))
+  const [draftDateFrom, setDraftDateFrom] = useState('')
+  const [draftDateTo, setDraftDateTo] = useState('')
+  const [appliedDateFrom, setAppliedDateFrom] = useState('')
+  const [appliedDateTo, setAppliedDateTo] = useState('')
+  const [draftTodayFrom, setDraftTodayFrom] = useState(todayDefault)
+  const [draftTodayTo, setDraftTodayTo] = useState(todayDefault)
+  const [appliedTodayFrom, setAppliedTodayFrom] = useState(todayDefault)
+  const [appliedTodayTo, setAppliedTodayTo] = useState(todayDefault)
   const [salesView, setSalesView] = useState('patients')
   const [refreshing, setRefreshing] = useState(false)
   const [medSearch, setMedSearch] = useState('')
+
+  const intervalDraftDirty = draftDateFrom !== appliedDateFrom || draftDateTo !== appliedDateTo
+  const todayDraftDirty = draftTodayFrom !== appliedTodayFrom || draftTodayTo !== appliedTodayTo
 
   const fetchDashboard = useCallback(async (showRefreshLoader = false) => {
     if (showRefreshLoader) setRefreshing(true)
@@ -151,10 +160,10 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
       const params = new URLSearchParams()
       if (gstEnabled) params.set('gst', '1')
       else params.set('gst', '0')
-      if (dateFrom) params.set('date_from', dateFrom)
-      if (dateTo) params.set('date_to', dateTo)
-      if (todayDateFrom) params.set('today_date_from', todayDateFrom)
-      if (todayDateTo) params.set('today_date_to', todayDateTo)
+      if (appliedDateFrom) params.set('date_from', appliedDateFrom)
+      if (appliedDateTo) params.set('date_to', appliedDateTo)
+      if (appliedTodayFrom) params.set('today_date_from', appliedTodayFrom)
+      if (appliedTodayTo) params.set('today_date_to', appliedTodayTo)
       const res = await api.get(`/pharmacy/dashboard/?${params}`)
       setData(res.data?.data || res.data)
     } catch (err) {
@@ -165,11 +174,21 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [gstEnabled, dateFrom, dateTo, todayDateFrom, todayDateTo])
+  }, [gstEnabled, appliedDateFrom, appliedDateTo, appliedTodayFrom, appliedTodayTo])
 
   useEffect(() => { fetchDashboard() }, [fetchDashboard])
 
-  useEffect(() => { setSalesView('patients'); setMedSearch('') }, [todayDateFrom, todayDateTo])
+  useEffect(() => { setSalesView('patients'); setMedSearch('') }, [appliedTodayFrom, appliedTodayTo])
+
+  function applyIntervalRange() {
+    setAppliedDateFrom(draftDateFrom)
+    setAppliedDateTo(draftDateTo)
+  }
+
+  function applyTodayRange() {
+    setAppliedTodayFrom(draftTodayFrom)
+    setAppliedTodayTo(draftTodayTo)
+  }
 
   const sales = data?.sales || {}
   const purchase = data?.purchase || {}
@@ -249,17 +268,25 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
             <Calendar size={12} className="text-slate-400" />
             <input
               type="date"
-              value={dateFrom}
-              onChange={e => setDateFrom(e.target.value)}
+              value={draftDateFrom}
+              onChange={e => setDraftDateFrom(e.target.value)}
               className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
             />
             <span className="text-[10px] text-slate-400">to</span>
             <input
               type="date"
-              value={dateTo}
-              onChange={e => setDateTo(e.target.value)}
+              value={draftDateTo}
+              onChange={e => setDraftDateTo(e.target.value)}
               className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
             />
+            <button
+              type="button"
+              onClick={applyIntervalRange}
+              disabled={!intervalDraftDirty || refreshing}
+              className="px-2 py-0.5 rounded-lg border border-blue-200 bg-blue-50 text-[10px] font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Go
+            </button>
           </div>
           <button
             onClick={() => fetchDashboard(true)}
@@ -322,17 +349,25 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
                 <Calendar size={12} className="text-slate-400" />
                 <input
                   type="date"
-                  value={todayDateFrom}
-                  onChange={e => setTodayDateFrom(e.target.value)}
+                  value={draftTodayFrom}
+                  onChange={e => setDraftTodayFrom(e.target.value)}
                   className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
                 />
                 <span className="text-[10px] text-slate-400">to</span>
                 <input
                   type="date"
-                  value={todayDateTo}
-                  onChange={e => setTodayDateTo(e.target.value)}
+                  value={draftTodayTo}
+                  onChange={e => setDraftTodayTo(e.target.value)}
                   className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
                 />
+                <button
+                  type="button"
+                  onClick={applyTodayRange}
+                  disabled={!todayDraftDirty || refreshing}
+                  className="px-2 py-0.5 rounded-lg border border-blue-200 bg-blue-50 text-[10px] font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Go
+                </button>
               </div>
             </div>
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">

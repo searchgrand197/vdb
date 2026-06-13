@@ -141,6 +141,35 @@
   align-items: flex-start;
 }
 
+/* Editor mode: canvas sticks while sidebar scrolls independently */
+.editor-layout-sticky .template-editor-preview-scroll {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  /* Keep the sheet flush to the column’s left edge (no horizontal centering gap). */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.editor-layout-sticky .template-editor-sidebar {
+  max-height: calc(100vh - -250px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #d1d5db transparent;
+}
+
+.editor-layout-sticky .template-editor-sidebar::-webkit-scrollbar {
+  width: 5px;
+}
+
+.editor-layout-sticky .template-editor-sidebar::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+
 .template-editor-preview-scroll {
   overflow: auto;
   max-width: 100%;
@@ -158,6 +187,7 @@
   aspect-ratio: 210 / 297;
   height: auto;
   flex-shrink: 0;
+  margin-inline: 0;
 }
 
 .template-editor-canvas {
@@ -192,6 +222,54 @@
   cursor: grabbing;
 }
 
+/* Slip column alignment: fixed label width + value column (checkbox "Align slip columns"). */
+.field-box--slip-row,
+.dynamic-field--slip-columns {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: flex-start;
+  /* Clear space after "Name:" before the value column */
+  gap: 0.55em;
+  max-width: 100%;
+}
+
+.field-box-slip-label {
+  font-weight: inherit;
+  flex: 0 0 var(--opd-slip-label-ch, max-content);
+  width: var(--opd-slip-label-ch, max-content);
+  min-width: 0;
+  text-align: right;
+  white-space: nowrap;
+  box-sizing: border-box;
+  /* Extra air after the colon (before the value column) */
+  padding-inline-end: 0.4ch;
+}
+
+.field-box-value-text,
+.field-box-value-slot {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.field-box-value-text {
+  font-style: normal;
+  font-weight: inherit;
+  opacity: 1;
+}
+
+.field-box-preview-part {
+  opacity: 0.42;
+  font-style: italic;
+  font-weight: 400;
+}
+
+.dynamic-field--slip-columns .field-box-preview-part {
+  color: #64748b;
+}
+
 /* —— VARDAAN-style sheet chrome (editor + generator preview) —— */
 .template-editor-canvas.opd-sheet {
   position: relative;
@@ -213,6 +291,18 @@
 
 .template-editor-canvas.opd-sheet .field-box {
   z-index: 2;
+  /* Flush to canvas edges when x/y = 0 (no extra inset from padding). */
+  padding: 0;
+  margin: 0;
+  position: absolute;
+}
+
+/* Editor canvas: field/note boxes hug their text (no fixed empty width to the right). */
+.template-editor-canvas.opd-sheet .field-box.dynamic-field {
+  white-space: nowrap;
+}
+.template-editor-canvas.opd-sheet .field-box.dynamic-note {
+  white-space: pre-wrap;
 }
 
 .opd-generator-wrap {
@@ -548,6 +638,136 @@
 .value-row.disabled .size-toggle {
   background: #e5e7eb;
   color: #9ca3af;
+}
+
+/* ── Value row: stacked variant (field/note rows with style controls) ── */
+.value-row--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+/* ── Style controls (B / I / color / align) ── */
+.style-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 2px 0;
+}
+
+.style-btn {
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #374151;
+  border-radius: 4px;
+  width: 22px;
+  height: 22px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.style-btn.active {
+  background: #111827;
+  color: #f9fafb;
+  border-color: #111827;
+}
+
+.style-btn:hover:not(.active) {
+  background: #e5e7eb;
+}
+
+.style-color {
+  width: 28px;
+  height: 22px;
+  padding: 1px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+/* ── Shape style select (border/line style) ── */
+.shape-style-select {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: pointer;
+  background: #fff;
+  height: 24px;
+}
+
+/* ── Dynamic shape elements on canvas ── */
+.dynamic-shape {
+  position: absolute;
+  cursor: grab;
+  box-sizing: border-box;
+  z-index: 1;
+}
+
+.dynamic-shape:active {
+  cursor: grabbing;
+}
+
+/* Resize handle — bottom-right corner for rects, end for lines */
+.shape-resize-handle {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 10px;
+  height: 10px;
+  background: #3b82f6;
+  border-radius: 50%;
+  cursor: se-resize;
+  z-index: 3;
+  flex-shrink: 0;
+  pointer-events: all;
+}
+
+/* ── Dynamic table elements on canvas ── */
+.dynamic-table {
+  position: absolute;
+  cursor: grab;
+  z-index: 1;
+  overflow: visible;
+  box-sizing: border-box;
+}
+
+.dynamic-table:active {
+  cursor: grabbing;
+}
+
+.dynamic-table-inner {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.dynamic-table table {
+  border-collapse: collapse;
+  width: 100%;
+  height: 100%;
+  table-layout: fixed;
+  pointer-events: none;
+}
+
+.dynamic-table td {
+  border: 1px solid #374151;
+  padding: 1px 3px;
+  font-size: 9px;
+  overflow: hidden;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .editor-colors .color-row input[type='color'] {

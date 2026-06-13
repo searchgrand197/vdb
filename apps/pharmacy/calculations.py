@@ -2,8 +2,35 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from typing import Literal, TypedDict
+
+
+def _tablets_per_strip_from_pack_info(pack_info: str) -> int | None:
+    """e.g. '1x10' or '1 x 10' → 10 tablets per strip (uses the number after x)."""
+    if not pack_info or not str(pack_info).strip():
+        return None
+    m = re.match(r"^\s*(\d+)\s*[x×]\s*(\d+)\s*$", str(pack_info).strip(), re.I)
+    if not m:
+        return None
+    return int(m.group(2))
+
+
+def medicine_pack_size(medicine) -> int:
+    """Base units per retail pack (strip/box); from unit_conversions or pack_info."""
+    conv = getattr(medicine, "unit_conversions", None) or {}
+    for key in ("strip", "STRIP", "box", "BOX", "carton", "CARTON"):
+        v = conv.get(key)
+        if v is not None:
+            try:
+                n = int(float(v))
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                continue
+    t = _tablets_per_strip_from_pack_info(getattr(medicine, "pack_info", None) or "")
+    return t if t and t > 0 else 1
 
 
 class PurchaseLineAmounts(TypedDict):

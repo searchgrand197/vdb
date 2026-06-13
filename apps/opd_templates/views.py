@@ -1,7 +1,6 @@
 import json
 import os
 
-from django.core.cache import cache
 from django.http import HttpResponse
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -10,9 +9,6 @@ from rest_framework.response import Response
 
 from .models import OPDTemplate
 from .serializers import OPDTemplateSerializer
-
-_TEMPLATES_CACHE_KEY = 'opd_templates_list'
-_TEMPLATES_CACHE_TTL = 300  # 5 minutes
 
 # Canvas dimensions (must match frontend constants)
 CANVAS_W = 1024
@@ -24,20 +20,9 @@ CANVAS_H = 731
 @permission_classes([AllowAny])
 def list_templates(request):
     """Return all saved OPD templates with their layout JSON."""
-    cached = cache.get(_TEMPLATES_CACHE_KEY)
-    if cached is not None:
-        response = Response(cached)
-        response['Cache-Control'] = 'public, max-age=300'
-        return response
-
     templates = OPDTemplate.objects.all()
     data = OPDTemplateSerializer(templates, many=True).data
-    payload = {"templates": data}
-    cache.set(_TEMPLATES_CACHE_KEY, payload, _TEMPLATES_CACHE_TTL)
-
-    response = Response(payload)
-    response['Cache-Control'] = 'public, max-age=300'
-    return response
+    return Response({"templates": data})
 
 
 # ─── POST /api/templates/update-layout ───────────────────────────────────────
@@ -63,7 +48,6 @@ def update_layout(request):
     template.name = template.name or key
     template.save()
 
-    cache.delete(_TEMPLATES_CACHE_KEY)
     return Response({"success": True})
 
 
@@ -108,7 +92,6 @@ def upload_template(request):
         template.background_image = image_file
     template.save()
 
-    cache.delete(_TEMPLATES_CACHE_KEY)
     return Response({"success": True, "key": safe_key})
 
 
@@ -241,9 +224,7 @@ def template_bg_image(request, name):
     content_type = content_types.get(ext, "image/png")
 
     with img.open("rb") as f:
-        response = HttpResponse(f.read(), content_type=content_type)
-        response['Cache-Control'] = 'public, max-age=86400'
-        return response
+        return HttpResponse(f.read(), content_type=content_type)
 
 
 # ─── GET /api/health ──────────────────────────────────────────────────────────

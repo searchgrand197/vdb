@@ -1,9 +1,14 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
+from apps.opd.models import OPDVisit
+from apps.patients.models import Patient
 from apps.payments.models import CashHandover
+from apps.settings_management.models import ReceptionPortalSettings
 from apps.shared.models import Hospital
 
 
@@ -41,6 +46,20 @@ class CashHandoverFlowTests(APITestCase):
             hospital=self.other_hospital,
             first_name="Other",
             last_name="Hospital",
+        )
+        self.admin_user = User.objects.create_user(
+            email="admin@example.com",
+            password="Password@123",
+            hospital=self.hospital,
+            first_name="Hospital",
+            last_name="Admin",
+            is_superuser=True,
+        )
+        self.patient = Patient.objects.create(
+            hospital=self.hospital,
+            uhid="UH-TEST-001",
+            first_name="Test",
+            last_name="Patient",
         )
 
     def test_only_recipient_can_verify_handover(self):
@@ -136,3 +155,125 @@ class CashHandoverFlowTests(APITestCase):
             format="json",
         )
         self.assertEqual(initiate_cross_hospital.status_code, 404)
+
+    def test_hospital_collection_forbidden_for_non_admin(self):
+        self.client.force_authenticate(user=self.user_a)
+        response = self.client.get("/api/v1/handovers/hospital-collection/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_hospital_collection_respects_date_range(self):
+        today = timezone.localdate()
+        in_range = OPDVisit.objects.create(
+            hospital=self.hospital,
+            patient=self.patient,
+            visit_date=today,
+            queue_number=1,
+            amount=Decimal("100.00"),
+            payment_mode=OPDVisit.PaymentMode.CASH,
+            status=OPDVisit.Status.COMPLETED,
+            created_by=self.user_a,
+        )
+        out_of_range = OPDVisit.objects.create(
+            hospital=self.hospital,
+            patient=self.patient,
+            visit_date=today - timedelta(days=40),
+            queue_number=2,
+            amount=Decimal("200.00"),
+            payment_mode=OPDVisit.PaymentMode.CASH,
+            status=OPDVisit.Status.COMPLETED,
+            created_by=self.user_a,
+        )
+        old_ts = timezone.now() - timedelta(days=40)
+        OPDVisit.objects.filter(pk=out_of_range.pk).update(created_at=old_ts)
+
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get(
+            "/api/v1/handovers/hospital-collection/",
+            {
+                "date_from": today.replace(day=1).isoformat(),
+                "date_to": today.isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.data["data"]
+        self.assertEqual(payload["collection"]["cash_total"], "100.00")
+        entry_ids = {row["id"] for row in payload["collection_entries"]}
+        self.assertIn(str(in_range.id), entry_ids)
+        self.assertNotIn(str(out_of_range.id), entry_ids)
+
+    def _disable_reception_collection(self):
+        settings, _ = ReceptionPortalSettings.objects.get_or_create(hospital=self.hospital)
+        settings.reception_collection_enabled = False
+        settings.save(update_fields=["reception_collection_enabled", "updated_at"])
+
+    def test_balance_forbidden_when_reception_collection_disabled(self):
+        self._disable_reception_collection()
+        self.client.force_authenticate(user=self.user_a)
+        response = self.client.get("/api/v1/handovers/balance/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_initiate_forbidden_when_reception_collection_disabled(self):
+        self._disable_reception_collection()
+        self.client.force_authenticate(user=self.user_a)
+        response = self.client.post(
+            "/api/v1/handovers/initiate/",
+            {
+                "to_user_id": str(self.user_b.id),
+                "declared_cash_amount": "500.00",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_verify_forbidden_when_reception_collection_disabled(self):
+        self._disable_reception_collection()
+        handover = CashHandover.objects.create(
+            hospital=self.hospital,
+            from_user=self.user_a,
+            to_user=self.user_b,
+            system_cash_amount=Decimal("1000.00"),
+            declared_cash_amount=Decimal("1000.00"),
+            status=CashHandover.Status.PENDING,
+        )
+        self.client.force_authenticate(user=self.user_b)
+        response = self.client.post(
+            "/api/v1/handovers/verify/",
+            {"handover_id": str(handover.id), "action": "accept"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_hospital_collection_omits_handover_data_when_disabled(self):
+        today = timezone.localdate()
+        handover = CashHandover.objects.create(
+            hospital=self.hospital,
+            from_user=self.user_a,
+            to_user=self.user_b,
+            system_cash_amount=Decimal("800.00"),
+            declared_cash_amount=Decimal("800.00"),
+            status=CashHandover.Status.ACCEPTED,
+            accepted_at=timezone.now(),
+        )
+        OPDVisit.objects.create(
+            hospital=self.hospital,
+            patient=self.patient,
+            visit_date=today,
+            queue_number=3,
+            amount=Decimal("50.00"),
+            payment_mode=OPDVisit.PaymentMode.CASH,
+            status=OPDVisit.Status.COMPLETED,
+            created_by=self.user_a,
+        )
+        self._disable_reception_collection()
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get(
+            "/api/v1/handovers/hospital-collection/",
+            {"date_from": today.isoformat(), "date_to": today.isoformat()},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.data["data"]
+        self.assertFalse(payload["reception_collection_enabled"])
+        self.assertEqual(payload["pending_received"], [])
+        entry_types = {row["entry_type"] for row in payload["collection_entries"]}
+        self.assertNotIn("handover", entry_types)
+        self.assertIn("opd", entry_types)

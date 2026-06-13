@@ -176,7 +176,7 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     queryset = Medicine.objects.all().select_related("unit")
     pagination_class = LargeLimitOffsetPagination
     filter_backends = (DjangoFilterBackend, SearchFilter)
-    search_fields = ("sku", "name")
+    search_fields = ("sku", "name", "name_on_bill")
 
     permission_classes = [permissions.IsAuthenticated, HasRequiredPermission]
 
@@ -258,8 +258,8 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
 
         med_qs = (
             Medicine.objects.filter(pharmacy_id=pid, is_active=True)
-            .filter(Q(name__icontains=q) | Q(sku__icontains=q))
-            .select_related("unit")
+            .filter(Q(name__icontains=q) | Q(name_on_bill__icontains=q) | Q(sku__icontains=q))
+            .select_related("unit", "category")
             .order_by("name")[:25]
         )
 
@@ -278,6 +278,7 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
                         "medicine": {
                             "id": str(med.id),
                             "name": med.name,
+                            "name_on_bill": (med.name_on_bill or "").strip(),
                             "sku": med.sku,
                             "pack_info": med.pack_info or "",
                             "hsn_code": med.hsn_code or "",
@@ -285,6 +286,8 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
                             "unit_conversions": med.unit_conversions or {},
                             "unit_name": med.unit.name if med.unit_id else "",
                             "pack_size": pack_size,
+                            "category": str(med.category_id) if med.category_id else None,
+                            "form": med.form or "",
                         },
                         "batch": {
                             "id": str(b.id),
@@ -325,7 +328,7 @@ class MedicineViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
         threshold = 10
         try:
             settings_obj = PharmacyOutletSettings.objects.get(pharmacy_id=pid)
-            threshold = int(settings_obj.low_stock_threshold)
+            threshold = int(settings_obj.b2c_low_stock_threshold)
         except (PharmacyOutletSettings.DoesNotExist, TypeError, ValueError):
             pass
 

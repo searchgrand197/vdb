@@ -47,6 +47,14 @@ class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
         DOCTOR = "doctor", "Doctor charges currently following"
         SLOT = "slot", "Slots wise"
 
+    class AdmissionBedLabelMode(models.TextChoices):
+        BED_CODE = "bed_code", "Bed code"
+        BED_NUMBER = "bed_number", "Bed number"
+
+    class TimeDisplayMode(models.TextChoices):
+        HOUR_12 = "12h", "12 hour"
+        HOUR_24 = "24h", "24 hour"
+
     hospital = models.OneToOneField(
         Hospital,
         on_delete=models.CASCADE,
@@ -75,6 +83,7 @@ class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     )
     invoice_prefix = models.CharField(max_length=20, blank=True, default="INV")
     invoice_next_number = models.PositiveIntegerField(default=1)
+    uhid_prefix = models.CharField(max_length=8, blank=True, default="DEF")
     print_with_background = models.BooleanField(default=True)
     opd_fee_mode = models.CharField(
         max_length=10,
@@ -82,6 +91,40 @@ class ReceptionPortalSettings(TimeStampedModel, UUIDPrimaryKeyModel):
         default=OpdFeeMode.DOCTOR,
     )
     opd_fee_slots = models.JSONField(blank=True, default=list)
+    opd_visible_fields = models.JSONField(
+        blank=True,
+        default=list,
+        help_text="Legacy hidden-field keys; prefer opd_field_config.",
+    )
+    opd_field_config = models.JSONField(blank=True, default=dict)
+    admission_bed_label_mode = models.CharField(
+        max_length=20,
+        choices=AdmissionBedLabelMode.choices,
+        default=AdmissionBedLabelMode.BED_CODE,
+        help_text="Label shown in admission bed picker: bed code or bed number.",
+    )
+    time_display_mode = models.CharField(
+        max_length=4,
+        choices=TimeDisplayMode.choices,
+        default=TimeDisplayMode.HOUR_24,
+        help_text="Hospital-wide time display: 12 hour or 24 hour.",
+    )
+    document_number_formats = models.JSONField(
+        blank=True,
+        default=dict,
+        help_text="Per-document number format templates (uhid, opd, ipd, payment_slip, receipt, ipd_*).",
+    )
+    reception_collection_enabled = models.BooleanField(
+        default=True,
+        help_text=(
+            "When enabled, reception staff use shift collection and handover. "
+            "When disabled, collections are viewed only on the admin cash collection page."
+        ),
+    )
+    reception_daily_report_enabled = models.BooleanField(
+        default=True,
+        help_text="When enabled, reception staff see Daily Report. When disabled, it is admin-only.",
+    )
 
     @staticmethod
     def _time_to_minutes(hhmm: str):

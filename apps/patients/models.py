@@ -63,6 +63,7 @@ class Patient(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     # Receptionist context: why this patient was registered (visible on patient record).
     registration_note = models.TextField(blank=True, default="")
+    opd_custom_fields = models.JSONField(default=dict, blank=True)
 
     emergency_tags = models.CharField(max_length=200, blank=True, default="")
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import Layout from '../components/Layout'
 import api from '../api'
 import toast from 'react-hot-toast'
+import { formatDateTime, useTimeDisplayMode } from '../utils/dateTimeFormat'
 import { format } from 'date-fns'
 import {
   CheckCircle,
@@ -138,7 +139,7 @@ function TaskCard({ task, onDone, onSkip }) {
           {isDone && (
             <div className="flex items-center gap-2 text-emerald-700 text-xs font-semibold">
               <CheckCircle sx={{ fontSize: 14 }} /> Completed
-              {task.completed_at && <span className="text-gray-400 font-normal ml-1">{new Date(task.completed_at).toLocaleString()}</span>}
+              {task.completed_at && <span className="text-gray-400 font-normal ml-1">{formatDateTime(task.completed_at)}</span>}
             </div>
           )}
           {isSkipped && (
@@ -558,7 +559,7 @@ function TasksTab() {
                       </p>
                       {task.completed_at && (
                         <p className="text-[11px] text-emerald-700 mt-1 font-medium">
-                          Completed: {new Date(task.completed_at).toLocaleString()}
+                          Completed: {formatDateTime(task.completed_at)}
                         </p>
                       )}
                     </div>
@@ -887,6 +888,7 @@ function TreatmentPlanTab() {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 export default function StaffPortal() {
+  useTimeDisplayMode()
   const [tab, setTab] = useState('tasks')
   const user = useAuthStore((s) => s.user)
 

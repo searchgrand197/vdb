@@ -21,14 +21,18 @@ import {
   KeyboardDoubleArrowRight as KeyboardDoubleArrowRightIcon,
   Sell as SellIcon,
   Groups as GroupsIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
 import api, { getHospitalId } from '../api'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '../stores/authStore'
+import { withTimeTokens, useTimeDisplayMode } from '../utils/dateTimeFormat'
 import { format } from 'date-fns'
 import ErpBillingView from '../pharmacy/ErpBillingView'
 import PharmacyInvoicePrint from '../pharmacy/PharmacyInvoicePrint'
-import SettingsPanel from '../pharmacy/SettingsPanel'
+import SettingsPanel, { UnsavedSettingsDialog } from '../pharmacy/SettingsPanel'
+import { normalizeOutletSettingsFromApi, resolveOutletForChannel } from '../pharmacy/outletSettingsUtils'
 import PurchaseChallanPanel from '../pharmacy/PurchaseChallanPanel'
 import PurchaseHistoryDashboard from '../pharmacy/PurchaseHistoryDashboard'
 import PharmacyDashboard from '../pharmacy/PharmacyDashboard'
@@ -36,6 +40,7 @@ import PharmacyCategoriesView from '../pharmacy/PharmacyCategoriesView'
 import PartiesView from '../pharmacy/PartiesView'
 import DraftsView from '../pharmacy/DraftsView'
 import { parseApiError } from '../pharmacy/pharmacyCalculations'
+import { normalizeDiscountPercentInput } from '../pharmacy/billingUtils'
 import {
   resolveCategoryRules,
   packFieldLabel,
@@ -71,6 +76,8 @@ const PanelLeftOpen = asMuiIcon(KeyboardDoubleArrowRightIcon)
 const Tags = asMuiIcon(SellIcon)
 const ChevronRight = asMuiIcon(ChevronRightIcon)
 const Groups = asMuiIcon(GroupsIcon)
+const ExpandMore = asMuiIcon(ExpandMoreIcon)
+const ExpandLess = asMuiIcon(ExpandLessIcon)
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -106,13 +113,14 @@ function safeFormat(dateVal, fmtStr) {
   try {
     const d = new Date(dateVal)
     if (isNaN(d.getTime())) return '--/--'
-    return format(d, fmtStr)
+    return format(d, withTimeTokens(fmtStr))
   } catch {
     return '--/--'
   }
 }
 
 export default function PharmacyPortal() {
+  useTimeDisplayMode()
   const [view, setView] = useState('dashboard')
   const [medicines, setMedicines] = useState([])
   const [batches, setBatches] = useState([])
@@ -121,11 +129,40 @@ export default function PharmacyPortal() {
   const [printingInvoice, setPrintingInvoice] = useState(null)
   const [showAddMedicine, setShowAddMedicine] = useState(false)
   const [showAddPatient, setShowAddPatient] = useState(false)
+  const [addPatientSeedName, setAddPatientSeedName] = useState('')
+
+  const openAddPatient = useCallback((seedName = '') => {
+    setAddPatientSeedName(String(seedName || '').trim())
+    setShowAddPatient(true)
+  }, [])
   const [outletSettings, setOutletSettings] = useState(null)
   const [billingPatient, setBillingPatient] = useState(null)
   const [draftInvoiceToLoad, setDraftInvoiceToLoad] = useState(null)
   const [purchaseSubView, setPurchaseSubView] = useState('entry')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 1200)
+  const [settingsNavOpen, setSettingsNavOpen] = useState(true)
+  const [settingsDirty, setSettingsDirty] = useState(false)
+  const [pendingView, setPendingView] = useState(null)
+  const [settingsDialogSaving, setSettingsDialogSaving] = useState(false)
+  const settingsPanelRef = useRef(null)
+
+  const isSettingsView = (v) => v === 'settings_b2b' || v === 'settings_b2c'
+
+  const applyView = useCallback((next) => {
+    setView(next)
+    if (next !== 'purchase') setPurchaseSubView('entry')
+  }, [])
+
+  const requestView = useCallback(
+    (next) => {
+      if (isSettingsView(view) && !isSettingsView(next) && settingsDirty) {
+        setPendingView(next)
+        return
+      }
+      applyView(next)
+    },
+    [view, settingsDirty, applyView],
+  )
 
   const mergeCreatedMedicine = useCallback((med) => {
     if (!med?.id) return
@@ -149,8 +186,7 @@ export default function PharmacyPortal() {
       setBatches(batchRows)
       setInvoices(iResp.data?.data || iResp.data?.results || [])
       const rawS = sResp.data
-      const sd =
-        rawS && typeof rawS === 'object' && 'business_name' in rawS ? rawS : rawS?.data ?? rawS?.entity
+      const sd = normalizeOutletSettingsFromApi(rawS) || (rawS?.data ?? rawS?.entity)
       if (sd) setOutletSettings(sd)
     } catch {
       toast.error('Failed to load pharmacy data')
@@ -176,7 +212,40 @@ export default function PharmacyPortal() {
     window.location.replace('/login')
   }
 
+  const b2cOutlet = useMemo(
+    () => resolveOutletForChannel(outletSettings, 'b2c'),
+    [outletSettings],
+  )
   const brand = outletSettings?.business_name?.trim() || 'Pharmacy'
+
+  const mergeInvoicePrintMeta = useCallback((invoiceId, meta) => {
+    setInvoices((prev) =>
+      prev.map((inv) => (inv.id === invoiceId ? { ...inv, ...meta, has_print_copy: !!meta?.has_print_copy } : inv)),
+    )
+    setPrintingInvoice((prev) =>
+      prev && prev.id === invoiceId ? { ...prev, ...meta, has_print_copy: !!meta?.has_print_copy } : prev,
+    )
+  }, [])
+
+  const openInvoicePreview = useCallback(async (inv, variant = 'original') => {
+    try {
+      const { data } = await api.get(`/pharmacy/invoices/${inv.id}/`)
+      const full = data?.data || data || inv
+      setPrintingInvoice({
+        ...inv,
+        ...full,
+        _printVariant: variant,
+        party_details:
+          full?.party_details ||
+          (typeof full?.party === 'object' ? full.party : null) ||
+          inv?.party_details ||
+          (typeof inv?.party === 'object' ? inv.party : null) ||
+          null,
+      })
+    } catch {
+      setPrintingInvoice({ ...inv, _printVariant: variant })
+    }
+  }, [])
 
   return (
     <div className="h-screen w-screen flex bg-slate-50 text-slate-900 font-sans overflow-hidden text-[14px]">
@@ -203,15 +272,11 @@ export default function PharmacyPortal() {
             { id: 'inventory', label: 'Inventory', icon: Package },
             { id: 'categories', label: 'Categories', icon: Tags },
             { id: 'history', label: 'Register', icon: FileText },
-            { id: 'settings', label: 'Settings', icon: Settings },
           ].filter(Boolean).map((item) => (
             <button
               key={item.id}
               type="button"
-              onClick={() => {
-                setView(item.id)
-                if (item.id !== 'purchase') setPurchaseSubView('entry')
-              }}
+              onClick={() => requestView(item.id)}
               className={`flex items-center gap-2 px-3 py-2 text-xs font-medium border-l-4 ${
                 view === item.id
                   ? 'bg-blue-50 text-blue-700 border-blue-600'
@@ -222,6 +287,40 @@ export default function PharmacyPortal() {
               {item.label}
             </button>
           ))}
+          <div className="mt-0.5">
+            <button
+              type="button"
+              onClick={() => setSettingsNavOpen((o) => !o)}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-xs font-medium border-l-4 ${
+                view === 'settings_b2b' || view === 'settings_b2c'
+                  ? 'bg-blue-50 text-blue-700 border-blue-600'
+                  : 'text-slate-600 border-transparent hover:bg-slate-50'
+              }`}
+            >
+              <Settings size={16} />
+              <span className="flex-1 text-left">Settings</span>
+              {settingsNavOpen ? <ExpandLess size={14} /> : <ExpandMore size={14} />}
+            </button>
+            {settingsNavOpen && (
+              <div className="ml-4 border-l border-slate-100">
+                {[
+                  { id: 'settings_b2b', label: 'B to B' },
+                  { id: 'settings_b2c', label: 'B to C' },
+                ].map((sub) => (
+                  <button
+                    key={sub.id}
+                    type="button"
+                    onClick={() => requestView(sub.id)}
+                    className={`w-full flex items-center gap-2 pl-3 pr-2 py-1.5 text-[11px] font-medium ${
+                      view === sub.id ? 'text-blue-700 bg-blue-50/80' : 'text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    {sub.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </nav>
 
         <div className="p-3 border-t border-slate-200">
@@ -268,7 +367,8 @@ export default function PharmacyPortal() {
                       setView('billing')
                     }}
                     completedInvoices={invoices}
-                    onViewInvoice={(inv) => setPrintingInvoice(inv)}
+                    onViewInvoiceOriginal={(inv) => openInvoicePreview(inv, 'original')}
+                    onViewInvoicePrinted={(inv) => openInvoicePreview(inv, 'printed')}
                   />
                 )}
               </ErrorBoundary>
@@ -280,7 +380,7 @@ export default function PharmacyPortal() {
                     setInvoices={setInvoices}
                     setPrintingInvoice={setPrintingInvoice}
                     setShowAddMedicine={setShowAddMedicine}
-                    setShowAddPatient={setShowAddPatient}
+                    openAddPatient={openAddPatient}
                     fetchInitialData={fetchInitialData}
                     selectedPt={billingPatient}
                     setSelectedPt={setBillingPatient}
@@ -314,7 +414,7 @@ export default function PharmacyPortal() {
                   </div>
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {purchaseSubView === 'entry' ? (
-                      <PurchaseChallanPanel onPosted={fetchInitialData} outletSettings={outletSettings} />
+                      <PurchaseChallanPanel onPosted={fetchInitialData} outletSettings={b2cOutlet} />
                     ) : (
                       <PurchaseHistoryDashboard />
                     )}
@@ -328,7 +428,7 @@ export default function PharmacyPortal() {
                     batches={batches}
                     setShowAddMedicine={setShowAddMedicine}
                     fetchInitialData={fetchInitialData}
-                    outletSettings={outletSettings}
+                    outletSettings={b2cOutlet}
                   />
                 )}
               </ErrorBoundary>
@@ -339,11 +439,20 @@ export default function PharmacyPortal() {
                 {view === 'categories' && <PharmacyCategoriesView batches={batches} />}
               </ErrorBoundary>
               <ErrorBoundary componentName="HistoryView">
-                {view === 'history' && <HistoryView invoices={invoices} setPrintingInvoice={setPrintingInvoice} />}
+                {view === 'history' && (
+                  <HistoryView
+                    invoices={invoices}
+                    onViewInvoiceOriginal={(inv) => openInvoicePreview(inv, 'original')}
+                    onViewInvoicePrinted={(inv) => openInvoicePreview(inv, 'printed')}
+                  />
+                )}
               </ErrorBoundary>
-              {view === 'settings' && (
+              {isSettingsView(view) && (
                 <SettingsPanel
-                  onSaved={(f) => setOutletSettings((prev) => ({ ...prev, ...f }))}
+                  ref={settingsPanelRef}
+                  mode={view === 'settings_b2b' ? 'b2b' : 'b2c'}
+                  onDirtyChange={setSettingsDirty}
+                  onSaved={(f) => setOutletSettings((prev) => ({ ...(prev || {}), ...f }))}
                 />
               )}
             </>
@@ -351,10 +460,34 @@ export default function PharmacyPortal() {
         </main>
       </div>
 
+      <UnsavedSettingsDialog
+        open={pendingView != null}
+        saving={settingsDialogSaving}
+        onCancel={() => setPendingView(null)}
+        onDiscard={() => {
+          settingsPanelRef.current?.discardChanges()
+          const next = pendingView
+          setPendingView(null)
+          if (next) applyView(next)
+        }}
+        onSave={async () => {
+          setSettingsDialogSaving(true)
+          const ok = await settingsPanelRef.current?.save()
+          setSettingsDialogSaving(false)
+          if (ok) {
+            const next = pendingView
+            setPendingView(null)
+            if (next) applyView(next)
+          }
+        }}
+      />
+
       {printingInvoice && (
         <PharmacyInvoicePrint
           invoice={printingInvoice}
           outlet={outletSettings}
+          variant={printingInvoice._printVariant === 'printed' ? 'printed' : 'original'}
+          onPrintCopySaved={mergeInvoicePrintMeta}
           onClose={() => setPrintingInvoice(null)}
         />
       )}
@@ -363,17 +496,27 @@ export default function PharmacyPortal() {
           onClose={() => setShowAddMedicine(false)}
           onRefresh={fetchInitialData}
           onMedicineCreated={mergeCreatedMedicine}
-          defaultGstPercent={outletSettings?.default_gst_percent}
-          defaultSaleDiscountPercent={outletSettings?.default_sale_discount_percent}
+          defaultGstPercent={b2cOutlet?.default_gst_percent}
+          defaultSaleDiscountPercent={b2cOutlet?.default_sale_discount_percent}
         />
       )}
       {showAddPatient && (
         <AddPatientModal
-          onClose={() => setShowAddPatient(false)}
+          initialSearchName={addPatientSeedName}
+          onClose={() => {
+            setShowAddPatient(false)
+            setAddPatientSeedName('')
+          }}
           onAdd={(pt) => {
             const p = pt?.data || pt
-            setBillingPatient(p)
+            setBillingPatient({
+              ...p,
+              _walkInBilling: true,
+              _billingDoctorName: p?._billingDoctorName || '',
+              _billingHospitalName: p?._billingHospitalName || '',
+            })
             setShowAddPatient(false)
+            setAddPatientSeedName('')
             toast.success('Patient selected for billing')
           }}
         />
@@ -623,7 +766,17 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
 
   const qLower = q.toLowerCase()
   const medicineById = buildMedicineByIdMap(medicines)
+  const { idToRow: invCatIdToRow } = React.useMemo(
+    () => buildMedicineCategoryLookups(medicineCategoryRows),
+    [medicineCategoryRows],
+  )
   const medIdsWithBatch = new Set(batches.map((b) => batchMedicineId(b)).filter(Boolean))
+
+  function categoryPathForMedicine(med) {
+    if (!med?.category) return '—'
+    const path = categoryPathLabel(med.category, invCatIdToRow)
+    return path ? path.replace(/ › /g, '>') : '—'
+  }
 
   const filtered = batches
     .filter((b) => {
@@ -644,6 +797,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
     if (!qLower) return false
     return (
       (m.name || '').toLowerCase().includes(qLower) ||
+      (m.name_on_bill || '').toLowerCase().includes(qLower) ||
       (m.sku || '').toLowerCase().includes(qLower)
     )
   })
@@ -789,8 +943,9 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
           <table className="w-full text-left text-[11px] table-fixed border-collapse">
             <thead className="bg-slate-100 sticky top-0 z-10 font-bold text-slate-600 uppercase">
               <tr>
-                <th className="px-2 py-1.5 w-[18%]">Product</th>
-                <th className="px-2 py-1.5 w-[10%]">Batch</th>
+                <th className="px-2 py-1.5 w-[14%]">Product</th>
+                <th className="px-2 py-1.5 w-[12%]">Category</th>
+                <th className="px-2 py-1.5 w-[8%]">Batch</th>
                 <th className="px-2 py-1.5 w-[8%]">Expiry</th>
                 <th className="px-2 py-1.5 w-[16%]">Stock</th>
                 <th className="px-2 py-1.5 w-[7%] text-right">MRP</th>
@@ -818,6 +973,9 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
                         {productName}
                       </div>
                       <div className="text-[10px] text-slate-400 truncate">{med?.pack_info}</div>
+                    </td>
+                    <td className="px-2 py-1 align-top min-w-0 text-[10px] text-slate-600 truncate" title={categoryPathForMedicine(med)}>
+                      {categoryPathForMedicine(med)}
                     </td>
                     <td className="px-2 py-1 align-top min-w-0">
                       <span className="font-mono text-[10px] bg-slate-100 px-1 py-0.5 rounded inline-block max-w-full truncate" title={b.batch_no}>
@@ -886,6 +1044,9 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
                     </div>
                     <div className="text-[10px] text-slate-400 truncate">{m.pack_info}</div>
                   </td>
+                  <td className="px-2 py-1 align-top min-w-0 text-[10px] text-slate-600 truncate" title={categoryPathForMedicine(m)}>
+                    {categoryPathForMedicine(m)}
+                  </td>
                   <td className="px-2 py-1 align-top text-[10px]">
                     <span className="inline-block rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 font-semibold">
                       No batch
@@ -911,7 +1072,7 @@ function InventoryView({ medicines, batches, setShowAddMedicine, fetchInitialDat
               ))}
               {filtered.length === 0 && medicinesWithoutBatch.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-2 py-6 text-center text-[11px] text-slate-500">
+                  <td colSpan={9} className="px-2 py-6 text-center text-[11px] text-slate-500">
                     No inventory records found.
                   </td>
                 </tr>
@@ -1061,6 +1222,8 @@ function InventoryBatchDetailModal({ batch, medicine, medicineCategoryRows = [],
 }
 
 function InventoryEditRateModal({ batch, medicine, customCategories = [], onClose, onSaved }) {
+  const [nickname, setNickname] = useState(String(medicine?.name ?? ''))
+  const [nameOnBill, setNameOnBill] = useState(String(medicine?.name_on_bill ?? ''))
   const [mrp, setMrp] = useState(String(batch.mrp ?? ''))
   const [sale, setSale] = useState(String(batch.sale_rate ?? ''))
   const [saving, setSaving] = useState(false)
@@ -1140,6 +1303,11 @@ function InventoryEditRateModal({ batch, medicine, customCategories = [], onClos
   }
 
   async function save() {
+    const trimmedNick = (nickname || '').trim()
+    if (!trimmedNick) {
+      toast.error('Nick name is required')
+      return
+    }
     setSaving(true)
     try {
       await api.patch(`/batches/${batch.id}/`, {
@@ -1147,7 +1315,11 @@ function InventoryEditRateModal({ batch, medicine, customCategories = [], onClos
         sale_rate: Number(sale) || 0,
       })
       const leafId = categoryPathIds.length ? categoryPathIds[categoryPathIds.length - 1] : null
-      await api.patch(`/medicines/${medicine.id}/`, { category: leafId || null })
+      await api.patch(`/medicines/${medicine.id}/`, {
+        name: trimmedNick,
+        name_on_bill: (nameOnBill || '').trim(),
+        category: leafId || null,
+      })
       toast.success('Updated')
       onSaved?.()
     } catch (e) {
@@ -1171,9 +1343,28 @@ function InventoryEditRateModal({ batch, medicine, customCategories = [], onClos
             <X size={16} />
           </button>
         </div>
-        <p className="text-[9px] text-slate-500 truncate" title={medicine?.name}>
-          {medicine?.name} · <span className="font-mono">{batch.batch_no}</span>
-        </p>
+        <p className="text-[9px] text-slate-500 truncate font-mono">{batch.batch_no}</p>
+
+        <div>
+          <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">Medicine names</p>
+          <label className="block mb-2">
+            <span className="text-[9px] font-semibold text-slate-600">Nick name</span>
+            <input
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+            />
+          </label>
+          <label className="block">
+            <span className="text-[9px] font-semibold text-slate-600">Name on bill (optional)</span>
+            <input
+              value={nameOnBill}
+              onChange={(e) => setNameOnBill(e.target.value)}
+              placeholder="Uses nick name on bill if empty"
+              className="mt-0.5 w-full border border-slate-200 rounded px-2 py-1 text-xs"
+            />
+          </label>
+        </div>
 
         {/* Rates */}
         <div>
@@ -1518,7 +1709,7 @@ function InventoryAdjustStockModal({ batch, medicine, medicineCategoryRows = [],
   )
 }
 
-function HistoryView({ invoices: _invoices, setPrintingInvoice }) {
+function HistoryView({ invoices: _invoices, onViewInvoiceOriginal, onViewInvoicePrinted }) {
   const PAGE_SIZE = 15
   const [subView, setSubView] = useState('register')
   const [rows, setRows] = useState([])
@@ -1675,28 +1866,20 @@ function HistoryView({ invoices: _invoices, setPrintingInvoice }) {
                       <div className="flex justify-end gap-1">
                         <button
                           type="button"
-                          onClick={async () => {
-                            try {
-                              const { data } = await api.get(`/pharmacy/invoices/${inv.id}/`)
-                              const full = data?.data || data || inv
-                              setPrintingInvoice({
-                                ...inv,
-                                ...full,
-                                party_details:
-                                  full?.party_details ||
-                                  (typeof full?.party === 'object' ? full.party : null) ||
-                                  inv?.party_details ||
-                                  (typeof inv?.party === 'object' ? inv.party : null) ||
-                                  null,
-                              })
-                            } catch {
-                              setPrintingInvoice(inv)
-                            }
-                          }}
+                          onClick={() => onViewInvoiceOriginal(inv)}
                           className="px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700 text-[10px] font-semibold"
                         >
-                          View
+                          Original
                         </button>
+                        {inv.has_print_copy ? (
+                          <button
+                            type="button"
+                            onClick={() => onViewInvoicePrinted(inv)}
+                            className="px-2 py-1 rounded-md border border-violet-200 bg-violet-50 text-violet-700 text-[10px] font-semibold"
+                          >
+                            Printed
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => setEditInv(inv)}
@@ -2433,6 +2616,7 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
   const fallbackDiscountStr = resolveNewMedicineDefaultDiscount(defaultSaleDiscountPercent)
   const [data, setData] = useState({
     name: '',
+    name_on_bill: '',
     company_name: '',
     hsn_code: '',
     form: '',
@@ -2668,6 +2852,8 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
   useEffect(() => {
     if (pricingLocked) return
     if (pricingEditedBy !== 'selling') return
+    const discountRaw = String(data.discount_percent ?? '').trim()
+    if (discountRaw === '' || discountRaw === '.') return
     const unitsPerPack =
       data.mrp_input_type === 'unit'
         ? 1
@@ -2678,7 +2864,7 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
     const nextDiscount = preview.discountPct != null ? preview.discountPct.toFixed(2) : '0.00'
     if (String(data.discount_percent ?? '') === nextDiscount) return
     setData((d) => ({ ...d, discount_percent: nextDiscount }))
-  }, [data.mrp, data.selling_price, data.mrp_input_type, data.units_per_pack, pricingEditedBy, pricingLocked])
+  }, [data.mrp, data.selling_price, data.mrp_input_type, data.units_per_pack, pricingEditedBy, pricingLocked, data.discount_percent])
 
   useEffect(() => {
     if (!data.add_batch) return
@@ -2807,6 +2993,7 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
       const medRes = await api.post('/medicines/', {
         sku: createdSku,
         name: data.name.trim(),
+        name_on_bill: (data.name_on_bill || '').trim(),
         company_name: data.company_name.trim(),
         hsn_code: data.hsn_code.trim(),
         form: data.form.trim(),
@@ -2952,12 +3139,22 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
               <p className="text-[10px] font-bold tracking-wide text-slate-500 uppercase">Product info</p>
               <div className="grid grid-cols-1 gap-1.5">
                 <label className="block">
-                  <span className="text-[10px] font-semibold text-slate-700">Product Name*</span>
+                  <span className="text-[10px] font-semibold text-slate-700">Nick name*</span>
                   <input
                     type="text"
                     value={data.name}
                     onChange={(e) => setData({ ...data, name: e.target.value })}
-                    placeholder="Type product name"
+                    placeholder="Internal name for staff"
+                    className="mt-1 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-semibold text-slate-700">Name on bill (optional)</span>
+                  <input
+                    type="text"
+                    value={data.name_on_bill}
+                    onChange={(e) => setData({ ...data, name_on_bill: e.target.value })}
+                    placeholder="Printed on invoice; else nick name"
                     className="mt-1 w-full h-7 border border-slate-300 rounded px-2 text-[11px] outline-none focus:border-blue-500"
                   />
                 </label>
@@ -3289,13 +3486,19 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
                 <label className="block">
                   <span className="text-[10px] font-semibold text-slate-700">Discount %</span>
                   <input
-                    type="number"
-                    min={0}
-                    max={100}
+                    type="text"
+                    inputMode="decimal"
                     value={data.discount_percent}
+                    onFocus={(e) => {
+                      setPricingEditedBy('discount')
+                      if (String(data.discount_percent) === '0') {
+                        e.target.select()
+                      }
+                    }}
                     onChange={(e) => {
                       setPricingEditedBy('discount')
-                      setData({ ...data, discount_percent: e.target.value })
+                      const v = normalizeDiscountPercentInput(e.target.value, data.discount_percent)
+                      setData({ ...data, discount_percent: v })
                     }}
                     placeholder="0"
                     disabled={pricingLocked}
@@ -3539,16 +3742,43 @@ function AddMedicineModal({ onClose, onRefresh, onMedicineCreated, defaultGstPer
   )
 }
 
-function AddPatientModal({ onClose, onAdd }) {
-  const [data, setData] = useState({ first_name: '', last_name: '', phone: '', gender: 'male' })
+/** Split search text into first / last name (e.g. "john smith" → John + Smith). */
+function splitPatientSearchName(raw) {
+  const text = String(raw || '').trim()
+  if (!text) return { first_name: '', last_name: '' }
+  const parts = text.split(/\s+/).filter(Boolean)
+  if (parts.length === 1) return { first_name: parts[0], last_name: '' }
+  return { first_name: parts[0], last_name: parts.slice(1).join(' ') }
+}
+
+function AddPatientModal({ onClose, onAdd, initialSearchName = '' }) {
+  const [data, setData] = useState({
+    first_name: '',
+    last_name: '',
+    phone: '',
+    address_line1: '',
+    gender: 'male',
+    doctor_name: '',
+    hospital_name: '',
+  })
   const [submitting, setSubmitting] = useState(false)
+
+  React.useEffect(() => {
+    const { first_name, last_name } = splitPatientSearchName(initialSearchName)
+    setData((prev) => ({
+      ...prev,
+      first_name: first_name || prev.first_name,
+      last_name: last_name || prev.last_name,
+    }))
+  }, [initialSearchName])
 
   async function handleAdd() {
     const firstName = (data.first_name || '').trim()
     const lastName = (data.last_name || '').trim()
     const phone = (data.phone || '').trim()
-    if (!firstName || !phone) {
-      toast.error('Name & phone required')
+    const addressLine1 = (data.address_line1 || '').trim()
+    if (!firstName) {
+      toast.error('First name is required')
       return
     }
     setSubmitting(true)
@@ -3560,9 +3790,15 @@ function AddPatientModal({ onClose, onAdd }) {
         gender: data.gender || 'other',
         hospital_id: getHospitalId(),
       }
+      if (addressLine1) payload.address_line1 = addressLine1
       const res = await api.post('/patients/', payload)
       toast.success('Patient registered')
-      onAdd(res.data?.data || res.data)
+      const created = res.data?.data || res.data
+      onAdd({
+        ...created,
+        _billingDoctorName: (data.doctor_name || '').trim(),
+        _billingHospitalName: (data.hospital_name || '').trim(),
+      })
     } catch (err) {
       toast.error(parseApiError(err) || 'Registration failed')
     } finally {
@@ -3597,15 +3833,58 @@ function AddPatientModal({ onClose, onAdd }) {
                 className="mt-0.5 w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
               />
             </label>
-            <label className="col-span-2">
-              <span className="text-[10px] font-semibold text-slate-600">Mobile *</span>
+            <label className="col-span-1">
+              <span className="text-[10px] font-semibold text-slate-600">Mobile</span>
               <input
                 value={data.phone}
                 onChange={(e) => setData({ ...data, phone: e.target.value })}
+                placeholder="Optional"
+                className="mt-0.5 w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
+              />
+            </label>
+            <label className="col-span-1">
+              <span className="text-[10px] font-semibold text-slate-600">Gender</span>
+              <select
+                value={data.gender}
+                onChange={(e) => setData({ ...data, gender: e.target.value })}
+                className="mt-0.5 w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
+              >
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label className="col-span-2">
+              <span className="text-[10px] font-semibold text-slate-600">Address</span>
+              <input
+                value={data.address_line1}
+                onChange={(e) => setData({ ...data, address_line1: e.target.value })}
+                placeholder="Optional — shown on bill when filled"
+                className="mt-0.5 w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
+              />
+            </label>
+            <label className="col-span-1">
+              <span className="text-[10px] font-semibold text-slate-600">Doctor name</span>
+              <input
+                value={data.doctor_name}
+                onChange={(e) => setData({ ...data, doctor_name: e.target.value })}
+                placeholder="Optional"
+                className="mt-0.5 w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
+              />
+            </label>
+            <label className="col-span-1">
+              <span className="text-[10px] font-semibold text-slate-600">Hospital name</span>
+              <input
+                value={data.hospital_name}
+                onChange={(e) => setData({ ...data, hospital_name: e.target.value })}
+                placeholder="Optional"
                 className="mt-0.5 w-full border border-slate-300 rounded px-2 py-1.5 text-sm"
               />
             </label>
           </div>
+          <p className="text-[10px] text-slate-500 mt-2">
+            Mobile and address are optional. Doctor and hospital appear on the bill only when filled.
+          </p>
           <button
             type="button"
             onClick={handleAdd}

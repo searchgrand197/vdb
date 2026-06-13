@@ -7,7 +7,7 @@ export function useDepartmentsQuery() {
   return useQuery({
     queryKey: departmentsQueryKey,
     queryFn: () => fetchDepartments(),
-    refetchInterval: 60000,
+    refetchInterval: 10000,
   });
 }
 

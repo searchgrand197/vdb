@@ -37,7 +37,7 @@ class PharmacyPurchaseChallanLineAdmin(admin.ModelAdmin):
 
 @admin.register(PharmacyOutletSettings)
 class PharmacyOutletSettingsAdmin(admin.ModelAdmin):
-    list_display = ("id", "pharmacy", "business_name", "gst_number")
+    list_display = ("id", "pharmacy", "business_name", "b2c_gst_number", "b2b_gst_number")
 
 
 @admin.register(PharmacyInvoice)

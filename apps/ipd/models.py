@@ -4,7 +4,28 @@ from django.utils import timezone
 
 from apps.opd.models import OPDVisit
 from apps.patients.models import Patient
+from apps.settings_management.document_number_service import render_document_number
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
+
+
+class Scheme(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
+    hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="schemes")
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["hospital", "name"],
+                condition=models.Q(is_deleted=False),
+                name="scheme_hospital_active_name_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
 
 
 class IPDAdmissionSequence(TimeStampedModel):
@@ -65,10 +86,22 @@ class IPDAdmission(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     discharge_notes = models.TextField(blank=True, default="")
     ipd_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
 
+    scheme = models.ForeignKey(
+        Scheme,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="admissions",
+    )
+
     # When set, ledger room rent uses this total instead of bed daily_charge × days.
     room_rent_override = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     # When set, ledger room rent = this per-day rate × stay days (preferred over room_rent_override).
     room_rent_daily_charge_override = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    # Custom label for the room rent line on IPD ledger / bill (optional).
+    room_rent_description_override = models.CharField(max_length=300, blank=True, default="")
+    # When set, ledger room rent uses this day count instead of admission-date span.
+    room_rent_days_override = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         indexes = [
@@ -95,9 +128,7 @@ class IPDAdmission(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
             seq_obj.last_seq += 1
             seq_obj.save(update_fields=["last_seq", "updated_at"])
             
-            slug = (getattr(self.hospital, "slug", "") or getattr(self.hospital, "name", "HOSP") or "HOSP")
-            slug_part = "".join(ch for ch in str(slug).upper() if ch.isalnum())[:4] or "HOSP"
-            return f"IPD-{slug_part}-{year}-{seq_obj.last_seq:05d}"
+            return render_document_number(self.hospital, "ipd", year, seq_obj.last_seq)
 
     def save(self, *args, **kwargs):
         if not self.ipd_no:

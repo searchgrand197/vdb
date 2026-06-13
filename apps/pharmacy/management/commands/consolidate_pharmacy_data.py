@@ -80,22 +80,28 @@ class Command(BaseCommand):
         target_settings, _ = PharmacyOutletSettings.objects.get_or_create(pharmacy=target, defaults={"business_name": target.name})
         for src in PharmacyOutletSettings.objects.select_for_update().filter(pharmacy__in=sources):
             changed = False
-            for field in [
-                "business_name",
-                "address",
-                "mobile",
-                "gst_number",
-                "dl_number",
-                "email",
-                "website",
-                "invoice_prefix",
-            ]:
-                if not getattr(target_settings, field):
-                    setattr(target_settings, field, getattr(src, field))
-                    changed = True
-            if target_settings.invoice_next_number < (src.invoice_next_number or 1):
-                target_settings.invoice_next_number = src.invoice_next_number or 1
+            if not target_settings.business_name:
+                target_settings.business_name = src.business_name
                 changed = True
+            for prefix in ("b2c", "b2b"):
+                for field in (
+                    "address",
+                    "mobile",
+                    "gst_number",
+                    "dl_number",
+                    "email",
+                    "website",
+                    "invoice_prefix",
+                ):
+                    attr = f"{prefix}_{field}"
+                    if not getattr(target_settings, attr, ""):
+                        setattr(target_settings, attr, getattr(src, attr, ""))
+                        changed = True
+                next_attr = f"{prefix}_invoice_next_number"
+                src_next = getattr(src, next_attr, 1) or 1
+                if getattr(target_settings, next_attr, 1) < src_next:
+                    setattr(target_settings, next_attr, src_next)
+                    changed = True
             if changed:
                 target_settings.save()
             src.delete()

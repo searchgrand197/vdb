@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 from apps.ipd.models import IPDAdmission
@@ -107,6 +108,9 @@ class DischargeSummary(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     is_draft = models.BooleanField(default=True)
 
+    class Meta:
+        ordering = ("-updated_at", "-created_at")
+
     def __str__(self) -> str:
         return f"Summary for {self.admission.patient.uhid}"
 
@@ -158,3 +162,36 @@ class DischargeInvestigation(TimeStampedModel, UUIDPrimaryKeyModel):
 
     class Meta:
         ordering = ("sort_order", "created_at", "id")
+
+
+class DischargeSummaryTemplate(TimeStampedModel, UUIDPrimaryKeyModel):
+    """Hospital-wide reusable discharge summary snapshot."""
+
+    hospital = models.ForeignKey(
+        Hospital, on_delete=models.CASCADE, related_name="discharge_summary_templates"
+    )
+    name = models.CharField(max_length=120)
+    payload = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_discharge_summary_templates",
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_discharge_summary_templates",
+    )
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = [("hospital", "name")]
+        ordering = ("name",)
+        indexes = [models.Index(fields=["hospital", "is_active"])]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.hospital_id})"

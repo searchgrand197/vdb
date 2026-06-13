@@ -5,12 +5,14 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
+from rest_framework.exceptions import MethodNotAllowed
 from rest_framework.filters import SearchFilter
 from rest_framework.response import Response
 from rest_framework.decorators import action
 
 from apps.billing.models import BillingInvoice, InvoiceItem, InvoiceNumberSequence
 from apps.payments.models import PaymentTransaction
+from apps.billing.collection_attribution import attribution_kwargs, apply_attribution_to_payment
 from apps.billing.serializers import (
     BillingInvoiceCreateSerializer,
     BillingInvoiceItemInputSerializer,
@@ -19,6 +21,7 @@ from apps.billing.serializers import (
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
 from apps.settings_management.models import ReceptionPortalSettings
+from apps.settings_management.document_number_service import render_document_number
 from apps.shared.response import success_response
 
 
@@ -35,16 +38,19 @@ def _generate_invoice_no(hospital, year: int) -> str:
     seq.save(update_fields=["last_seq"])
     settings_obj.invoice_next_number = seq.last_seq + 1
     settings_obj.save(update_fields=["invoice_next_number"])
-    prefix = (settings_obj.invoice_prefix or "INV").strip().upper() or "INV"
-    return f"{prefix}-{year}-{seq.last_seq:06d}"
+    return render_document_number(hospital, "receipt", year, seq.last_seq)
 
 
 class BillingInvoiceViewSet(viewsets.ModelViewSet):
-    queryset = BillingInvoice.objects.all().select_related("patient", "hospital")
+    queryset = BillingInvoice.objects.all().select_related(
+        "patient", "hospital", "attributed_doctor_user", "opd_visit", "ipd_admission"
+    )
     filter_backends = (SearchFilter,)
     search_fields = ("invoice_no", "patient__uhid", "patient__phone")
 
     permission_classes = [permissions.IsAuthenticated, HasRequiredPermission]
+    # PATCH is required for the `update-items` action; generic PATCH on the invoice
+    # detail URL is disabled in `partial_update` below.
     http_method_names = ["get", "post", "patch"]
 
     required_permission_map = {
@@ -56,6 +62,7 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
         "destroy": "billing.delete_invoice",
         "finalize": "billing.approve_invoice",
         "cancel": "billing.approve_invoice",
+        "update_items": "billing.update_invoice",
     }
 
     def get_serializer_class(self):
@@ -73,8 +80,20 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.request.user.is_superuser:
-            return qs
-        return qs.filter(hospital_id=self.request.user.hospital_id)
+            pass
+        else:
+            qs = qs.filter(hospital_id=self.request.user.hospital_id)
+        attribution_type = (self.request.query_params.get("attribution_type") or "").strip()
+        if attribution_type:
+            qs = qs.filter(attribution_type=attribution_type)
+        doctor_id = (self.request.query_params.get("attributed_doctor_user") or "").strip()
+        if doctor_id:
+            qs = qs.filter(attributed_doctor_user_id=doctor_id)
+        return qs
+
+    def partial_update(self, request, *args, **kwargs):
+        """Invoice line edits use PATCH …/update-items/ — not this URL."""
+        raise MethodNotAllowed("PATCH", detail="Invoice updates must use the update-items endpoint.")
 
     def create(self, request, *args, **kwargs):
         serializer = BillingInvoiceCreateSerializer(data=request.data)
@@ -93,14 +112,22 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
             year = timezone.now().year
             invoice_no = _generate_invoice_no(hospital, year)
             status_value = serializer.validated_data.get("status") or BillingInvoice.Status.DRAFT
+            opd_visit = serializer.validated_data.get("opd_visit")
+            ipd_admission = serializer.validated_data.get("ipd_admission")
+            attr_kwargs = attribution_kwargs(
+                opd_visit=opd_visit,
+                ipd_admission=ipd_admission,
+                requested_type=serializer.validated_data.get("attribution_type"),
+                requested_doctor_user=serializer.validated_data.get("attributed_doctor_user"),
+            )
 
             invoice = BillingInvoice.objects.create(
                 hospital=hospital,
                 invoice_no=invoice_no,
                 encounter_type=serializer.validated_data.get("encounter_type", BillingInvoice.EncounterType.OPD),
                 patient=patient,
-                opd_visit=serializer.validated_data.get("opd_visit"),
-                ipd_admission=serializer.validated_data.get("ipd_admission"),
+                opd_visit=opd_visit,
+                ipd_admission=ipd_admission,
                 invoice_date=serializer.validated_data.get("invoice_date", timezone.now().date()),
                 status=status_value,
                 currency=serializer.validated_data.get("currency", "INR"),
@@ -110,13 +137,15 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
                 tax_amount=Decimal("0.00"),
                 total_amount=Decimal("0.00"),
                 amount_paid=Decimal("0.00"),
+                attribution_type=attr_kwargs["attribution_type"],
+                attributed_doctor_user=attr_kwargs["attributed_doctor_user"],
             )
 
             items = serializer.validated_data["items"]
             for item in items:
                 qty = item["quantity"]
                 unit_price = item["unit_price"]
-                line_total = (qty * unit_price).quantize(Decimal("0.01"))
+                line_total = (qty * unit_price)
                 InvoiceItem.objects.create(
                     invoice=invoice,
                     description=item["description"],
@@ -175,12 +204,12 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
         tax_rate_raw = request.data.get("tax_rate")
         if discount_raw is not None:
             try:
-                invoice.discount_amount = Decimal(str(discount_raw)).quantize(Decimal("0.01"))
+                invoice.discount_amount = Decimal(str(discount_raw))
             except Exception:
                 pass
         if tax_rate_raw is not None:
             try:
-                invoice.tax_rate = Decimal(str(tax_rate_raw)).quantize(Decimal("0.01"))
+                invoice.tax_rate = Decimal(str(tax_rate_raw))
             except Exception:
                 pass
 
@@ -195,7 +224,7 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
                 subcategory=item.get("subcategory", ""),
                 quantity=qty,
                 unit_price=unit_price,
-                line_total=(qty * unit_price).quantize(Decimal("0.01")),
+                line_total=(qty * unit_price),
             )
 
         invoice.recalc_totals()

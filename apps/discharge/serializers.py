@@ -1,6 +1,12 @@
 from rest_framework import serializers
 
-from apps.discharge.models import DischargeInvestigation, DischargeMedication, DischargeSummary, DischargeSurgery
+from apps.discharge.models import (
+    DischargeInvestigation,
+    DischargeMedication,
+    DischargeSummary,
+    DischargeSummaryTemplate,
+    DischargeSurgery,
+)
 
 
 class DischargeMedicationSerializer(serializers.ModelSerializer):
@@ -37,6 +43,9 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
     patient_uhid = serializers.CharField(source="admission.patient.uhid", read_only=True)
     admission_date = serializers.DateField(source="admission.admission_date", read_only=True)
     admission_ipd_no = serializers.CharField(source="admission.ipd_no", read_only=True)
+    scheme = serializers.UUIDField(source="admission.scheme_id", read_only=True, allow_null=True)
+    scheme_name = serializers.SerializerMethodField()
+    discharged_at = serializers.DateTimeField(source="admission.discharged_at", read_only=True)
     medication_rows = DischargeMedicationSerializer(many=True, read_only=True)
     investigation_rows = DischargeInvestigationSerializer(many=True, read_only=True)
     surgery_rows = DischargeSurgerySerializer(many=True, read_only=True)
@@ -51,6 +60,9 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
             "patient_uhid",
             "admission_date",
             "admission_ipd_no",
+            "scheme",
+            "scheme_name",
+            "discharged_at",
             "summary_notes",
             "treatment_given",
             "condition_at_discharge",
@@ -118,8 +130,13 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
             "surgery_rows",
             "is_draft",
             "created_at",
+            "updated_at",
         ]
         read_only_fields = ["hospital"]
+
+    def get_scheme_name(self, obj):
+        scheme = getattr(getattr(obj, "admission", None), "scheme", None)
+        return (getattr(scheme, "name", "") or "").strip() or None
 
     def get_patient_name(self, obj):
         if obj.admission and obj.admission.patient:
@@ -127,3 +144,20 @@ class DischargeSummarySerializer(serializers.ModelSerializer):
             name = " ".join(filter(None, parts)).strip()
             return name or obj.admission.patient.uhid
         return ""
+
+
+class DischargeSummaryTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DischargeSummaryTemplate
+        fields = [
+            "id",
+            "hospital",
+            "name",
+            "payload",
+            "created_by",
+            "updated_by",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["hospital", "created_by", "updated_by", "created_at", "updated_at"]

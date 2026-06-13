@@ -8,10 +8,26 @@ export function getPharmacyBranchId() {
   return useAuthStore.getState().pharmacyBranchId || null;
 }
 
-// Helper – read hospital_id from the stored user object
+function readHospitalIdFromAccessToken() {
+  try {
+    const access = useAuthStore.getState().tokens?.access;
+    if (!access || typeof access !== 'string') return null;
+    const parts = access.split('.');
+    if (parts.length < 2) return null;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    const hid = payload?.hospital_id;
+    return hid != null && String(hid).trim() !== '' ? String(hid) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Helper – read hospital_id from the stored user object or JWT claim
 export function getHospitalId() {
   const user = useAuthStore.getState().user;
-  return user?.hospital_id || null;
+  const fromUser = user?.hospital_id;
+  if (fromUser != null && String(fromUser).trim() !== '') return String(fromUser);
+  return readHospitalIdFromAccessToken();
 }
 
 api.interceptors.request.use(cfg => {
@@ -30,9 +46,11 @@ api.interceptors.request.use(cfg => {
   }
 
   const hospitalId = getHospitalId();
-  if (role !== 'pharmacy' && hospitalId && ['post', 'put', 'patch'].includes((cfg.method || '').toLowerCase())) {
+  const method = (cfg.method || '').toLowerCase();
+  if (role !== 'pharmacy' && hospitalId && ['post', 'put', 'patch'].includes(method)) {
     if (cfg.data && typeof cfg.data === 'object' && !(cfg.data instanceof FormData)) {
-      if (!cfg.data.hospital_id) {
+      const existing = cfg.data.hospital_id;
+      if (existing == null || String(existing).trim() === '') {
         cfg.data = { ...cfg.data, hospital_id: hospitalId };
       }
     }

@@ -49,11 +49,14 @@ import {
   Medication as MedicationIcon,
   Message as MessageIcon,
   DragIndicator as DragIndicatorIcon,
+  Assessment as AssessmentIcon,
+  FileDownload as FileDownloadIcon,
 } from '@mui/icons-material'
 import { getRoomsConfig, saveRoomsConfig, getTvGroupsConfig, saveTvGroupsConfig } from '../utils/rooms'
 import BedSelector from '../components/BedSelector'
 import OpdGeneratorTab from '../components/OpdTemplateEditor/OpdGeneratorTab'
-import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel'
+import DischargeClinicalForm from '../components/discharge/DischargeClinicalForm'
+import { useDischargeFieldCatalog } from '../components/discharge/useDischargeFieldCatalog'
 import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
 import { DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS } from '../pharmacy/rxConstants'
 import { syncHospitalBrandingFromApiRow } from '../utils/hospitalBranding'
@@ -64,7 +67,73 @@ import {
   formatGuardianLineForSlip,
   GUARDIAN_RELATIONSHIP_OPTIONS,
 } from '../utils/opdPrintFormat'
-import { buildPrintHtml } from '../components/OpdTemplateEditor/buildPrintHtml'
+import {
+  getDefaultOpdFieldConfig,
+  normalizeOpdFieldConfig,
+  getCoreFieldByTemplateName,
+  formatAgeSexForSlip,
+} from '../components/OpdTemplateEditor/opdCoreFields.js'
+import {
+  syncCoreFieldsIntoLayout,
+  filterLayoutFieldsForSlip,
+} from '../components/OpdTemplateEditor/syncCoreFieldsIntoLayout.js'
+import {
+  buildOpdCustomFieldPayload,
+  normalizeOpdCustomFields,
+} from '../components/OpdTemplateEditor/opdTemplateData.js'
+import { createSameTabPrintWindow } from '../utils/printHtmlInHiddenFrame'
+import { mergeReceptionPortalProfileFromRow } from '../utils/receptionPortalProfile'
+import {
+  DEFAULT_DOCUMENT_NUMBER_PARTS,
+  DOCUMENT_NUMBER_FORMAT_ROWS,
+  normalizeDocumentNumberFormats,
+  validateAllDocumentNumberFormats,
+  getDocumentNumberPreview,
+  onFormatPartChange,
+  getDefaultDocumentNumberParts,
+} from '../utils/documentNumberFormat'
+import { getBedDisplayLabel } from '../utils/bedDisplay'
+import {
+  resolvePaymentSlipLogoUrl,
+  buildPaymentSlipHeaderCss,
+  buildPaymentSlipTopHeaderHtml,
+  buildPaymentSlipProfileLines,
+  buildPaymentSlipDocumentHtml,
+  formatPaymentSlipAttributedDoctor,
+  formatPaymentSlipGenderAge,
+  formatPaymentSlipGuardianLine,
+  PAYMENT_SLIP_PRINT_CLOSE_SCRIPT,
+} from '../utils/paymentSlipPrint'
+import {
+  QUICK_SERVICES_STORAGE_KEY,
+  QUICK_SERVICE_CATEGORIES_STORAGE_KEY,
+  QUICK_SERVICE_DEFAULT_CATEGORY,
+  QUICK_SERVICE_ALL_CATEGORY,
+  DEFAULT_QUICK_SERVICES,
+  normalizeQuickServices,
+  loadPaymentQuickServices,
+  serviceGroupIdFromLabel,
+} from '../utils/paymentQuickServices'
+import {
+  formatTime,
+  formatDateTime,
+  formatReceiptDateTime,
+  withTimeTokens,
+  syncTimeDisplayModeFromRow,
+  useTimeDisplayMode,
+  getTimeDisplayMode,
+} from '../utils/dateTimeFormat'
+import NetSpeedBadge from '../components/NetSpeedBadge'
+import CollectionTransactionList from '../components/collection/CollectionTransactionList'
+import ReportsSection from '../components/receptionist/ReportsSection'
+import PatientRegistrationForm from '../components/receptionist/PatientRegistrationForm'
+import {
+  buildPatientRegistrationInitial,
+  buildPatientRegistrationInitialFromSearch,
+  registerPatientFromForm,
+  validatePatientRegistrationForm,
+} from '../components/receptionist/patientRegistrationUtils'
+import { printOpdSheet } from '../utils/printOpdSheet'
 
 /** Maps Patient.preferred_salutation from API to salutation dropdown value. */
 function normalizeSalutationChoiceFromApi(raw) {
@@ -72,6 +141,67 @@ function normalizeSalutationChoiceFromApi(raw) {
   const s = String(raw).trim()
   if (s === 'none' || ['Mr', 'Mrs', 'Master', 'Miss'].includes(s)) return s
   return ''
+}
+
+const AGE_UNIT_OPTIONS = [
+  { value: 'years', label: 'Yrs' },
+  { value: 'months', label: 'Mon' },
+  { value: 'days', label: 'Days' },
+]
+
+function normalizeAgeUnit(unit) {
+  const u = String(unit || 'years').trim().toLowerCase()
+  return u === 'months' || u === 'days' ? u : 'years'
+}
+
+function hydrateAgeFieldsFromPatient(p) {
+  if (!p) return { age: '', ageUnit: 'years' }
+  return {
+    age: p.age_value != null && p.age_value !== ''
+      ? String(p.age_value)
+      : (p.age != null && p.age !== '' ? String(p.age) : ''),
+    ageUnit: normalizeAgeUnit(p.age_unit),
+  }
+}
+
+function formatAgeDisplayLabel(value, unit) {
+  if (value == null || value === '') return '--'
+  const labels = { years: 'Years', months: 'Months', days: 'Days' }
+  return `${value} ${labels[normalizeAgeUnit(unit)] || 'Years'}`
+}
+
+function AgeWithUnitInput({
+  value,
+  unit,
+  onValueChange,
+  onUnitChange,
+  inputClassName,
+  selectClassName,
+  maxLength = 3,
+}) {
+  return (
+    <div className="flex gap-1">
+      <input
+        type="number"
+        min="0"
+        value={value}
+        onChange={(e) => onValueChange(e.target.value.replace(/\D/g, '').slice(0, maxLength))}
+        placeholder="0"
+        className={inputClassName}
+        style={{ flex: 1, minWidth: 0 }}
+      />
+      <select
+        value={normalizeAgeUnit(unit)}
+        onChange={(e) => onUnitChange(e.target.value)}
+        className={selectClassName || inputClassName}
+        style={{ width: 'auto', minWidth: '4.5rem' }}
+      >
+        {AGE_UNIT_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </div>
+  )
 }
 
 function asMuiIcon(IconComponent) {
@@ -129,6 +259,8 @@ const FlaskConical = asMuiIcon(ScienceIcon)
 const Pill = asMuiIcon(MedicationIcon)
 const MessageSquare = asMuiIcon(MessageIcon)
 const GripVertical = asMuiIcon(DragIndicatorIcon)
+const BarChart2 = asMuiIcon(AssessmentIcon)
+const Download = asMuiIcon(FileDownloadIcon)
 
 const DEFAULT_PAYMENT_SLIP_PROFILE = {
   hospital_name: 'Vardraan Hospital',
@@ -138,17 +270,28 @@ const DEFAULT_PAYMENT_SLIP_PROFILE = {
   email: 'info@vardraanhospital.com',
   website: 'www.vardraanhospital.com',
   hospital_logo_url: '',
+  uhid_prefix: 'DEF',
+  invoice_prefix: 'INV',
+  invoice_next_number: 1,
+  document_number_formats: normalizeDocumentNumberFormats(DEFAULT_DOCUMENT_NUMBER_PARTS),
 }
 
 const DEFAULT_RECEPTION_OPD_SETTINGS = {
   default_city: 'Jind',
   default_state: 'Haryana',
   default_doctor_user: '',
+  default_department: '',
   print_with_background: true,
   opd_fee_mode: 'doctor',
   opd_fee_slots: [],
+  opd_visible_fields: [],
+  opd_field_config: getDefaultOpdFieldConfig(),
   current_opd_slot_fee: null,
   current_opd_slot: null,
+  admission_bed_label_mode: 'bed_code',
+  time_display_mode: '24h',
+  reception_collection_enabled: true,
+  reception_daily_report_enabled: true,
 }
 
 let receptionPortalSettingsCache = {
@@ -168,11 +311,21 @@ function getReceptionOpdSettings() {
     default_city: receptionPortalSettingsCache.default_city || DEFAULT_RECEPTION_OPD_SETTINGS.default_city,
     default_state: receptionPortalSettingsCache.default_state || DEFAULT_RECEPTION_OPD_SETTINGS.default_state,
     default_doctor_user: receptionPortalSettingsCache.default_doctor_user || '',
+    default_department: receptionPortalSettingsCache.default_department || '',
     print_with_background: receptionPortalSettingsCache.print_with_background === true,
     opd_fee_mode: receptionPortalSettingsCache.opd_fee_mode || 'doctor',
     opd_fee_slots: Array.isArray(receptionPortalSettingsCache.opd_fee_slots) ? receptionPortalSettingsCache.opd_fee_slots : [],
+    opd_visible_fields: Array.isArray(receptionPortalSettingsCache.opd_visible_fields) ? receptionPortalSettingsCache.opd_visible_fields : [],
+    opd_field_config: normalizeOpdFieldConfig(
+      receptionPortalSettingsCache.opd_field_config,
+      receptionPortalSettingsCache.opd_visible_fields,
+    ),
     current_opd_slot_fee: receptionPortalSettingsCache.current_opd_slot_fee ?? null,
     current_opd_slot: receptionPortalSettingsCache.current_opd_slot ?? null,
+    admission_bed_label_mode: receptionPortalSettingsCache.admission_bed_label_mode === 'bed_number' ? 'bed_number' : 'bed_code',
+    time_display_mode: receptionPortalSettingsCache.time_display_mode === '12h' ? '12h' : '24h',
+    reception_collection_enabled: receptionPortalSettingsCache.reception_collection_enabled !== false,
+    reception_daily_report_enabled: receptionPortalSettingsCache.reception_daily_report_enabled !== false,
   }
 }
 
@@ -185,6 +338,7 @@ async function loadReceptionPortalSettings() {
       default_city: row.default_city ?? receptionPortalSettingsCache.default_city,
       default_state: row.default_state ?? receptionPortalSettingsCache.default_state,
       default_doctor_user: row.default_doctor_user ? String(row.default_doctor_user) : '',
+      default_department: row.default_department ?? receptionPortalSettingsCache.default_department ?? '',
       hospital_name: row.hospital_name ?? receptionPortalSettingsCache.hospital_name,
       address: row.address ?? receptionPortalSettingsCache.address,
       pin_code: row.pin_code ?? receptionPortalSettingsCache.pin_code,
@@ -193,13 +347,29 @@ async function loadReceptionPortalSettings() {
       website: row.website ?? receptionPortalSettingsCache.website,
       hospital_logo: row.hospital_logo ?? receptionPortalSettingsCache.hospital_logo ?? '',
       hospital_logo_url: row.hospital_logo_url ?? receptionPortalSettingsCache.hospital_logo_url ?? '',
+      uhid_prefix: row.uhid_prefix ?? receptionPortalSettingsCache.uhid_prefix ?? DEFAULT_PAYMENT_SLIP_PROFILE.uhid_prefix,
+      invoice_prefix: row.invoice_prefix ?? receptionPortalSettingsCache.invoice_prefix ?? DEFAULT_PAYMENT_SLIP_PROFILE.invoice_prefix,
+      invoice_next_number: Number(row.invoice_next_number) > 0
+        ? Number(row.invoice_next_number)
+        : (receptionPortalSettingsCache.invoice_next_number ?? DEFAULT_PAYMENT_SLIP_PROFILE.invoice_next_number),
+      document_number_formats: normalizeDocumentNumberFormats(
+        row.document_number_formats ?? receptionPortalSettingsCache.document_number_formats,
+      ),
       print_with_background: row.print_with_background ?? receptionPortalSettingsCache.print_with_background,
       opd_fee_mode: row.opd_fee_mode || receptionPortalSettingsCache.opd_fee_mode || 'doctor',
       opd_fee_slots: Array.isArray(row.opd_fee_slots) ? row.opd_fee_slots : (receptionPortalSettingsCache.opd_fee_slots || []),
+      opd_visible_fields: Array.isArray(row.opd_visible_fields) ? row.opd_visible_fields : (receptionPortalSettingsCache.opd_visible_fields || []),
+      opd_field_config: normalizeOpdFieldConfig(row.opd_field_config, row.opd_visible_fields),
       current_opd_slot_fee: row.current_opd_slot_fee ?? null,
       current_opd_slot: row.current_opd_slot ?? null,
+      admission_bed_label_mode: row.admission_bed_label_mode === 'bed_number' ? 'bed_number' : 'bed_code',
+      time_display_mode: row.time_display_mode === '12h' ? '12h' : '24h',
+      reception_collection_enabled: row.reception_collection_enabled !== false,
+      reception_daily_report_enabled: row.reception_daily_report_enabled !== false,
     }
     syncHospitalBrandingFromApiRow(receptionPortalSettingsCache)
+    mergeReceptionPortalProfileFromRow(row)
+    syncTimeDisplayModeFromRow(row)
   } catch {
     // keep defaults if API fails
   }
@@ -214,8 +384,15 @@ async function saveReceptionOpdSettings(settings) {
     opd_fee_mode: settings.opd_fee_mode === 'slot' ? 'slot' : 'doctor',
     opd_fee_slots: Array.isArray(settings.opd_fee_slots) ? settings.opd_fee_slots : [],
   }
-  await api.patch('/settings/reception-portal/', payload)
-  receptionPortalSettingsCache = { ...receptionPortalSettingsCache, ...payload, default_doctor_user: payload.default_doctor_user || '' }
+  const { data } = await api.patch('/settings/reception-portal/', payload)
+  const row = data?.data || data || {}
+  receptionPortalSettingsCache = {
+    ...receptionPortalSettingsCache,
+    ...payload,
+    default_doctor_user: row.default_doctor_user ? String(row.default_doctor_user) : (payload.default_doctor_user || ''),
+    opd_field_config: normalizeOpdFieldConfig(row.opd_field_config, row.opd_visible_fields),
+    opd_fee_slots: Array.isArray(row.opd_fee_slots) ? row.opd_fee_slots : payload.opd_fee_slots,
+  }
 }
 
 function getPaymentSlipProfile() {
@@ -230,15 +407,15 @@ function getPaymentSlipProfile() {
       receptionPortalSettingsCache.hospital_logo_url
       || receptionPortalSettingsCache.hospital_logo
       || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_logo_url,
+    uhid_prefix: receptionPortalSettingsCache.uhid_prefix || DEFAULT_PAYMENT_SLIP_PROFILE.uhid_prefix,
+    invoice_prefix: receptionPortalSettingsCache.invoice_prefix || DEFAULT_PAYMENT_SLIP_PROFILE.invoice_prefix,
+    invoice_next_number: Number(receptionPortalSettingsCache.invoice_next_number) > 0
+      ? Number(receptionPortalSettingsCache.invoice_next_number)
+      : DEFAULT_PAYMENT_SLIP_PROFILE.invoice_next_number,
+    document_number_formats: normalizeDocumentNumberFormats(
+      receptionPortalSettingsCache.document_number_formats ?? DEFAULT_PAYMENT_SLIP_PROFILE.document_number_formats,
+    ),
   }
-}
-
-/** Ledger / IPD receipt lines: date with time in parentheses (matches print). */
-function formatReceiptDateTime(value) {
-  if (value == null || value === '') return '—'
-  const d = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(d.getTime())) return '—'
-  return `${format(d, 'd/M/yyyy')} (${format(d, 'HH:mm:ss')})`
 }
 
 function toDateTimeInputValue(v) {
@@ -251,6 +428,13 @@ function toDateTimeInputValue(v) {
   const hh = String(d.getHours()).padStart(2, '0')
   const min = String(d.getMinutes()).padStart(2, '0')
   return `${yyyy}-${mm}-${dd}T${hh}:${min}`
+}
+
+function dateTimeInputToIso(value) {
+  if (!value) return null
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toISOString()
 }
 
 function formatApiError(err, fallback) {
@@ -277,6 +461,17 @@ async function savePaymentSlipProfile(profile) {
   payload.append('phone', profile.phone || '')
   payload.append('email', profile.email || '')
   payload.append('website', profile.website || '')
+  payload.append('uhid_prefix', String(profile.uhid_prefix || DEFAULT_PAYMENT_SLIP_PROFILE.uhid_prefix).trim().toUpperCase())
+  payload.append('invoice_prefix', String(profile.invoice_prefix || DEFAULT_PAYMENT_SLIP_PROFILE.invoice_prefix).trim().toUpperCase())
+  payload.append('invoice_next_number', String(
+    Number(profile.invoice_next_number) > 0
+      ? Number(profile.invoice_next_number)
+      : DEFAULT_PAYMENT_SLIP_PROFILE.invoice_next_number,
+  ))
+  payload.append(
+    'document_number_formats',
+    JSON.stringify(normalizeDocumentNumberFormats(profile.document_number_formats)),
+  )
   if (profile.hospital_logo_file) {
     payload.append('hospital_logo', profile.hospital_logo_file)
   } else if (profile.remove_hospital_logo) {
@@ -292,10 +487,19 @@ async function savePaymentSlipProfile(profile) {
     phone: row.phone ?? profile.phone ?? receptionPortalSettingsCache.phone,
     email: row.email ?? profile.email ?? receptionPortalSettingsCache.email,
     website: row.website ?? profile.website ?? receptionPortalSettingsCache.website,
+    uhid_prefix: row.uhid_prefix ?? profile.uhid_prefix ?? receptionPortalSettingsCache.uhid_prefix,
+    invoice_prefix: row.invoice_prefix ?? profile.invoice_prefix ?? receptionPortalSettingsCache.invoice_prefix,
+    invoice_next_number: Number(row.invoice_next_number) > 0
+      ? Number(row.invoice_next_number)
+      : (Number(profile.invoice_next_number) > 0 ? Number(profile.invoice_next_number) : DEFAULT_PAYMENT_SLIP_PROFILE.invoice_next_number),
+    document_number_formats: normalizeDocumentNumberFormats(
+      row.document_number_formats ?? profile.document_number_formats,
+    ),
     hospital_logo: row.hospital_logo ?? '',
     hospital_logo_url: row.hospital_logo_url ?? row.hospital_logo ?? '',
   }
   syncHospitalBrandingFromApiRow(receptionPortalSettingsCache)
+  mergeReceptionPortalProfileFromRow(row)
 }
 
 function escapeHtml(value) {
@@ -311,48 +515,253 @@ function sanitizePersonName(value) {
   return String(value || '').replace(/[0-9]/g, '')
 }
 
-/**
- * Write HTML into a hidden iframe and trigger print via iframe.contentWindow.print().
- * Calling print() from the PARENT on the iframe's contentWindow is the only reliable
- * cross-browser way to print iframe content in production builds — browsers block
- * window.print() called from *inside* a hidden iframe as a security measure.
- */
-function printHtmlInFrame(html, { onComplete } = {}) {
-  const iframe = document.createElement('iframe')
-  iframe.setAttribute('aria-hidden', 'true')
-  iframe.style.cssText = 'position:fixed;left:-9999px;bottom:0;width:0;height:0;border:0;opacity:0;pointer-events:none;'
-  document.body.appendChild(iframe)
-
-  let cleaned = false
-  let completed = false
-  const notifyComplete = () => {
-    if (completed) return
-    completed = true
-    if (typeof onComplete === 'function') { try { onComplete() } catch {} }
-  }
-  const cleanup = () => {
-    if (cleaned) return
-    cleaned = true
-    try { iframe.remove() } catch {}
-    notifyComplete()
-  }
-
-  iframe.addEventListener('load', () => {
-    const cw = iframe.contentWindow
-    if (!cw) { cleanup(); return }
-    cw.addEventListener('afterprint', () => setTimeout(cleanup, 100), { once: true })
-    window.addEventListener('focus', () => setTimeout(cleanup, 300), { once: true })
-    setTimeout(cleanup, 120000)
-    // Drive print from parent — reliable in production builds
-    setTimeout(() => { try { cw.focus(); cw.print() } catch { cleanup() } }, 150)
-  }, { once: true })
-
-  const doc = iframe.contentDocument || iframe.contentWindow?.document
-  if (!doc) { cleanup(); return }
-  doc.open('text/html')
-  doc.write(html)
-  doc.close()
+/** Enter submits cancel modals; Shift+Enter allows a new line in the reason field. */
+function handleCancelReasonKeyDown(e, onSubmit, { disabled = false } = {}) {
+  if (disabled || e.key !== 'Enter' || e.shiftKey) return
+  e.preventDefault()
+  onSubmit()
 }
+
+const INDIAN_STATE_CODE_MAP = {
+  andhrapradesh: 'AP',
+  arunachalpradesh: 'AR',
+  assam: 'AS',
+  bihar: 'BR',
+  chhattisgarh: 'CG',
+  goa: 'GA',
+  gujarat: 'GJ',
+  haryana: 'HR',
+  himachalpradesh: 'HP',
+  jharkhand: 'JH',
+  karnataka: 'KA',
+  kerala: 'KL',
+  madhyapradesh: 'MP',
+  maharashtra: 'MH',
+  manipur: 'MN',
+  meghalaya: 'ML',
+  mizoram: 'MZ',
+  nagaland: 'NL',
+  odisha: 'OD',
+  orissa: 'OD',
+  punjab: 'PB',
+  rajasthan: 'RJ',
+  sikkim: 'SK',
+  tamilnadu: 'TN',
+  telangana: 'TS',
+  tripura: 'TR',
+  uttarpradesh: 'UP',
+  uttarakhand: 'UK',
+  uttaranchal: 'UK',
+  westbengal: 'WB',
+  andamannicobarislands: 'AN',
+  chandigarh: 'CH',
+  dadraandnagarhavelianddamananddiu: 'DH',
+  dadraandnagarhaveli: 'DN',
+  damananddiu: 'DD',
+  delhi: 'DL',
+  nctofdelhi: 'DL',
+  jammuandkashmir: 'JK',
+  ladakh: 'LA',
+  lakshadweep: 'LD',
+  puducherry: 'PY',
+  pondicherry: 'PY',
+}
+
+const INDIAN_STATE_OPTIONS = [
+  'Andhra Pradesh',
+  'Arunachal Pradesh',
+  'Assam',
+  'Bihar',
+  'Chhattisgarh',
+  'Goa',
+  'Gujarat',
+  'Haryana',
+  'Himachal Pradesh',
+  'Jharkhand',
+  'Karnataka',
+  'Kerala',
+  'Madhya Pradesh',
+  'Maharashtra',
+  'Manipur',
+  'Meghalaya',
+  'Mizoram',
+  'Nagaland',
+  'Odisha',
+  'Punjab',
+  'Rajasthan',
+  'Sikkim',
+  'Tamil Nadu',
+  'Telangana',
+  'Tripura',
+  'Uttar Pradesh',
+  'Uttarakhand',
+  'West Bengal',
+  'Andaman and Nicobar Islands',
+  'Chandigarh',
+  'Dadra and Nagar Haveli and Daman and Diu',
+  'Delhi',
+  'Jammu and Kashmir',
+  'Ladakh',
+  'Lakshadweep',
+  'Puducherry',
+]
+
+function toStateCode(stateValue) {
+  const raw = String(stateValue || '').trim()
+  if (!raw) return ''
+  const compact = raw.toLowerCase().replace(/[^a-z]/g, '')
+  if (INDIAN_STATE_CODE_MAP[compact]) return INDIAN_STATE_CODE_MAP[compact]
+  if (/^[a-z]{2}$/i.test(raw)) return raw.toUpperCase()
+  const parts = raw.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase()
+  return raw.slice(0, 2).toUpperCase()
+}
+
+const CITY_CODE_MAP = {
+  chandigarh: 'CHD',
+  delhi: 'DEL',
+  newdelhi: 'DEL',
+  gurugram: 'GGN',
+  gurgaon: 'GGN',
+  faridabad: 'FDB',
+  rohtak: 'RTK',
+  jind: 'JND',
+  hisar: 'HSR',
+  panipat: 'PNP',
+  sonipat: 'SNP',
+  karnal: 'KNL',
+  ambala: 'AMB',
+  kurukshetra: 'KUK',
+  mumbai: 'MUM',
+  pune: 'PUN',
+  bengaluru: 'BLR',
+  bangalore: 'BLR',
+  hyderabad: 'HYD',
+  chennai: 'CHE',
+  kolkata: 'CCU',
+  lucknow: 'LKO',
+  jaipur: 'JAI',
+  patna: 'PAT',
+  bhopal: 'BPL',
+  indore: 'IDR',
+  ahmedabad: 'AMD',
+  surat: 'STV',
+  kochi: 'COK',
+  trivandrum: 'TRV',
+  thiruvananthapuram: 'TRV',
+}
+
+function toCityCode(cityValue) {
+  const raw = String(cityValue || '').trim()
+  if (!raw) return ''
+  const compact = raw.toLowerCase().replace(/[^a-z]/g, '')
+  if (CITY_CODE_MAP[compact]) return CITY_CODE_MAP[compact]
+  if (/^[a-z]{2,4}$/i.test(raw)) return raw.toUpperCase()
+  const token = raw.split(/\s+/).filter(Boolean).join('')
+  return token.slice(0, 3).toUpperCase()
+}
+
+function resolveOpdTemplateAutofill(fieldName, ctx) {
+  const core = getCoreFieldByTemplateName(fieldName)
+  if (core?.autofillType) return { type: core.autofillType }
+
+  const f = String(fieldName || '')
+  const lower = f.toLowerCase()
+  const compact = lower.replace(/[\s._-]/g, '')
+
+  // NOTE: guardian must be checked BEFORE generic 'name' check
+  if (lower.includes('guardian') || lower.includes('relative') || lower.includes('attendant')) return { type: 'guardian' }
+  if (lower.includes('patient') && !lower.includes('guardian')) return { type: 'patient' }
+  if (lower === 'name' || (lower.includes('name') && !lower.includes('guardian'))) return { type: 'patient' }
+
+  if ((lower.includes('token') && lower.includes('date')) || compact.includes('tokendate')) return { type: 'token_datetime' }
+  if (lower.includes('registration') || compact.includes('registeredat') || compact.includes('regdate')) return { type: 'registered_at' }
+  if (lower.includes('date') || compact === 'dt' || compact.includes('visitdate')) return { type: 'visit_datetime' }
+
+  if (lower.includes('reg') || lower.includes('uhid') || compact.includes('mrno') || compact.includes('uhidno')) return { type: 'uhid' }
+  if (lower.includes('phone') || lower.includes('mobile') || lower.includes('contact') || compact.includes('phoneno') || compact.includes('mobileno')) return { type: 'phone' }
+
+  if (lower === 'no' || lower.includes('token') || lower.includes('queue') || lower.includes('opd') || lower.includes('slip') || lower.includes('visit') || lower.includes('no.')) return { type: 'token' }
+
+  if (compact.includes('chiefcomplaint') || lower.includes('complaint') || lower.includes('reason') || lower.includes('chief')) return { type: 'chief_complaint' }
+  if (lower.includes('doctor') || lower.includes('doc')) return { type: 'doctor' }
+  if (lower.includes('department') || lower.includes('dept')) return { type: 'department' }
+
+  if (lower.includes('age') || lower.includes('sex') || compact.includes('agesex')) return { type: 'age_sex' }
+  if (lower.includes('gender') || lower.includes('sex')) return { type: 'gender' }
+
+  if (lower.includes('address') || lower.includes('addr')) return { type: 'address' }
+  if (lower.includes('city') || lower.includes('town')) return { type: 'city' }
+  if (lower.includes('state')) return { type: 'state' }
+
+  if (lower.includes('amount') || lower.includes('fee') || lower.includes('charge') || lower.includes('paid')) return { type: 'amount_mode' }
+
+  // no match
+  return null
+}
+
+function getOpdAutofillValue(fieldName, ctx) {
+  const rule = resolveOpdTemplateAutofill(fieldName, ctx)
+  if (!rule) return ''
+  const displayToken = ctx.displayToken || ''
+  if (rule.type === 'guardian') return ctx.guardianLine || ''
+  if (rule.type === 'patient') return ctx.patientLine || ''
+  if (rule.type === 'token') return displayToken
+  if (rule.type === 'uhid') return ctx.uhid || ''
+  if (rule.type === 'phone') return ctx.phone || ''
+  if (rule.type === 'doctor') return ctx.doctorName || ''
+  if (rule.type === 'department') return ctx.department || ''
+  if (rule.type === 'gender') return ctx.gender || ''
+  if (rule.type === 'city') return ctx.city || ''
+  if (rule.type === 'state') return ctx.state || ''
+  if (rule.type === 'address') return ctx.address || ''
+  if (rule.type === 'chief_complaint') return ctx.chiefComplaint || ''
+  if (rule.type === 'age_sex') return ctx.ageSex || ''
+  if (rule.type === 'amount_mode') return ctx.amountMode || ''
+  if (rule.type === 'registered_at') return ctx.registeredAt || ''
+  if (rule.type === 'visit_datetime') return ctx.visitDateTime || ''
+  if (rule.type === 'token_datetime') return ctx.tokenDateTime || displayToken
+  return ''
+}
+
+const PRINT_WINDOW_CLOSE_SCRIPT = `<script>
+  (function () {
+    let finalized = false
+    let printed = false
+    const finalize = () => {
+      if (finalized) return
+      finalized = true
+      try { window.location.replace('about:blank') } catch {}
+      setTimeout(() => {
+        try { window.close() } catch {}
+      }, 50)
+    }
+
+    const triggerPrint = () => {
+      if (printed) return
+      printed = true
+      try { window.print() } catch { finalize() }
+    }
+
+    window.addEventListener('afterprint', finalize, { once: true })
+    window.addEventListener('focus', () => setTimeout(finalize, 200), { once: true })
+    setTimeout(finalize, 120000)
+
+    window.addEventListener('load', () => {
+      const logo = document.querySelector('.hosp-logo')
+      if (!logo) {
+        setTimeout(triggerPrint, 0)
+        return
+      }
+      if (logo.complete) {
+        setTimeout(triggerPrint, 0)
+        return
+      }
+      logo.addEventListener('load', () => setTimeout(triggerPrint, 0), { once: true })
+      logo.addEventListener('error', () => setTimeout(triggerPrint, 0), { once: true })
+    }, { once: true })
+  })()
+</script>`
 
 // ─── Sidebar Nav Config ───────────────────────────────────────────────────────
 const NAV_GROUPS = [
@@ -387,6 +796,10 @@ const NAV_GROUPS = [
       { id: 'payment_slip', label: 'Payment Slip', icon: Receipt },
       { id: 'payment_slip_list', label: 'Payment Slips List', icon: FileText },
     ],
+  },
+  {
+    label: 'Reports',
+    items: [{ id: 'reports', label: 'Daily Report', icon: BarChart2 }],
   },
   {
     label: 'Discharge',
@@ -517,36 +930,11 @@ function FollowUpAlertBanner() {
   );
 }
 
-// Module-level cache for the OPD template layout.
-// Survives re-renders and component unmounts within the same browser session.
-// Invalidated when the user explicitly saves a new layout (update_layout endpoint).
-let _opdTemplateCached = null
-
-async function fetchOpdTemplate() {
-  if (_opdTemplateCached !== null) return _opdTemplateCached
-  try {
-    const res = await fetch('/api/templates')
-    if (res.ok) {
-      const data = await res.json()
-      const single = (data.templates || []).find(t => t.key === 'single')
-      _opdTemplateCached = single?.layout ?? false
-    }
-  } catch {
-    // Leave cache null so next call retries.
-  }
-  return _opdTemplateCached
-}
-
-// Clear module cache whenever the OPD template editor saves a new layout.
-if (typeof window !== 'undefined') {
-  window.addEventListener('opd-template-updated', () => { _opdTemplateCached = null })
-}
-
 // ─── OPD Slip Print ──────────────────────────────────────────────────────────
 function PrintSlip({ visit, onClose }) {
   const [layoutFields, setLayoutFields] = useState([])
+  const [slipLayout, setSlipLayout] = useState(null)
   const [fieldValues, setFieldValues] = useState({})
-  const [templateLayout, setTemplateLayout] = useState(null)
   const [loadingTemplate, setLoadingTemplate] = useState(true)
   const displayToken = visit.display_token || `${visit.room?.prefix || ''}${visit.token_number || visit.queue_number || ''}`
   const patientLine = formatPatientLineForSlip(
@@ -554,53 +942,69 @@ function PrintSlip({ visit, onClose }) {
     visit.patient_gender,
     visit.patient_age,
     visit.patient_salutation,
+    visit.patient_age_unit,
   )
   const guardianLine = formatGuardianLineForSlip(visit.patient_guardian_name, visit.patient_guardian_relationship)
 
   useEffect(() => {
     const loadOpdLayout = async () => {
       try {
-        const layout = await fetchOpdTemplate()
-        if (layout?.fields) {
-          const fields = Object.keys(layout.fields)
-          setLayoutFields(fields)
-          setTemplateLayout(layout)
-          const initValues = {}
-          for (const f of fields) {
-            const lowerF = f.toLowerCase()
-            const compactF = lowerF.replace(/[\s_-]/g, '')
-            const tokenDateTime = visit.visit_date
-              ? `${displayToken} · ${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})`
-              : displayToken
-            const registeredAtRaw = visit.patient_registered_at || ''
-            const registeredAt = registeredAtRaw ? format(new Date(registeredAtRaw), 'd/M/yyyy (HH:mm)') : ''
-            const gAbbr = (visit.patient_gender === 'female' ? 'F' : visit.patient_gender === 'male' ? 'M' : 'O')
-            const ageSexVal = [gAbbr, visit.patient_age ? String(visit.patient_age) : ''].filter(Boolean).join(' ')
-            let fullAddress = [visit.patient_address, visit.patient_city, visit.patient_state].filter(Boolean).join(', ')
-            if (fullAddress.length > 35) fullAddress = fullAddress.substring(0, 32) + '...'
-            // NOTE: guardian must be checked BEFORE generic 'name' check
-            if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) initValues[f] = guardianLine
-            else if (lowerF.includes('patient') && !lowerF.includes('guardian')) initValues[f] = patientLine
-            else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) initValues[f] = patientLine
-            else if ((lowerF.includes('token') && lowerF.includes('date')) || compactF.includes('tokendate')) initValues[f] = tokenDateTime
-            else if (lowerF.includes('registration')) initValues[f] = registeredAt
-            else if (lowerF.includes('date')) initValues[f] = visit.visit_date ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} (${visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')})` : ''
-            else if (lowerF.includes('reg') || lowerF.includes('uhid')) initValues[f] = visit.patient_uhid || ''
-            else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) initValues[f] = visit.patient_phone || ''
-            else if (lowerF.includes('token') || lowerF.includes('queue') || lowerF.includes('opd') || lowerF.includes('no')) initValues[f] = displayToken
-            else if (compactF.includes('chiefcomplaint') || lowerF.includes('complaint') || lowerF.includes('reason')) initValues[f] = visit.chief_complaint || ''
-            else if (lowerF.includes('doctor') || lowerF.includes('doc')) initValues[f] = visit.doc_name || ''
-            else if (lowerF.includes('age') || lowerF.includes('sex')) initValues[f] = ageSexVal
-            else if (lowerF.includes('gender')) initValues[f] = visit.patient_gender || ''
-            else if (lowerF.includes('address')) initValues[f] = fullAddress
-            else if (lowerF.includes('city') || lowerF.includes('town')) initValues[f] = visit.patient_city || ''
-            else if (lowerF.includes('state')) initValues[f] = visit.patient_state || ''
-            else if (lowerF.includes('amount') || lowerF.includes('fee') || lowerF.includes('charge')) {
-              initValues[f] = visit.amount ? `${visit.amount} (${visit.payment_mode || 'cash'})` : ''
+        const res = await fetch('/api/templates')
+        if (res.ok) {
+          const data = await res.json()
+          const single = (data.templates || []).find(t => t.key === 'single')
+          const cfg = normalizeOpdFieldConfig(
+            getReceptionOpdSettings().opd_field_config,
+            getReceptionOpdSettings().opd_visible_fields,
+          )
+          if (single?.layout) {
+            const synced = syncCoreFieldsIntoLayout(single.layout, cfg)
+            setSlipLayout(synced)
+            const slipFields = filterLayoutFieldsForSlip(synced, cfg)
+            const fields = Object.keys(slipFields)
+            setLayoutFields(fields)
+            const initValues = {}
+            const savedCustom = normalizeOpdCustomFields(
+              visit.patient_opd_custom_fields || visit.opd_custom_fields,
+            )
+            for (const f of fields) {
+              const tokenDateTime = visit.visit_date
+                ? `${displayToken} · ${formatDateTime(visit.created_at || new Date(), { paren: true })}`
+                : displayToken
+              const registeredAtRaw = visit.patient_registered_at || ''
+              const registeredAt = registeredAtRaw ? formatDateTime(registeredAtRaw, { paren: true }) : ''
+              const ageSexVal = formatAgeSexForSlip(visit.patient_age, visit.patient_gender, visit.patient_age_unit)
+              const cityCode = toCityCode(visit.patient_city)
+              const stateCode = toStateCode(visit.patient_state)
+              let fullAddress = [visit.patient_address, cityCode, stateCode].filter(Boolean).join(', ')
+              if (fullAddress.length > 35) fullAddress = fullAddress.substring(0, 32) + '...'
+              const auto = getOpdAutofillValue(f, {
+                displayToken,
+                patientLine,
+                guardianLine,
+                tokenDateTime,
+                registeredAt,
+                visitDateTime: visit.visit_date
+                  ? formatDateTime(visit.created_at || new Date(), { paren: true })
+                  : '',
+                uhid: visit.patient_uhid || '',
+                phone: visit.patient_phone || '',
+                doctorName: visit.doc_name || '',
+                department: visit.department || '',
+                ageSex: ageSexVal,
+                gender: visit.patient_gender || '',
+                address: fullAddress,
+                city: cityCode,
+                state: stateCode,
+                chiefComplaint: visit.chief_complaint || '',
+                amountMode: visit.amount ? `${visit.amount} (${visit.payment_mode || 'cash'})` : '',
+              })
+              initValues[f] = templateFieldUsesMainFormOnly(f)
+                ? (auto || '')
+                : (savedCustom[f] ?? '')
             }
-            else initValues[f] = ''
+            setFieldValues(initValues)
           }
-          setFieldValues(initValues)
         }
       } catch (err) {
         // silently fail and fallback to basic slip
@@ -612,16 +1016,17 @@ function PrintSlip({ visit, onClose }) {
   }, [visit, patientLine, guardianLine])
 
   function printBasicSlip() {
+    const w = createSameTabPrintWindow()
     const slipDateTime =
       visit.visit_date
         ? `${format(new Date(visit.visit_date), 'd/M/yyyy')} ${
-            visit.created_at ? format(new Date(visit.created_at), 'HH:mm') : format(new Date(), 'HH:mm')
+            visit.created_at ? formatTime(visit.created_at) : formatTime(new Date())
           }`
         : ''
-    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>OPD Slip</title>
+    w.document.write(`
+      <html><head><title>OPD Slip</title>
       <style>
-        @page { size: 80mm auto; margin: 4mm; }
-        body { font-family: Arial, sans-serif; padding: 4px; max-width: 300px; }
+        body { font-family: Arial, sans-serif; padding: 20px; max-width: 300px; }
         .logo { font-size: 18px; font-weight: bold; color: #1d4ed8; border-bottom: 2px solid #1d4ed8; padding-bottom: 8px; margin-bottom: 12px; }
         .token { font-size: 64px; font-weight: 900; color: #1d4ed8; text-align: center; margin: 10px 0; }
         .row { display: flex; justify-content: space-between; font-size: 12px; margin: 4px 0; }
@@ -638,25 +1043,33 @@ function PrintSlip({ visit, onClose }) {
       <div class="row"><span class="label">Date</span><span>${slipDateTime}</span></div>
       <div class="row"><span class="label">Doctor</span><span>${visit.room?.label || visit.doc_name || 'OPD'}</span></div>
       <div class="row"><span class="label">Complaint</span><span>${visit.chief_complaint || '-'}</span></div>
-      ${visit.patient_city ? `<div class="row"><span class="label">City</span><span>${visit.patient_city}${visit.patient_state ? ', ' + visit.patient_state : ''}</span></div>` : ''}
+      ${visit.patient_city ? `<div class="row"><span class="label">City</span><span>${toCityCode(visit.patient_city)}${toStateCode(visit.patient_state) ? ', ' + toStateCode(visit.patient_state) : ''}</span></div>` : ''}
       ${visit.amount ? `<div class="row"><span class="label">Amount</span><span>₹${visit.amount}</span></div>` : ''}
       <div class="footer">Please wait for your token to be called<br>Keep this slip safe</div>
-      </body></html>`
-    printHtmlInFrame(html)
+      ${PRINT_WINDOW_CLOSE_SCRIPT}
+      </body></html>
+    `)
+    w.document.close()
     onClose()
   }
 
-  function printFullOpdSheet() {
+  async function printFullOpdSheet() {
     const opdSettings = getReceptionOpdSettings()
     const withBg = opdSettings.print_with_background === true
-    if (templateLayout) {
-      const html = buildPrintHtml(templateLayout, fieldValues, withBg, { noPrintScript: true })
-      printHtmlInFrame(html)
-    } else {
-      // Fallback: load via route if layout isn't cached yet
-      const params = new URLSearchParams({ ...fieldValues, _bg: withBg ? '1' : '0' }).toString()
-      const w = window.open(`/print-slip?${params}`, '_blank', 'noopener')
-      if (!w) toast.error('Please allow popups for printing')
+    const cfg = normalizeOpdFieldConfig(
+      opdSettings.opd_field_config,
+      opdSettings.opd_visible_fields,
+    )
+    try {
+      await printOpdSheet({
+        values: fieldValues,
+        withBackground: withBg,
+        layout: slipLayout,
+        opdFieldConfig: cfg,
+      })
+    } catch (err) {
+      toast.error(err?.message || 'Could not print OPD sheet')
+      return
     }
     onClose()
   }
@@ -725,15 +1138,31 @@ function PrintSlip({ visit, onClose }) {
   )
 }
 
+/**
+ * True when a template field is filled on the slip from the main Create OPD form only
+ * (same rules as A4 print merge) — no extra input row needed on Create OPD.
+ */
+function templateFieldUsesMainFormOnly(f) {
+  return Boolean(resolveOpdTemplateAutofill(f))
+}
+
 // ─── OPD Section ──────────────────────────────────────────────────────────────
 function OPDSection({ rooms }) {
   const [opdSettings, setOpdSettings] = useState(() => getReceptionOpdSettings())
+  const receptionCollectionEnabled = opdSettings.reception_collection_enabled !== false
   const defaultCity = opdSettings.default_city || ''
   const defaultState = opdSettings.default_state || ''
   const defaultDoctorUser = opdSettings.default_doctor_user || ''
+  const defaultDepartment = opdSettings.default_department || ''
+  const opdFieldConfig = useMemo(
+    () => normalizeOpdFieldConfig(opdSettings.opd_field_config, opdSettings.opd_visible_fields),
+    [opdSettings.opd_field_config, opdSettings.opd_visible_fields],
+  )
+  const isOpdFieldVisible = (key) => opdFieldConfig[key]?.createForm !== false
   const phoneInputRef = useRef(null)
   const [visits, setVisits] = useState([])
   const [doctors, setDoctors] = useState([])
+  const [departments, setDepartments] = useState([])
   const [queueSearch, setQueueSearch] = useState('')
   const [printVisit, setPrintVisit] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -758,16 +1187,17 @@ function OPDSection({ rooms }) {
     salutation_choice: 'none',
     gender: 'male',
     age: '',
+    ageUnit: 'years',
     guardian_name: '',
     guardian_relationship: '',
     address_line1: '',
     city: defaultCity,
     state: defaultState,
     doctor: defaultDoctorUser,
+    department: defaultDepartment,
     amount: '',
     payment_mode: 'cash',
     chief_complaint: '',
-    visit_date: format(new Date(), 'yyyy-MM-dd'),
   })
   const [form, setForm] = useState(() => buildEmptyForm())
 
@@ -794,13 +1224,41 @@ function OPDSection({ rooms }) {
   /** All patients in this hospital sharing the entered mobile (from /patients/by-phone/). */
   const [samePhoneFamilyList, setSamePhoneFamilyList] = useState([])
   const [lookingUp, setLookingUp] = useState(false)
+  const isExistingPatientSelected = Boolean(matchedPatient?.id)
   const today = format(new Date(), 'yyyy-MM-dd')
   const pollingRef = useRef(null)
 
   const submitActionRef = useRef('thermal')
+  const slipLayoutRef = useRef(null)
   const [layoutFields, setLayoutFields] = useState([])
   const [templateValues, setTemplateValues] = useState({})
-  const [templateLayout, setTemplateLayout] = useState(null)
+  const loadOpdLayout = useCallback(async () => {
+    try {
+      const res = await fetch('/api/templates')
+      if (res.ok) {
+        const data = await res.json()
+        const single = (data.templates || []).find((t) => t.key === 'single')
+        const cfg = normalizeOpdFieldConfig(
+          getReceptionOpdSettings().opd_field_config,
+          getReceptionOpdSettings().opd_visible_fields,
+        )
+        if (single?.layout) {
+          const synced = syncCoreFieldsIntoLayout(single.layout, cfg)
+          slipLayoutRef.current = synced
+          const slipFields = filterLayoutFieldsForSlip(synced, cfg)
+          setLayoutFields(Object.keys(slipFields))
+        } else {
+          setLayoutFields([])
+        }
+      }
+    } catch {
+      /* keep existing fields on failure */
+    }
+  }, [])
+  const opdExtraTemplateFields = useMemo(
+    () => layoutFields.filter((f) => !templateFieldUsesMainFormOnly(f)),
+    [layoutFields],
+  )
   const opdAmountManuallyEditedRef = useRef(false)
   const normalizeId = (value) => {
     if (value == null) return ''
@@ -844,6 +1302,22 @@ function OPDSection({ rooms }) {
       || normalizeId(doctorRow?.pk) === target
     )
     return getDoctorFee(fallback)
+  }
+  const getDoctorDepartmentValue = (doctorRows, selectedId) => {
+    const matched = findDoctorBySelectedId(doctorRows, selectedId)
+    if (!matched) return ''
+    const entities = Array.isArray(matched.departments_entities) ? matched.departments_entities : []
+    if (entities.length > 0) {
+      const first = entities[0]
+      return String(first?.name || first?.code || '').trim()
+    }
+    const deptIds = Array.isArray(matched.departments) ? matched.departments : []
+    if (deptIds.length > 0) {
+      const id = normalizeId(deptIds[0])
+      const dep = (departments || []).find((row) => normalizeId(row.id) === id)
+      if (dep) return String(dep.name || dep.code || '').trim()
+    }
+    return ''
   }
   const parseSlotTimeMinutes = (hhmm) => {
     const m = String(hhmm || '').trim().match(/^(\d{1,2}):(\d{2})$/)
@@ -892,17 +1366,23 @@ function OPDSection({ rooms }) {
       const detail = await api.get(`/patients/${pt.id}/`)
       const p = detail.data?.data || detail.data
       if (p) {
+        const ageFields = hydrateAgeFieldsFromPatient(p)
         setForm(f => ({
           ...f,
           patient_name: capitalizePersonName([p.first_name, p.last_name].filter(Boolean).join(' ') || ''),
           gender: p.gender || 'male',
-          age: p.age != null && p.age !== '' ? String(p.age) : '',
+          age: ageFields.age,
+          ageUnit: ageFields.ageUnit,
           address_line1: p.address_line1 || '',
           city: p.city || '',
           state: p.state || '',
           guardian_name: capitalizePersonName(p.guardian_name || ''),
           guardian_relationship: p.guardian_relationship || '',
           salutation_choice: normalizeSalutationChoiceFromApi(p.preferred_salutation),
+        }))
+        setTemplateValues((prev) => ({
+          ...prev,
+          ...normalizeOpdCustomFields(p.opd_custom_fields),
         }))
       }
     } catch {
@@ -939,6 +1419,7 @@ function OPDSection({ rooms }) {
       patient_name: '',
       gender: 'male',
       age: '',
+      ageUnit: 'years',
       guardian_name: '',
       guardian_relationship: '',
       salutation_choice: 'none',
@@ -951,50 +1432,57 @@ function OPDSection({ rooms }) {
   useEffect(() => {
     fetchQueue()
     fetchDoctors()
-    fetchHandoverSummary()
+    fetchDepartments()
+    if (getReceptionOpdSettings().reception_collection_enabled !== false) {
+      fetchHandoverSummary()
+    }
     pollingRef.current = setInterval(fetchQueue, 15000)
     // Keep OPD settings in sync while staying on this page.
     const refreshSettings = async () => {
       await loadReceptionPortalSettings()
       setOpdSettings(getReceptionOpdSettings())
+      void loadOpdLayout()
     }
     refreshSettings()
-    // Fast polling so slot fee changes at boundaries.
+    // Fast polling so slot fee changes at boundaries; also refreshes OPD template field list.
     const settingsPoll = setInterval(refreshSettings, 15000)
-
-    const loadOpdLayout = async () => {
-      try {
-        const layout = await fetchOpdTemplate()
-        if (layout?.fields) {
-          setLayoutFields(Object.keys(layout.fields))
-          setTemplateLayout(layout)
-        }
-      } catch (err) {}
-    }
-    loadOpdLayout()
 
     return () => {
       clearInterval(pollingRef.current)
       clearInterval(settingsPoll)
     }
-  }, [])
+  }, [loadOpdLayout])
 
-  const isCustomField = f => {
-    const lowerF = f.toLowerCase()
-    const handled = [
-      'name', 'patient', 'date', 'time', 'token', 'queue', 'complaint', 'reason',
-      'doctor', 'doc', 'age', 'gender', 'sex', 'phone', 'mobile', 'contact',
-      'address', 'city', 'state'
-    ]
-    if (lowerF === 'no' || lowerF === 'token no' || lowerF === 'queue no') return false
-    return !handled.some(kw => lowerF.includes(kw))
-  }
-  const customFields = layoutFields.filter(isCustomField)
+  useEffect(() => {
+    setTemplateValues((prev) => {
+      const allowed = new Set(layoutFields)
+      const next = {}
+      for (const k of Object.keys(prev)) {
+        if (allowed.has(k)) next[k] = prev[k]
+      }
+      const prevKeys = Object.keys(prev)
+      const nextKeys = Object.keys(next)
+      if (
+        prevKeys.length === nextKeys.length
+        && nextKeys.every((k) => next[k] === prev[k])
+      ) {
+        return prev
+      }
+      return next
+    })
+  }, [layoutFields])
 
   async function fetchDoctors() {
     try {
       const { data } = await api.get('/doctor-profiles/?limit=500')
       setDoctors(Array.isArray(data?.data) ? data.data : (data?.results || data || []))
+    } catch {}
+  }
+
+  async function fetchDepartments() {
+    try {
+      const { data } = await api.get('/departments/?limit=500')
+      setDepartments(Array.isArray(data?.data) ? data.data : (data?.results || data || []))
     } catch {}
   }
 
@@ -1047,9 +1535,21 @@ function OPDSection({ rooms }) {
         changed = true
       }
 
+      const doctorId = normalizeId(next.doctor || f.doctor || defaultDoctorUser)
+      if (doctorId) {
+        const deptFromDoctor = getDoctorDepartmentValue(doctors, doctorId)
+        if (deptFromDoctor && !next.department) {
+          next.department = deptFromDoctor
+          changed = true
+        }
+      } else if (!next.department && defaultDepartment) {
+        next.department = defaultDepartment
+        changed = true
+      }
+
       return changed ? next : f
     })
-  }, [defaultCity, defaultState, defaultDoctorUser])
+  }, [defaultCity, defaultState, defaultDepartment, defaultDoctorUser, doctors, departments])
 
   async function fetchQueue() {
     setLoading(true)
@@ -1070,8 +1570,9 @@ function OPDSection({ rooms }) {
           doc_name: findDoctorBySelectedId(doctorRows, vis.doctor_user)?.name || '—',
         }
       }))
-      // Keep shift collection totals in sync with newly created/updated visits.
-      await fetchHandoverSummary()
+      if (receptionCollectionEnabled) {
+        await fetchHandoverSummary()
+      }
     } catch {
       toast.error('Failed to load OPD queue')
     } finally {
@@ -1080,12 +1581,19 @@ function OPDSection({ rooms }) {
   }
 
   useEffect(() => {
-    if (showCollectionModal) {
+    if (!receptionCollectionEnabled) {
+      setShowCollectionModal(false)
+    }
+  }, [receptionCollectionEnabled])
+
+  useEffect(() => {
+    if (showCollectionModal && receptionCollectionEnabled) {
       fetchHandoverSummary()
     }
-  }, [showCollectionModal])
+  }, [showCollectionModal, receptionCollectionEnabled])
 
   async function fetchHandoverSummary() {
+    if (!receptionCollectionEnabled) return
     try {
       const { data } = await api.get('/handovers/balance/')
       const payload = data?.data || {}
@@ -1129,6 +1637,7 @@ function OPDSection({ rooms }) {
         last_name: '',
         gender: 'male',
         age: '',
+        ageUnit: 'years',
         address_line1: '',
         city: defaultCity,
         state: defaultState,
@@ -1223,6 +1732,7 @@ function OPDSection({ rooms }) {
               patient_name: '',
               gender: 'male',
               age: '',
+              ageUnit: 'years',
               guardian_name: '',
               guardian_relationship: '',
               salutation_choice: 'none',
@@ -1248,6 +1758,29 @@ function OPDSection({ rooms }) {
       clearTimeout(t)
     }
   }, [form.phone, opdNewPersonSamePhone, hydratePatientIntoForm, defaultCity, defaultState])
+
+  function openSelectOnEnter(selectEl) {
+    if (!selectEl) return false
+    if (typeof selectEl.showPicker === 'function') {
+      selectEl.showPicker()
+      return true
+    }
+    selectEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    return true
+  }
+
+  function handleOpdFormKeyDown(e) {
+    if (e.key !== 'Enter') return
+    const target = e.target
+    if (target instanceof HTMLTextAreaElement) return
+    if (target instanceof HTMLButtonElement) return
+    if (target instanceof HTMLSelectElement) {
+      e.preventDefault()
+      openSelectOnEnter(target)
+      return
+    }
+    e.preventDefault()
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -1287,7 +1820,7 @@ function OPDSection({ rooms }) {
         const normalizedPatientName = capitalizePersonName(form.patient_name).trim()
         const normalizedGuardianName = capitalizePersonName(form.guardian_name).trim()
         const nameParts = normalizedPatientName.split(' ');
-        const fName = nameParts[0] || 'Patient';
+        const fName = nameParts[0] || '';
         const lName = nameParts.slice(1).join(' ') || '';
         const patRes = await api.post('/patients/', {
           first_name: fName,
@@ -1296,7 +1829,7 @@ function OPDSection({ rooms }) {
           gender: form.gender,
           patient_type: 'outpatient',
           ...(opdNewPersonSamePhone ? { link_with_existing_phone_patients: true } : {}),
-          ...(form.age         ? { age: parseInt(form.age, 10) }    : {}),
+          ...(form.age ? { age: parseInt(form.age, 10), age_unit: normalizeAgeUnit(form.ageUnit) } : {}),
           ...(form.address_line1 ? { address_line1: form.address_line1 } : {}),
           ...(form.city        ? { city: form.city }            : {}),
           ...(form.state       ? { state: form.state }          : {}),
@@ -1305,40 +1838,35 @@ function OPDSection({ rooms }) {
           preferred_salutation: form.salutation_choice ?? '',
         })
         patientId = (patRes.data?.data || patRes.data)?.id
+        if (patientId && opdExtraTemplateFields.length > 0) {
+          await api.patch(`/patients/${patientId}/`, {
+            opd_custom_fields: buildOpdCustomFieldPayload(opdExtraTemplateFields, templateValues),
+          })
+        }
       } else {
-        // Existing patient — save receptionist edits before OPD
-        // Only patch name if the receptionist actually filled it in
-        const patch = {
-          gender: form.gender,
-          address_line1: form.address_line1 || '',
-          city: form.city || '',
-          state: form.state || '',
-          guardian_name: capitalizePersonName(form.guardian_name).trim(),
-          guardian_relationship: form.guardian_relationship || '',
-          preferred_salutation: form.salutation_choice ?? '',
-        }
-        const trimmedName = capitalizePersonName(form.patient_name).trim()
-        if (trimmedName && trimmedName !== 'Patient') {
-          const nameParts = trimmedName.split(' ')
-          patch.first_name = nameParts[0]
-          patch.last_name = nameParts.slice(1).join(' ') || ''
-        }
+        // Existing patient — lock identity/profile edits in Create OPD.
+        // Only allow age updates back to the patient master record.
+        const patch = {}
         if (form.age !== '' && form.age != null) {
           const a = parseInt(form.age, 10)
-          if (!Number.isNaN(a)) patch.age = a
+          if (!Number.isNaN(a)) {
+            patch.age = a
+            patch.age_unit = normalizeAgeUnit(form.ageUnit)
+          }
         }
-        if (digitsOnly.length >= 10 && !/[a-zA-Z]/i.test(rawLookup)) {
-          patch.phone = digitsOnly.slice(-10)
+        if (Object.keys(patch).length > 0) {
+          await api.patch(`/patients/${patientId}/`, patch)
         }
-        await api.patch(`/patients/${patientId}/`, patch)
       }
 
       // Create OPD visit
+      const visitDate = format(new Date(), 'yyyy-MM-dd')
       const { data } = await api.post('/opd-visits/', {
         patient: patientId,
-        visit_date: form.visit_date,
+        visit_date: visitDate,
         chief_complaint: form.chief_complaint,
         doctor_user: form.doctor || null,
+        department: form.department || '',
         amount: form.amount || null,
         payment_mode: form.payment_mode || 'cash',
         status: 'waiting',
@@ -1357,59 +1885,64 @@ function OPDSection({ rooms }) {
       if (submitActionRef.current === 'a4') {
         let printUhid = payload?.patient_uhid || matchedPatient?.uhid || '';
         let printPhone = payload?.patient_phone || matchedPatient?.phone || '';
-        let printCity = payload?.patient_city || form.city || '';
-        let printState = payload?.patient_state || form.state || '';
-        const slipSalutation = resolveSalutationForSlip(form.salutation_choice, form.gender, form.age)
-        const printPatientLine = formatPatientLineForSlip(ptName, form.gender, form.age, slipSalutation)
+        let printCity = toCityCode(payload?.patient_city || form.city || '');
+        let printState = toStateCode(payload?.patient_state || form.state || '');
+        const slipSalutation = resolveSalutationForSlip(form.salutation_choice, form.gender, form.age, form.ageUnit)
+        const printPatientLine = formatPatientLineForSlip(ptName, form.gender, form.age, slipSalutation, form.ageUnit)
         const printGuardianLine = formatGuardianLineForSlip(
           capitalizePersonName(payload?.patient_guardian_name || form.guardian_name || ''),
           payload?.patient_guardian_relationship ?? form.guardian_relationship ?? '',
         )
 
-        const genderAbbr = form.gender === 'female' ? 'F' : form.gender === 'male' ? 'M' : 'O'
-        const ageSex = [genderAbbr, form.age].filter(Boolean).join(' ')
+        const ageSex = formatAgeSexForSlip(form.age, form.gender, form.ageUnit)
         let ptAddress = [form.address_line1, printCity, printState].filter(Boolean).join(', ')
         if (ptAddress.length > 35) ptAddress = ptAddress.substring(0, 32) + '...'
 
         const finalValues = { ...templateValues }
         for (const f of layoutFields) {
-          const lowerF = f.toLowerCase()
-          const compactF = lowerF.replace(/[\s_-]/g, '')
-          const tokenDateTime = form.visit_date
-            ? `${displayToken} · ${format(new Date(form.visit_date), 'd/M/yyyy')} (${format(new Date(), 'HH:mm')})`
+          const tokenDateTime = visitDate
+            ? `${displayToken} · ${formatDateTime(new Date(), { paren: true })}`
             : displayToken
           const patientRegisteredAtRaw = payload?.patient_registered_at || matchedPatient?.created_at || ''
-          const patientRegisteredAt = patientRegisteredAtRaw ? format(new Date(patientRegisteredAtRaw), 'd/M/yyyy (HH:mm)') : ''
+          const patientRegisteredAt = patientRegisteredAtRaw ? formatDateTime(patientRegisteredAtRaw, { paren: true }) : ''
           // NOTE: guardian must be checked BEFORE generic 'name' check
-          if (lowerF.includes('guardian') || lowerF.includes('relative') || lowerF.includes('attendant')) finalValues[f] = finalValues[f] || printGuardianLine
-          else if (lowerF.includes('patient') && !lowerF.includes('guardian')) finalValues[f] = finalValues[f] || printPatientLine
-          else if (lowerF === 'name' || (lowerF.includes('name') && !lowerF.includes('guardian'))) finalValues[f] = finalValues[f] || printPatientLine
-          else if ((lowerF.includes('token') && lowerF.includes('date')) || compactF.includes('tokendate')) finalValues[f] = finalValues[f] || tokenDateTime
-          else if (lowerF.includes('registration')) finalValues[f] = finalValues[f] || patientRegisteredAt
-          else if (lowerF.includes('date')) finalValues[f] = finalValues[f] || (form.visit_date ? `${format(new Date(form.visit_date), 'd/M/yyyy')} (${format(new Date(), 'HH:mm')})` : '')
-          else if (lowerF.includes('reg') || lowerF.includes('uhid')) finalValues[f] = finalValues[f] || printUhid || ''
-          else if (lowerF.includes('phone') || lowerF.includes('mobile') || lowerF.includes('contact')) finalValues[f] = finalValues[f] || printPhone || form.phone.replace(/\D/g, '') || ''
-          else if (lowerF.includes('token') || lowerF.includes('queue') || lowerF.includes('opd') || lowerF.includes('no')) finalValues[f] = finalValues[f] || displayToken
-          else if (compactF.includes('chiefcomplaint') || lowerF.includes('complaint') || lowerF.includes('reason')) finalValues[f] = finalValues[f] || form.chief_complaint || ''
-          else if (lowerF.includes('doctor') || lowerF.includes('doc')) finalValues[f] = finalValues[f] || selectedDoc?.name || ''
-          else if (lowerF.includes('age') || lowerF.includes('sex')) finalValues[f] = finalValues[f] || ageSex
-          else if (lowerF.includes('gender')) finalValues[f] = finalValues[f] || form.gender || ''
-          else if (lowerF.includes('address')) finalValues[f] = finalValues[f] || ptAddress
-          else if (lowerF.includes('city') || lowerF.includes('town')) finalValues[f] = finalValues[f] || printCity
-          else if (lowerF.includes('state')) finalValues[f] = finalValues[f] || printState
-          else if (lowerF.includes('amount') || lowerF.includes('fee') || lowerF.includes('charge')) {
-             finalValues[f] = finalValues[f] || (form.amount ? `${form.amount} (${form.payment_mode})` : '')
-          }
+          const auto = getOpdAutofillValue(f, {
+            displayToken,
+            patientLine: printPatientLine,
+            guardianLine: printGuardianLine,
+            tokenDateTime,
+            registeredAt: patientRegisteredAt,
+            visitDateTime: visitDate
+              ? formatDateTime(new Date(), { paren: true })
+              : '',
+            uhid: printUhid || '',
+            phone: (printPhone || form.phone.replace(/\D/g, '') || '').trim(),
+            doctorName: selectedDoc?.name || '',
+            department: form.department || '',
+            ageSex,
+            gender: form.gender || '',
+            address: ptAddress,
+            city: printCity,
+            state: printState,
+            chiefComplaint: form.chief_complaint || '',
+            amountMode: form.amount ? `${form.amount} (${form.payment_mode})` : '',
+          })
+          if (auto && !finalValues[f]) finalValues[f] = auto
         }
         const withBg = getReceptionOpdSettings().print_with_background === true
-        if (templateLayout) {
-          const html = buildPrintHtml(templateLayout, finalValues, withBg, { noPrintScript: true })
-          printHtmlInFrame(html)
-        } else {
-          // Fallback: open new tab (layout not loaded yet)
-          const params = new URLSearchParams({ ...finalValues, _bg: withBg ? '1' : '0' }).toString()
-          const w = window.open(`/print-slip?${params}`, '_blank', 'noopener')
-          if (!w) toast.error('Please allow popups for printing')
+        const cfg = normalizeOpdFieldConfig(
+          getReceptionOpdSettings().opd_field_config,
+          getReceptionOpdSettings().opd_visible_fields,
+        )
+        try {
+          await printOpdSheet({
+            values: finalValues,
+            withBackground: withBg,
+            layout: slipLayoutRef.current,
+            opdFieldConfig: cfg,
+          })
+        } catch (err) {
+          toast.error(err?.message || 'Could not print OPD sheet')
         }
       } else {
         setPrintVisit({
@@ -1417,12 +1950,13 @@ function OPDSection({ rooms }) {
           patient_name: ptName,
           patient_gender: payload?.patient_gender ?? form.gender,
           patient_age: payload?.patient_age ?? form.age,
-          patient_salutation: resolveSalutationForSlip(form.salutation_choice, form.gender, form.age),
+          patient_age_unit: payload?.patient_age_unit ?? normalizeAgeUnit(form.ageUnit),
+          patient_salutation: resolveSalutationForSlip(form.salutation_choice, form.gender, form.age, form.ageUnit),
           patient_guardian_relationship: payload?.patient_guardian_relationship ?? form.guardian_relationship ?? '',
           doc_name: selectedDoc?.name || '',
           patient_uhid: payload?.patient_uhid || matchedPatient?.uhid || '',
-          patient_city: payload?.patient_city || form.city || '',
-          patient_state: payload?.patient_state || form.state || '',
+          patient_city: printCity,
+          patient_state: printState,
           patient_guardian_name: capitalizePersonName(payload?.patient_guardian_name || form.guardian_name || ''),
           room: selectedRoom || undefined,
           display_token: displayToken,
@@ -1481,9 +2015,7 @@ function OPDSection({ rooms }) {
     phoneFamilySessionKey &&
       samePhoneFamilyList.length > 0 &&
       !samePhoneFamilyModalOpen &&
-      !opdNewPersonSamePhone &&
-      samePhoneModalDismissedKeyRef.current === phoneFamilySessionKey &&
-      samePhoneFamilyUseConfirmedKeyRef.current !== phoneFamilySessionKey,
+      !opdNewPersonSamePhone,
   )
 
   function closeSamePhoneFamilyModalBackdrop() {
@@ -1547,7 +2079,9 @@ function OPDSection({ rooms }) {
   }, [lookingUp, opdNewPersonSamePhone, lookupDigits, looksLikeUhidInput, samePhoneFamilyList.length])
 
   const inp = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-base font-semibold text-gray-900 placeholder:text-gray-400 placeholder:font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none'
+  const inpCompact = 'w-full min-w-0 border border-gray-200 rounded-lg px-2 py-1.5 text-sm font-semibold text-gray-900 placeholder:text-gray-400 placeholder:font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none'
   const lbl = 'text-sm font-bold text-gray-800 mb-1 block tracking-tight'
+  const lblCompact = 'text-xs font-bold text-gray-800 mb-0.5 block tracking-tight'
   // Light fill when record was loaded from lookup (receptionist sees “prefilled” fields)
   const filledBg = matchedPatient
     ? 'bg-emerald-50/90 border-emerald-200/90 ring-1 ring-inset ring-emerald-100/60 focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-400'
@@ -1565,7 +2099,7 @@ function OPDSection({ rooms }) {
       <div className="flex gap-0 flex-1 min-h-0 overflow-hidden">
 
       {/* ── LEFT: Quick OPD Form ── */}
-      <form onSubmit={handleSubmit}
+      <form onSubmit={handleSubmit} onKeyDown={handleOpdFormKeyDown}
         className="flex-1 w-full min-w-0 bg-white flex flex-col min-h-0 overflow-hidden">
 
         {/* Form header — flush under top bar; queue toggle inline */}
@@ -1576,22 +2110,23 @@ function OPDSection({ rooms }) {
           </div>
           
           <div className="flex items-center gap-3">
-            {/* Daily Collection Capsule */}
-            <button 
-              type="button"
-              onClick={() => setShowCollectionModal(true)}
-              className="flex items-center gap-2 px-3 py-1.5 bg-white/10 hover:bg-white/20 border border-white/20 rounded-full transition-all group shrink-0"
-            >
-              <div className="w-5 h-5 rounded-full bg-white text-emerald-600 flex items-center justify-center">
-                <IndianRupee size={10} strokeWidth={3} />
-              </div>
-              <div className="flex flex-col items-start leading-none pr-1">
-                <span className="text-[9px] font-black text-emerald-50/70 uppercase tracking-tighter">Collection Summary</span>
-                <span className="text-xs font-black text-white leading-tight">
-                  ₹{collectionStats.total.toLocaleString('en-IN')}
-                </span>
-              </div>
-            </button>
+            {receptionCollectionEnabled ? (
+              <button
+                type="button"
+                onClick={() => setShowCollectionModal(true)}
+                className="flex items-center gap-2 px-3 py-1.5 bg-white/10 hover:bg-white/20 border border-white/20 rounded-full transition-all group shrink-0"
+              >
+                <div className="w-5 h-5 rounded-full bg-white text-emerald-600 flex items-center justify-center">
+                  <IndianRupee size={10} strokeWidth={3} />
+                </div>
+                <div className="flex flex-col items-start leading-none pr-1">
+                  <span className="text-[9px] font-black text-emerald-50/70 uppercase tracking-tighter">Collection Summary</span>
+                  <span className="text-xs font-black text-white leading-tight">
+                    ₹{collectionStats.total.toLocaleString('en-IN')}
+                  </span>
+                </div>
+              </button>
+            ) : null}
 
             <button
               type="button"
@@ -1612,9 +2147,14 @@ function OPDSection({ rooms }) {
 
           {/* Row 1: Phone + Patient + Guardian. Row 2: Age + Gender. */}
           {/* Phone / UHID — compact input; hints on the right in wide layout */}
+          {(isOpdFieldVisible('phone') || isOpdFieldVisible('uhid')) && (
           <div className="col-span-12 lg:col-span-3 min-w-0">
             <label className={`${lblFilled} flex items-center gap-1.5`}>
-              Phone or UHID *
+              {isOpdFieldVisible('phone') && isOpdFieldVisible('uhid')
+                ? 'Phone or UHID *'
+                : isOpdFieldVisible('uhid')
+                  ? 'UHID *'
+                  : 'Phone *'}
               {showSamePhoneNewHint && (
                 <span title="Registering new family member on this number" className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-700 bg-amber-100 border border-amber-200 rounded-full px-1.5 py-0.5 leading-none">
                   <span className="w-1 h-1 rounded-full bg-amber-500 shrink-0" />
@@ -1643,7 +2183,35 @@ function OPDSection({ rooms }) {
                   let v = e.target.value;
                   // If it's purely digits, cap at 10. If it has letters (UHID), allow up to 40.
                   if (/^\d+$/.test(v) && v.length > 10) v = v.slice(0, 10);
-                  setForm(f => ({ ...f, phone: v }));
+                  const prevPhone = form.phone
+                  const phoneChanged = v !== prevPhone
+                  if (isExistingPatientSelected && phoneChanged) {
+                    setMatchedPatient(null)
+                    setLookupCandidates([])
+                    setSamePhoneFamilyList([])
+                    setOpdNewPersonSamePhone(false)
+                    samePhoneModeDigitsRef.current = null
+                    samePhoneModalDismissedKeyRef.current = ''
+                    samePhoneFamilyUseConfirmedKeyRef.current = ''
+                    setSamePhoneFamilyModalOpen(false)
+                    setTemplateValues({})
+                    setForm(f => ({
+                      ...f,
+                      phone: v,
+                      patient_name: '',
+                      gender: 'male',
+                      age: '',
+                      ageUnit: 'years',
+                      guardian_name: '',
+                      guardian_relationship: '',
+                      salutation_choice: 'none',
+                      address_line1: '',
+                      city: defaultCity,
+                      state: defaultState,
+                    }))
+                    return
+                  }
+                  setForm(f => ({ ...f, phone: v }))
                 }}
                 placeholder="Mobile or UHID"
                 maxLength={40}
@@ -1693,7 +2261,21 @@ function OPDSection({ rooms }) {
               </button>
             )}
           </div>
+          )}
 
+          {isOpdFieldVisible('uhid') && (
+          <div className="col-span-12 lg:col-span-2 min-w-0">
+            <label className={lblFilled}>UHID</label>
+            <input
+              value={matchedPatient?.uhid || ''}
+              readOnly
+              placeholder="Assigned after match"
+              className={`${inpFilled} bg-gray-50/80`}
+            />
+          </div>
+          )}
+
+          {isOpdFieldVisible('patient_name') && (
           <div className="col-span-12 lg:col-span-4 min-w-0">
               <label className={lblFilled}>Patient Name</label>
               <div
@@ -1701,6 +2283,7 @@ function OPDSection({ rooms }) {
               >
                 <select
                   value={form.salutation_choice}
+                  disabled={isExistingPatientSelected}
                   onChange={e => setForm(f => ({ ...f, salutation_choice: e.target.value }))}
                   className="shrink-0 w-[5.25rem] sm:w-28 border-0 border-r border-gray-200/90 bg-gray-50/95 py-2 pl-2 pr-1 text-xs sm:text-sm font-bold text-gray-800 focus:outline-none focus:bg-gray-50 cursor-pointer"
                   aria-label="Patient title (Mr, Mrs, …)"
@@ -1711,12 +2294,15 @@ function OPDSection({ rooms }) {
                 </select>
                 <input
                   value={form.patient_name}
+                  readOnly={isExistingPatientSelected}
                   onChange={e => setForm(f => ({ ...f, patient_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))}
                   placeholder="Full name"
                   className="flex-1 min-w-0 border-0 rounded-none bg-transparent py-2 px-3 text-base font-semibold text-gray-900 placeholder:text-gray-400 placeholder:font-medium focus:outline-none focus:ring-0"
                 />
               </div>
           </div>
+          )}
+          {isOpdFieldVisible('guardian') && (
           <div className="col-span-12 lg:col-span-5 min-w-0">
               <label className={lblFilled}>Guardian</label>
               <div
@@ -1724,6 +2310,7 @@ function OPDSection({ rooms }) {
               >
                 <select
                   value={form.guardian_relationship}
+                  disabled={isExistingPatientSelected}
                   onChange={e => setForm(f => ({ ...f, guardian_relationship: e.target.value }))}
                   className="shrink-0 w-[6.5rem] sm:min-w-[7.5rem] sm:max-w-[9.5rem] sm:w-36 border-0 border-r border-gray-200/90 bg-gray-50/95 py-2 pl-1.5 pr-0.5 text-[11px] sm:text-xs font-bold text-gray-800 focus:outline-none focus:bg-gray-50 cursor-pointer"
                   aria-label="Relation to guardian (S/o, W/o, …)"
@@ -1734,18 +2321,29 @@ function OPDSection({ rooms }) {
                 </select>
                 <input
                   value={form.guardian_name}
+                  readOnly={isExistingPatientSelected}
                   onChange={e => setForm(f => ({ ...f, guardian_name: capitalizePersonName(sanitizePersonName(e.target.value)) }))}
                   placeholder="Guardian name"
                   className="flex-1 min-w-0 border-0 rounded-none bg-transparent py-2 px-3 text-base font-semibold text-gray-900 placeholder:text-gray-400 placeholder:font-medium focus:outline-none focus:ring-0"
                 />
               </div>
           </div>
+          )}
+          {isOpdFieldVisible('age_sex') && (
           <div className="col-span-6 sm:col-span-3 lg:col-span-3 min-w-0">
-            <label className={lblFilled}>Age</label>
-            <input type="number" min="0" max="150" value={form.age} onChange={e => setForm(f => ({ ...f, age: e.target.value.replace(/\D/g, '').slice(0, 3) }))} placeholder="yrs" className={inpFilled} />
+            <label className={lblFilled}>Age and Sex</label>
+            <AgeWithUnitInput
+              value={form.age}
+              unit={form.ageUnit}
+              onValueChange={(next) => setForm((f) => ({ ...f, age: next }))}
+              onUnitChange={(next) => setForm((f) => ({ ...f, ageUnit: next }))}
+              inputClassName={inpFilled}
+            />
           </div>
+          )}
+          {isOpdFieldVisible('age_sex') && (
           <div className="col-span-6 sm:col-span-9 lg:col-span-9 min-w-0">
-            <label className={lblFilled}>Gender</label>
+            <label className={lblFilled}>Sex</label>
             <div className={`flex gap-2 w-full max-w-none rounded-lg p-1 ${
               matchedPatient ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-100/70'
                 : opdNewPersonSamePhone ? 'bg-amber-50/80 ring-1 ring-inset ring-amber-100/70'
@@ -1753,7 +2351,11 @@ function OPDSection({ rooms }) {
             }`}>
               {[['male','Male'],['female','Female'],['other','Other']].map(([val, lblShort]) => (
                 <button type="button" key={val}
-                  onClick={() => setForm(f => ({ ...f, gender: val }))}
+                  disabled={isExistingPatientSelected}
+                  onClick={() => {
+                    if (isExistingPatientSelected) return
+                    setForm(f => ({ ...f, gender: val }))
+                  }}
                   className={`flex-1 py-2 rounded-lg text-sm font-semibold border-2 transition-colors ${
                     form.gender === val
                       ? opdNewPersonSamePhone
@@ -1770,11 +2372,14 @@ function OPDSection({ rooms }) {
               ))}
             </div>
           </div>
+          )}
 
+          {isOpdFieldVisible('address') && (
           <div className="col-span-12">
             <label className={lblFilled}>Address</label>
             <input
               value={form.address_line1}
+              readOnly={isExistingPatientSelected}
               onChange={e => setForm(f => ({ ...f, address_line1: e.target.value }))}
               placeholder="House / street / locality"
               className={`${inpFilled} mb-1`}
@@ -1782,80 +2387,28 @@ function OPDSection({ rooms }) {
             <div className={showQueue ? 'space-y-2' : 'grid grid-cols-2 gap-2'}>
               <input
                 value={form.city}
+                readOnly={isExistingPatientSelected}
                 onChange={e => setForm(f => ({ ...f, city: e.target.value }))}
                 placeholder="City / town"
                 className={inpFilled}
               />
               <select
                 value={form.state}
+                disabled={isExistingPatientSelected}
                 onChange={e => setForm(f => ({ ...f, state: e.target.value }))}
                 className={inpFilled}
               >
-                {[
-                  'Andhra Pradesh',
-                  'Arunachal Pradesh',
-                  'Assam',
-                  'Bihar',
-                  'Chhattisgarh',
-                  'Goa',
-                  'Gujarat',
-                  'Haryana',
-                  'Himachal Pradesh',
-                  'Jharkhand',
-                  'Karnataka',
-                  'Kerala',
-                  'Madhya Pradesh',
-                  'Maharashtra',
-                  'Manipur',
-                  'Meghalaya',
-                  'Mizoram',
-                  'Nagaland',
-                  'Odisha',
-                  'Punjab',
-                  'Rajasthan',
-                  'Sikkim',
-                  'Tamil Nadu',
-                  'Telangana',
-                  'Tripura',
-                  'Uttar Pradesh',
-                  'Uttarakhand',
-                  'West Bengal',
-                  'Andaman and Nicobar Islands',
-                  'Chandigarh',
-                  'Dadra and Nagar Haveli and Daman and Diu',
-                  'Delhi',
-                  'Jammu and Kashmir',
-                  'Ladakh',
-                  'Lakshadweep',
-                  'Puducherry',
-                ].map(st => (
+                {INDIAN_STATE_OPTIONS.map(st => (
                   <option key={st} value={st}>{st}</option>
                 ))}
               </select>
             </div>
           </div>
+          )}
 
-          <div className="col-span-2">
-            <label className={lbl}>Visit date</label>
-            <div className="relative">
-              <input
-                type="text"
-                readOnly
-                value={form.visit_date ? format(new Date(form.visit_date), 'd/M/yyyy') : ''}
-                onClick={(e) => e.target.nextSibling.showPicker()}
-                className={inp + " cursor-pointer bg-white"}
-                placeholder="Select date..."
-              />
-              <input
-                type="date"
-                className="absolute inset-0 opacity-0 pointer-events-none"
-                value={form.visit_date}
-                onChange={e => setForm(f => ({ ...f, visit_date: e.target.value }))}
-              />
-            </div>
-          </div>
-          <div className="col-span-3">
-            <label className={lbl}>Doctor</label>
+          {isOpdFieldVisible('doctor') && (
+          <div className="col-span-6 sm:col-span-4 lg:col-span-2 min-w-0">
+            <label className={lblCompact}>Doctor</label>
             <select value={form.doctor} onChange={e => {
               opdAmountManuallyEditedRef.current = false
               const selectedDocId = e.target.value
@@ -1871,12 +2424,16 @@ function OPDSection({ rooms }) {
               } else {
                 fee = Number.isFinite(feeFromOption) ? feeFromOption : getDoctorFeeBySelectedId(doctors, selectedDocId)
               }
+              const departmentValue = selectedDocId
+                ? getDoctorDepartmentValue(doctors, selectedDocId)
+                : defaultDepartment
               setForm(f => ({
                 ...f,
                 doctor: selectedDocId,
                 amount: fee != null ? String(fee) : '',
+                department: departmentValue,
               }))
-            }} className={inp}>
+            }} className={inpCompact}>
               <option value="">Walk-in / Any</option>
               {doctors.filter(d => getDoctorUserId(d)).map(d => (
                 <option
@@ -1889,10 +2446,23 @@ function OPDSection({ rooms }) {
               ))}
             </select>
           </div>
-          <div className="col-span-2">
-            <label className={lbl}>Amount (₹)</label>
+          )}
+          {isOpdFieldVisible('department') && (
+          <div className="col-span-6 sm:col-span-4 lg:col-span-2 min-w-0">
+            <label className={lblCompact}>Department</label>
+            <select value={form.department} onChange={e => setForm(f => ({ ...f, department: e.target.value }))} className={inpCompact}>
+              <option value="">-- Select --</option>
+              {departments.map(dep => (
+                <option key={dep.id} value={dep.name || dep.code || ''}>{dep.name || dep.code}</option>
+              ))}
+            </select>
+          </div>
+          )}
+          {isOpdFieldVisible('amount') && (
+          <div className="col-span-4 sm:col-span-3 lg:col-span-2 min-w-0">
+            <label className={lblCompact}>Amount</label>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 font-bold text-sm">₹</span>
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 font-bold text-xs">₹</span>
               <input
                 type="number"
                 min="0"
@@ -1909,24 +2479,58 @@ function OPDSection({ rooms }) {
                   }
                 }}
                 placeholder="0"
-                className={`${inp} pl-7`}
+                className={`${inpCompact} pl-6`}
               />
             </div>
           </div>
-          <div className="col-span-2">
-            <label className={lbl}>Payment</label>
-            <select value={form.payment_mode} onChange={e => setForm(f => ({ ...f, payment_mode: e.target.value }))} className={inp}>
+          )}
+          {isOpdFieldVisible('amount') && (
+          <div className="col-span-4 sm:col-span-3 lg:col-span-2 min-w-0">
+            <label className={lblCompact}>Payment</label>
+            <select value={form.payment_mode} onChange={e => setForm(f => ({ ...f, payment_mode: e.target.value }))} className={inpCompact}>
               <option value="cash">Cash</option>
               <option value="upi">UPI</option>
               <option value="other">Other</option>
             </select>
           </div>
-          <div className="col-span-3">
-            <label className={lbl}>Chief complaint</label>
-            <input value={form.chief_complaint} onChange={e => setForm(f => ({ ...f, chief_complaint: e.target.value }))} placeholder="e.g. fever, follow-up" className={inp} />
+          )}
+          {isOpdFieldVisible('chief_complaint') && (
+          <div className="col-span-12 sm:col-span-6 lg:col-span-4 min-w-0">
+            <label className={lblCompact}>Chief complaint</label>
+            <input value={form.chief_complaint} onChange={e => setForm(f => ({ ...f, chief_complaint: e.target.value }))} placeholder="e.g. fever, follow-up" className={inpCompact} />
           </div>
+          )}
 
-
+          {opdExtraTemplateFields.length > 0 && (
+            <div className="col-span-12 border-t border-gray-100 pt-3 mt-1">
+              <p className="text-xs font-bold text-gray-500 mb-2 tracking-tight">
+                Slip template fields
+                <span className="font-normal text-gray-400 ml-1">
+                  (from OPD editor — saved on the patient record)
+                </span>
+              </p>
+              <div className="grid grid-cols-12 gap-x-3 gap-y-2">
+                {opdExtraTemplateFields.map((f) => (
+                  <div key={f} className="col-span-12 lg:col-span-3 min-w-0">
+                    <label className={`${lbl} flex flex-col gap-1`}>
+                      <span>{f}</span>
+                      <input
+                        type="text"
+                        value={templateValues[f] ?? ''}
+                        readOnly={isExistingPatientSelected}
+                        onChange={(e) =>
+                          setTemplateValues((tv) => ({ ...tv, [f]: e.target.value }))
+                        }
+                        placeholder={`Enter ${f}`}
+                        className={inp}
+                        autoComplete="off"
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
         </div>
 
@@ -1950,7 +2554,7 @@ function OPDSection({ rooms }) {
           )}
           <p className="text-center text-xs font-bold text-gray-500 leading-tight mt-1">
             {matchedPatient
-              ? 'Patient found — edit details above if needed; saved when you assign token'
+              ? 'Existing patient selected — only age is editable in Create OPD'
               : opdNewPersonSamePhone
                 ? 'Registers a new patient on this number and links the family record (same mobile as an existing patient)'
                 : 'Creates patient record if new'}
@@ -1975,21 +2579,23 @@ function OPDSection({ rooms }) {
               <Activity size={16} className="text-emerald-600 shrink-0" strokeWidth={2.5} />
               <span className="font-semibold text-gray-800 text-sm flex-1">Today's OPD Queue</span>
               
-              {/* Daily Collection Capsule */}
-              <button 
-                onClick={() => setShowCollectionModal(true)}
-                className="flex items-center gap-2 px-2.5 py-1 bg-white border border-emerald-100 rounded-full shadow-sm hover:shadow-md hover:bg-emerald-50 transition-all group shrink-0"
-              >
-                <div className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center">
-                  <IndianRupee size={10} strokeWidth={3} />
-                </div>
-                <div className="flex flex-col items-start leading-none pr-1">
-                  <span className="text-[9px] font-black text-emerald-600/70 uppercase tracking-tighter">Collection</span>
-                  <span className="text-xs font-black text-emerald-700 leading-tight">
-                    ₹{collectionStats.total.toLocaleString('en-IN')}
-                  </span>
-                </div>
-              </button>
+              {receptionCollectionEnabled ? (
+                <button
+                  type="button"
+                  onClick={() => setShowCollectionModal(true)}
+                  className="flex items-center gap-2 px-2.5 py-1 bg-white border border-emerald-100 rounded-full shadow-sm hover:shadow-md hover:bg-emerald-50 transition-all group shrink-0"
+                >
+                  <div className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center">
+                    <IndianRupee size={10} strokeWidth={3} />
+                  </div>
+                  <div className="flex flex-col items-start leading-none pr-1">
+                    <span className="text-[9px] font-black text-emerald-600/70 uppercase tracking-tighter">Collection</span>
+                    <span className="text-xs font-black text-emerald-700 leading-tight">
+                      ₹{collectionStats.total.toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                </button>
+              ) : null}
               <Search size={15} className="text-gray-400 shrink-0" strokeWidth={2} />
               <input
                 value={queueSearch}
@@ -2180,7 +2786,7 @@ function OPDSection({ rooms }) {
         </div>
       )}
 
-      {showCollectionModal && (
+      {receptionCollectionEnabled && showCollectionModal && (
         <CollectionSummaryModal 
           stats={collectionStats} 
           entries={collectionEntries}
@@ -2196,19 +2802,11 @@ function OPDSection({ rooms }) {
 }
 
 function CollectionSummaryModal({ stats, entries, recipients, pendingHandovers, onHandoverSuccess, onClose }) {
-  const [currentPage, setCurrentPage] = useState(1)
   const [showHandoverModal, setShowHandoverModal] = useState(false)
   const [selectedRecipient, setSelectedRecipient] = useState('')
   const [declaredCashAmount, setDeclaredCashAmount] = useState(stats.cash > 0 ? String(stats.cash) : '')
   const [handoverNotes, setHandoverNotes] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
-  const itemsPerPage = 10
-  
-  const paidEntries = (entries || []).filter(v => parseFloat(v.amount) > 0)
-  const totalPages = Math.ceil(paidEntries.length / itemsPerPage)
-  
-  const startIndex = (currentPage - 1) * itemsPerPage
-  const currentItems = paidEntries.slice(startIndex, startIndex + itemsPerPage)
 
   async function submitHandover() {
     if (!selectedRecipient) {
@@ -2247,8 +2845,6 @@ function CollectionSummaryModal({ stats, entries, recipients, pendingHandovers, 
     }
   }
 
-  const hasOpeningCash = Number(stats.openingCash || 0) > 0
-  
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px]" onClick={onClose}>
       <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
@@ -2303,108 +2899,13 @@ function CollectionSummaryModal({ stats, entries, recipients, pendingHandovers, 
             </div>
           </div>
 
-          <div className="bg-gray-50/50 rounded-2xl border border-gray-100 overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100 bg-white flex items-center justify-between">
-              <h3 className="text-sm font-black text-gray-700 flex items-center gap-2">
-                <Activity size={16} className="text-emerald-500" />
-                Transaction List
-              </h3>
-              <span className="text-[10px] font-black bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full uppercase">{paidEntries.length} Payments</span>
-            </div>
-            <div className="divide-y divide-gray-100/50 overflow-hidden">
-              <div className="grid grid-cols-12 px-4 py-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-white/50">
-                <div className="col-span-1">TKN</div>
-                <div className="col-span-4">Patient Name</div>
-                <div className="col-span-2 text-right">Amount</div>
-                <div className="col-span-2 text-right">Mode</div>
-                <div className="col-span-3 text-right">Created By</div>
-              </div>
-              <div className="max-h-[450px] overflow-y-auto">
-                {paidEntries.length === 0 ? (
-                  <div className="px-4 py-12 text-center text-gray-400 italic text-sm">No collections recorded today</div>
-                ) : (
-                  <>
-                    {hasOpeningCash && (
-                      <div className="grid grid-cols-12 px-4 py-2.5 items-center bg-emerald-50/60 border-b border-emerald-100 text-sm">
-                        <div className="col-span-1 font-mono font-bold text-emerald-700">#--</div>
-                        <div className="col-span-4 font-bold text-emerald-800 truncate">Opening Cash In Hand</div>
-                        <div className="col-span-2 text-right font-black text-emerald-900">₹{Number(stats.openingCash || 0).toLocaleString('en-IN')}</div>
-                        <div className="col-span-2 text-right">
-                          <span className="text-[10px] font-black uppercase tracking-tighter px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-700">
-                            opening
-                          </span>
-                        </div>
-                        <div className="col-span-3 text-right">
-                          <span className="text-[10px] font-bold text-emerald-600 uppercase">handover</span>
-                        </div>
-                      </div>
-                    )}
-                    {currentItems.map(v => (
-                      <div key={v.id} className="grid grid-cols-12 px-4 py-2.5 items-center hover:bg-white text-sm transition-colors group">
-                        <div className="col-span-1 font-mono font-bold text-gray-400 group-hover:text-emerald-600 transition-colors">
-                          {v.entry_type === 'payment' ? 'P' : `#${v.token_number || v.queue_number || '--'}`}
-                        </div>
-                        <div className="col-span-4 font-bold text-gray-800 truncate">{v.patient_name}</div>
-                        <div className="col-span-2 text-right font-black text-gray-900">₹{v.amount}</div>
-                        <div className="col-span-2 text-right">
-                          <span className={`text-[10px] font-black uppercase tracking-tighter px-2 py-0.5 rounded-md ${
-                            v.payment_mode === 'upi' ? 'bg-blue-100 text-blue-700' :
-                            v.payment_mode === 'cash' ? 'bg-emerald-100 text-emerald-700' :
-                            'bg-gray-100 text-gray-600'
-                          }`}>
-                            {v.payment_mode || 'cash'}
-                          </span>
-                        </div>
-                        <div className="col-span-3 text-right">
-                          <span className="text-[10px] font-bold text-gray-400 uppercase">{v.created_by_name || '—'}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
-            </div>
-
-            {/* Pagination Controls */}
-            {totalPages > 1 && (
-              <div className="px-4 py-3 bg-white border-t border-gray-100 flex items-center justify-between">
-                <p className="text-[11px] font-black text-gray-400 uppercase tracking-widest">
-                  Showing {startIndex + 1} to {Math.min(startIndex + itemsPerPage, paidEntries.length)} of {paidEntries.length}
-                </p>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    className="p-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gray-500 transition-all"
-                  >
-                    <ChevronLeft size={16} strokeWidth={3} />
-                  </button>
-                  <div className="flex items-center gap-1">
-                    {[...Array(totalPages)].map((_, i) => (
-                      <button
-                        key={i + 1}
-                        onClick={() => setCurrentPage(i + 1)}
-                        className={`w-7 h-7 rounded-lg text-xs font-black transition-all ${
-                          currentPage === i + 1
-                            ? 'bg-emerald-600 text-white shadow-md'
-                            : 'text-gray-400 hover:bg-emerald-50 hover:text-emerald-600'
-                        }`}
-                      >
-                        {i + 1}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                    disabled={currentPage === totalPages}
-                    className="p-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-gray-500 transition-all"
-                  >
-                    <ChevronRight size={16} strokeWidth={3} />
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+          <CollectionTransactionList
+            entries={entries}
+            stats={stats}
+            showOpeningCash
+            showGrandTotalFooter={false}
+            emptyMessage="No collections recorded today"
+          />
         </div>
 
         <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
@@ -2643,13 +3144,13 @@ function StaffAttendanceSection() {
                       <div className="bg-gray-50/80 rounded-xl p-2 border border-gray-100 text-center transition-colors group-hover:bg-white group-hover:shadow-inner">
                         <p className="text-[9px] text-gray-400 font-black uppercase tracking-tighter mb-0.5 opacity-60 text-left">Shift Start</p>
                         <p className={`text-sm font-black ${checkedIn ? 'text-emerald-700' : 'text-gray-400'}`}>
-                          {checkedIn ? format(new Date(checkedIn), 'HH:mm') : '--:--'}
+                          {checkedIn ? formatTime(checkedIn) : '--:--'}
                         </p>
                       </div>
                       <div className="bg-gray-50/80 rounded-xl p-2 border border-gray-100 text-center transition-colors group-hover:bg-white group-hover:shadow-inner">
                         <p className="text-[9px] text-gray-400 font-black uppercase tracking-tighter mb-0.5 opacity-60 text-left">Shift End</p>
                         <p className={`text-sm font-black ${checkedOut ? 'text-emerald-700' : 'text-gray-400'}`}>
-                          {checkedOut ? format(new Date(checkedOut), 'HH:mm') : '--:--'}
+                          {checkedOut ? formatTime(checkedOut) : '--:--'}
                         </p>
                       </div>
                     </div>
@@ -2723,6 +3224,7 @@ function printIpdAdmitSlip({
   diagnosis,
   notes,
 }) {
+  const w = createSameTabPrintWindow()
   const slipProfile = getPaymentSlipProfile()
   const hospitalName = slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
@@ -2730,15 +3232,20 @@ function printIpdAdmitSlip({
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
   const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
   const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
-  const now = format(new Date(), 'd/M/yyyy HH:mm:ss')
+  const now = formatDateTime(new Date(), { withSeconds: true })
   const admitDate = admissionDate ? format(new Date(admissionDate), 'd/M/yyyy') : format(new Date(), 'd/M/yyyy')
   const bedPriceNum = Number(String(bedPrice || '').replace(/,/g, ''))
   const hasBedPrice = Number.isFinite(bedPriceNum) && bedPriceNum > 0
   const bedPriceFixed = hasBedPrice ? bedPriceNum.toFixed(2) : '0.00'
   const safe = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const bedAllocationLine = formatIpdBedAllocationLine(wardName, roomName, bedCode)
+  const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
+  const profileLines = `<strong>${safe(address)}</strong><br/>
+          Pincode: ${safe(pinCode)}<br/>
+          Phone: ${safe(phone)}<br/>
+          Email: ${safe(email)}${website ? `<br/>Website: ${safe(website)}` : ''}`
 
-  const ipdSlipHtml = `<!DOCTYPE html><html><head>
+  w.document.write(`<!DOCTYPE html><html><head>
     <meta charset="utf-8"/>
     <title>IPD Admit Slip — ${safe(ipdNo || 'New')}</title>
     <style>
@@ -2746,11 +3253,7 @@ function printIpdAdmitSlip({
       * { box-sizing: border-box; margin: 0; padding: 0; }
       body { font-family: Arial, sans-serif; color: #111; width: 210mm; background: #fff; }
       .slip { width: 210mm; min-height: 148.5mm; padding: 6mm 8mm 5mm; display: flex; flex-direction: column; border-bottom: 2px dashed #aaa; }
-      .top { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 4mm; border-bottom: 2px solid #111; margin-bottom: 3mm; }
-      .hosp-name { font-size: 22px; font-weight: 900; color: #1a6b3f; letter-spacing: -0.5px; line-height: 1; margin-bottom: 2px; }
-      .hosp-tag { font-size: 9px; color: #555; letter-spacing: 0.5px; text-transform: uppercase; }
-      .address { text-align: right; font-size: 9.5px; color: #333; line-height: 1.55; }
-      .address strong { font-size: 10px; }
+      ${buildPaymentSlipHeaderCss()}
       .receipt-title { text-align: center; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; border-bottom: 1px solid #111; padding-bottom: 2mm; margin-bottom: 2.5mm; }
       .info-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5mm 4mm; margin-bottom: 2.5mm; font-size: 10px; }
       .info-cell { display: flex; flex-direction: column; gap: 1px; }
@@ -2784,18 +3287,13 @@ function printIpdAdmitSlip({
     </style>
   </head><body>
     <div class="slip">
-      <div class="top">
-        <div>
-          <div class="hosp-name">${safe(hospitalName)}</div>
-          <div class="hosp-tag">Healthcare &amp; Diagnostics</div>
-        </div>
-        <div class="address">
-          <strong>${safe(address)}</strong><br/>
-          Pincode: ${safe(pinCode)}<br/>
-          Phone: ${safe(phone)}<br/>
-          Email: ${safe(email)}${website ? `<br/>Website: ${safe(website)}` : ''}
-        </div>
-      </div>
+      ${buildPaymentSlipTopHeaderHtml({
+        hospitalName,
+        logoUrl,
+        tagline: 'Healthcare &amp; Diagnostics',
+        profileLines,
+        escapeHtml: safe,
+      })}
 
       <div class="receipt-title">IPD Admission Slip</div>
 
@@ -2858,8 +3356,91 @@ function printIpdAdmitSlip({
         </div>
       </div>
     </div>
-  </body></html>`
-  printHtmlInFrame(ipdSlipHtml)
+    ${PRINT_WINDOW_CLOSE_SCRIPT}
+  </body></html>`)
+  w.document.close()
+}
+
+function registrationDefaultsFromOpd() {
+  const opd = getReceptionOpdSettings()
+  return { defaultCity: opd.default_city || '', defaultState: opd.default_state || '' }
+}
+
+function NewPatientRegistrationModal({
+  open,
+  initialSearch = '',
+  title = 'Register New Patient',
+  onClose,
+  onCreated,
+}) {
+  const [form, setForm] = useState(() =>
+    buildPatientRegistrationInitialFromSearch(initialSearch, registrationDefaultsFromOpd()),
+  )
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setForm(buildPatientRegistrationInitialFromSearch(initialSearch, registrationDefaultsFromOpd()))
+  }, [open, initialSearch])
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    const validationError = validatePatientRegistrationForm(form)
+    if (validationError) {
+      toast.error(validationError)
+      return
+    }
+    setSubmitting(true)
+    try {
+      const created = await registerPatientFromForm(form)
+      toast.success(`Patient registered! UHID: ${created?.uhid || '—'}`)
+      onCreated?.(created)
+      onClose?.()
+    } catch (err) {
+      if (err?.response?.data) {
+        const errData = err.response.data
+        toast.error(errData?.detail || (errData?.errors ? JSON.stringify(errData.errors) : null) || 'Registration failed')
+      } else {
+        toast.error(err?.message || 'Registration failed')
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-[360] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[94vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="bg-gradient-to-r from-emerald-600 to-teal-600 px-5 py-3 flex items-center justify-between text-white shrink-0">
+          <h3 className="font-black text-base">{title}</h3>
+          <button type="button" onClick={onClose} className="text-white/85 hover:text-white"><XCircle size={20} /></button>
+        </div>
+        <div className="p-5 overflow-y-auto flex-1 min-h-0">
+          <PatientRegistrationForm
+            form={form}
+            setForm={setForm}
+            onSubmit={handleSubmit}
+            submitting={submitting}
+            submitLabel="Register Patient"
+            footerExtra={(
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+            )}
+          />
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ─── IPD Admissions ───────────────────────────────────────────────────────────
@@ -2868,6 +3449,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
   const [patients, setPatients] = useState([])
   const [doctors, setDoctors] = useState([])
   const [departments, setDepartments] = useState([])
+  const [schemes, setSchemes] = useState([])
   const [bedPriceMap, setBedPriceMap] = useState({})
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -2879,7 +3461,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
   }, [search])
 
   const [form, setForm] = useState({
-    patient: '', assigned_doctor: '', department: '', ward_name: '', bed_code: '',
+    patient: '', assigned_doctor: '', department: '', scheme: '', ward_name: '', bed_code: '',
     admission_date: format(new Date(), 'yyyy-MM-dd'), admission_diagnosis: '', admission_notes: '',
   })
   const [submitting, setSubmitting] = useState(false)
@@ -2893,7 +3475,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
   const [ptSearching, setPtSearching] = useState(false)
   const [selectedPatient, setSelectedPatient] = useState(null)
   const [isAddingNew, setIsAddingNew] = useState(false)
-  const [newPt, setNewPt] = useState({ name: '', phone: '', address: '', gender: '' })
+  const [newPt, setNewPt] = useState({ search: '' })
 
   const [showPayments, setShowPayments] = useState(null) // admission object
   const [showAddCharge, setShowAddCharge] = useState(null) // admission object
@@ -2926,9 +3508,19 @@ function IPDSection({ mode, initialAdmissionDraft }) {
     fetchPatients()
     fetchDoctors()
     fetchDepartments()
+    fetchSchemes()
     fetchBedPrices()
     fetchSummaries()
   }, [mode])
+
+  useEffect(() => {
+    function handleRefreshAdmissions() {
+      fetchAdmissions()
+      fetchSummaries()
+    }
+    window.addEventListener('refresh-admissions', handleRefreshAdmissions)
+    return () => window.removeEventListener('refresh-admissions', handleRefreshAdmissions)
+  }, [])
 
   useEffect(() => {
     if (mode !== 'new_admission') return
@@ -3000,6 +3592,13 @@ function IPDSection({ mode, initialAdmissionDraft }) {
     } catch {}
   }
 
+  async function fetchSchemes() {
+    try {
+      const { data } = await api.get('/schemes/?limit=500')
+      setSchemes(Array.isArray(data?.data) ? data.data : (data?.results || data || []))
+    } catch {}
+  }
+
   async function fetchBedPrices() {
     try {
       const { data } = await api.get('/beds/beds/by-floor/')
@@ -3046,43 +3645,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
     let targetPatientId = selectedPatient?.id
     let currentPatient = selectedPatient
 
-    if (isAddingNew) {
-      if (!newPt.name.trim()) { toast.error('Patient name is required'); return }
-      if (/\d/.test(newPt.name || '')) { toast.error('Patient name cannot contain numbers'); return }
-      if (!newPt.gender) { toast.error('Please select patient gender'); return }
-      if ((newPt.phone || '').replace(/\D/g, '').length >= 10) {
-        try {
-          const ten = (newPt.phone || '').replace(/\D/g, '').slice(-10)
-          const existingByPhone = await api.get(`/patients/by-phone/?phone=${encodeURIComponent(ten)}`)
-          const matches = Array.isArray(existingByPhone.data?.data) ? existingByPhone.data.data : []
-          if (matches.length > 0) {
-            toast.error(`Patient already exists with this phone. Select existing patient UHID ${matches[0].uhid}.`)
-            setIsAddingNew(false)
-            setPtSearch(newPt.phone)
-            setPtResults(matches)
-            setSubmitting(false)
-            return
-          }
-        } catch {}
-      }
-      setSubmitting(true)
-      try {
-        const parts = newPt.name.trim().split(/\s+/)
-        const payload = {
-          first_name: parts[0] || 'New',
-          last_name: parts.slice(1).join(' ') || 'Patient',
-          gender: newPt.gender,
-          phone: newPt.phone || '',
-          address_line1: newPt.address || '',
-        }
-        const { data } = await api.post('/patients/', payload)
-        const created = data?.data || data?.entity || data
-        targetPatientId = created.id
-        currentPatient = created
-      } catch (err) {
-        toast.error('Failed to create new patient'); setSubmitting(false); return
-      }
-    }
+    if (isAddingNew) { toast.error('Complete patient registration popup first'); return }
 
     if (!targetPatientId) { toast.error('Select or Register a patient first'); return }
     if (!form.department) { toast.error('Select department'); return }
@@ -3090,7 +3653,12 @@ function IPDSection({ mode, initialAdmissionDraft }) {
 
     setSubmitting(true)
     try {
-      const { data } = await api.post('/ipd-admissions/', { ...form, patient: targetPatientId })
+      const payload = {
+        ...form,
+        patient: targetPatientId,
+        scheme: form.scheme || null,
+      }
+      const { data } = await api.post('/ipd-admissions/', payload)
       const admitted = data?.data || data?.entity || data
       if (autoPrintAdmitSlip) {
         const doc = doctors.find(d => (d.user || d.id) === form.assigned_doctor)
@@ -3099,7 +3667,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
           admissionDate: admitted?.admission_date || form.admission_date,
           patientName: [currentPatient?.first_name, currentPatient?.last_name].filter(Boolean).join(' ') || currentPatient?.name,
           patientUhid: currentPatient?.uhid,
-          patientPhone: currentPatient?.phone || newPt.phone,
+          patientPhone: currentPatient?.phone || '',
           doctorName: doc?.name || [doc?.first_name, doc?.last_name].filter(Boolean).join(' '),
           department: form.department,
           wardName: form.ward_name,
@@ -3112,13 +3680,13 @@ function IPDSection({ mode, initialAdmissionDraft }) {
       }
       toast.success('Patient admitted successfully!')
       setForm({
-        patient: '', assigned_doctor: '', department: '', ward_name: '', bed_code: '',
+        patient: '', assigned_doctor: '', department: '', scheme: '', ward_name: '', bed_code: '',
         admission_date: format(new Date(), 'yyyy-MM-dd'), admission_diagnosis: '', admission_notes: '',
       })
       setAutoPrintAdmitSlip(false)
       setSelectedPatient(null)
       setIsAddingNew(false)
-      setNewPt({ name: '', phone: '', address: '', gender: '' })
+      setNewPt({ search: '' })
       setPickedBed(null)
       fetchAdmissions()
     } catch (err) {
@@ -3181,32 +3749,6 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                     <XCircle size={16} />
                   </button>
                 </div>
-              ) : isAddingNew ? (
-                <div className="space-y-2 border-2 border-blue-500/20 bg-blue-50/20 rounded-xl p-3 shadow-inner">
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest">New Registration Mode</p>
-                    <button type="button" onClick={() => { setIsAddingNew(false); setPtSearch(newPt.name) }} className="text-[10px] text-gray-400 font-bold hover:text-red-500 underline uppercase tracking-widest leading-none">Cancel</button>
-                  </div>
-                  <input className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 bg-gray-50/50" value={newPt.name} readOnly />
-                  <input className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none" 
-                    type="tel" maxLength={10}
-                    value={newPt.phone} onChange={e => {
-                      const v = e.target.value.replace(/\D/g, '').slice(0, 10);
-                      setNewPt(p => ({ ...p, phone: v }));
-                    }} placeholder="10-digit Mobile" />
-                  <select
-                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                    value={newPt.gender}
-                    onChange={e => setNewPt(p => ({ ...p, gender: e.target.value }))}
-                  >
-                    <option value="">Select Gender *</option>
-                    <option value="male">Male</option>
-                    <option value="female">Female</option>
-                    <option value="other">Other</option>
-                  </select>
-                  <input className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none" 
-                    value={newPt.address} onChange={e => setNewPt(p => ({ ...p, address: e.target.value }))} placeholder="Address (Optional)" />
-                </div>
               ) : (
                 <div className="relative">
                   <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -3236,7 +3778,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                         </li>
                       ))}
                       <li className="bg-blue-50/50">
-                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: ptSearch, phone: '', address: '', gender: '' }); setPtSearch(''); setPtResults([]) }}
+                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ search: ptSearch }); setPtSearch(''); setPtResults([]) }}
                           className="w-full text-left px-3 py-3 flex items-center gap-3 group transition-all">
                           <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center group-hover:scale-110 transition-transform shrink-0">
                             <Plus size={16} strokeWidth={3} />
@@ -3280,6 +3822,19 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                 ))}
               </select>
             </div>
+            <div>
+              <label className="text-xs text-gray-500 mb-1 block">Scheme</label>
+              <select
+                value={form.scheme}
+                onChange={e => setForm(f => ({ ...f, scheme: e.target.value }))}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              >
+                <option value="">-- No scheme --</option>
+                {schemes.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
             {/* Bed picker */}
             <div className="col-span-2">
               <label className="text-xs text-gray-500 mb-1 block">Bed Assignment *</label>
@@ -3290,7 +3845,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-bold text-gray-800">
-                      {pickedBed.bed_code} · {pickedBed.room_name}
+                      {getBedDisplayLabel(pickedBed, getReceptionOpdSettings().admission_bed_label_mode)} · {pickedBed.room_name}
                       {pickedBed.is_ac && (
                         <span className="ml-2 text-xs bg-cyan-100 text-cyan-700 px-1.5 py-0.5 rounded-full font-semibold">
                           <Wind size={9} className="inline mr-0.5" />AC
@@ -3358,11 +3913,25 @@ function IPDSection({ mode, initialAdmissionDraft }) {
             />
             Print admit slip automatically
           </label>
-          <button type="submit" disabled={submitting || (!selectedPatient && !isAddingNew) || !form.department || !form.bed_code}
+          <button type="submit" disabled={submitting || !selectedPatient || !form.department || !form.bed_code}
             className="bg-blue-600 text-white px-6 py-3 rounded-xl text-sm font-black uppercase tracking-widest hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-blue-200 transition-all active:scale-95 flex items-center gap-2">
-            <Bed size={16} /> {submitting ? 'Processing…' : isAddingNew ? 'Register & Admit Patient' : 'Admit Patient'}
+            <Bed size={16} /> {submitting ? 'Processing…' : 'Admit Patient'}
           </button>
         </form>
+
+        {isAddingNew && (
+          <NewPatientRegistrationModal
+            open={isAddingNew}
+            title="Register & Admit As New Patient"
+            initialSearch={newPt.search}
+            onClose={() => setIsAddingNew(false)}
+            onCreated={(created) => {
+              setSelectedPatient(created)
+              setForm((f) => ({ ...f, patient: created?.id || '' }))
+              setNewPt({ search: '' })
+            }}
+          />
+        )}
 
         {showBedPicker && (
           <BedSelector
@@ -3426,6 +3995,11 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                     <span className={`shrink-0 text-[10px] px-2 py-0.5 rounded-full font-medium capitalize ${statusColors[a.status] || 'bg-gray-100 text-gray-600'}`}>
                       {a.status}
                     </span>
+                    {a.scheme_name ? (
+                      <span className="shrink-0 text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-widest bg-yellow-400 text-yellow-950 border border-yellow-300">
+                        Scheme: {a.scheme_name}
+                      </span>
+                    ) : null}
                     {summaryMap[String(a.id)] ? (
                       summaryMap[String(a.id)].is_draft ? (
                         <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-semibold">📋 Draft Summary</span>
@@ -3435,7 +4009,7 @@ function IPDSection({ mode, initialAdmissionDraft }) {
                     ) : null}
                   </div>
                   <p className="text-xs text-gray-400 truncate">
-                    {a.department || 'No Dept'} · {a.ward_name || 'No Ward'} · Bed {a.bed_code || '—'} · Admitted {a.admission_date ? `${format(new Date(a.admission_date), 'd/M/yyyy')} (${format(new Date(a.created_at || Date.now()), 'HH:mm')})` : '—'}
+                    {a.ward_name || 'No Ward'} · Bed {a.bed_code || '—'} · Dr. {a.assigned_doctor_name || '—'} · Admitted {a.admission_date ? formatDateTime(a.created_at || Date.now(), { paren: true }) : '—'}
                   </p>
                   {a.admission_diagnosis && (
                     <p className="text-xs text-gray-500 truncate mt-0.5">Dx: {a.admission_diagnosis}</p>
@@ -3515,6 +4089,12 @@ function IPDSection({ mode, initialAdmissionDraft }) {
         <AdmissionLedgerModal 
           admission={selected} 
           onClose={() => { setSelected(null); setAutoDischarge(false); }} 
+          onDischarged={() => {
+            setSelected(null)
+            setAutoDischarge(false)
+            fetchAdmissions()
+            fetchSummaries()
+          }}
           autoDischarge={autoDischarge}
           onDischargeInitiated={() => setAutoDischarge(false)}
         />
@@ -3564,31 +4144,96 @@ function toApiDateOrNull(v) {
   return format(d, 'yyyy-MM-dd')
 }
 
+function capitalizePersonNameGlobal(value) {
+  return String(value || '')
+    .split(' ')
+    .map((part) => (part ? `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}` : ''))
+    .join(' ')
+}
+
 const EMPTY_PATIENT_FORM = {
   first_name: '',
   last_name: '',
   phone: '',
   age: '',
+  ageUnit: 'years',
   gender: '',
   guardian_name: '',
+  guardian_relationship: '',
   address_line1: '',
   city: '',
   state: '',
+  email: '',
+  blood_group: '',
+  dob: '',
+  registration_note: '',
+  emergency_tags: '',
+  preferred_salutation: '',
 }
 
 function mapPatientApiToForm(p) {
   if (!p || typeof p !== 'object') return { ...EMPTY_PATIENT_FORM }
+  const ageFields = hydrateAgeFieldsFromPatient(p)
   return {
     first_name: String(p.first_name ?? '').trim(),
     last_name: String(p.last_name ?? '').trim(),
     phone: String(p.phone ?? '').trim(),
-    age: p.age != null && p.age !== '' ? String(p.age) : '',
+    age: ageFields.age,
+    ageUnit: ageFields.ageUnit,
     gender: String(p.gender ?? '').trim(),
     guardian_name: String(p.guardian_name ?? '').trim(),
+    guardian_relationship: String(p.guardian_relationship ?? '').trim(),
     address_line1: String(p.address_line1 ?? '').trim(),
     city: String(p.city ?? '').trim(),
     state: String(p.state ?? '').trim(),
+    email: String(p.email ?? '').trim(),
+    blood_group: String(p.blood_group ?? '').trim(),
+    dob: toHtmlDateInputValue(p.dob) || '',
+    registration_note: String(p.registration_note ?? '').trim(),
+    emergency_tags: String(p.emergency_tags ?? '').trim(),
+    preferred_salutation: String(p.preferred_salutation ?? '').trim(),
   }
+}
+
+function buildPatientPatchPayload(baseline, current) {
+  const patientPayload = {}
+  const scalarKeys = [
+    'first_name', 'last_name', 'phone', 'gender', 'guardian_name', 'guardian_relationship',
+    'address_line1', 'city', 'state', 'email', 'blood_group', 'registration_note',
+    'emergency_tags', 'preferred_salutation',
+  ]
+  scalarKeys.forEach((key) => {
+    const nextVal = String(current[key] ?? '').trim()
+    const prevVal = String(baseline[key] ?? '').trim()
+    if (nextVal !== prevVal) patientPayload[key] = nextVal
+  })
+  const nextDob = String(current.dob ?? '').trim()
+  const prevDob = String(baseline.dob ?? '').trim()
+  if (nextDob !== prevDob) {
+    patientPayload.dob = nextDob ? toApiDateOrNull(nextDob) : null
+  }
+  const nextAge = String(current.age ?? '').trim()
+  const prevAge = String(baseline.age ?? '').trim()
+  const nextUnit = normalizeAgeUnit(current.ageUnit)
+  const prevUnit = normalizeAgeUnit(baseline.ageUnit)
+  if (nextAge !== prevAge) {
+    if (nextAge === '') {
+      patientPayload.age = null
+    } else {
+      const parsed = parseInt(nextAge, 10)
+      if (!Number.isNaN(parsed) && parsed >= 0) patientPayload.age = parsed
+    }
+  } else if (nextUnit !== prevUnit && nextAge !== '') {
+    const parsed = parseInt(nextAge, 10)
+    if (!Number.isNaN(parsed) && parsed >= 0) {
+      patientPayload.age = parsed
+      patientPayload.age_unit = nextUnit
+    }
+  }
+  if (patientPayload.age != null && patientPayload.age_unit == null) {
+    patientPayload.age_unit = nextUnit
+  }
+  return patientPayload
 }
 
 function fallbackPatientFormFromAdmissionName(patientName) {
@@ -3600,9 +4245,201 @@ function fallbackPatientFormFromAdmissionName(patientName) {
   }
 }
 
+const patientFieldInputCls = 'w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none'
+
+function PatientEditFormFields({ patientForm, setPatientForm, loading }) {
+  return (
+    <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3 relative">
+      {loading && (
+        <div className="absolute inset-0 z-10 bg-white/70 backdrop-blur-[1px] flex items-center justify-center rounded-b-2xl">
+          <span className="text-sm font-semibold text-blue-600">Loading patient…</span>
+        </div>
+      )}
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">First Name</label>
+        <input value={patientForm.first_name} onChange={e => setPatientForm(p => ({ ...p, first_name: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Last Name</label>
+        <input value={patientForm.last_name} onChange={e => setPatientForm(p => ({ ...p, last_name: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Phone</label>
+        <input value={patientForm.phone} onChange={e => setPatientForm(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Email</label>
+        <input type="email" value={patientForm.email} onChange={e => setPatientForm(p => ({ ...p, email: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Date of Birth</label>
+        <input type="date" value={patientForm.dob || ''} onChange={e => setPatientForm(p => ({ ...p, dob: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Age (if no DOB)</label>
+        <AgeWithUnitInput
+          value={patientForm.age}
+          unit={patientForm.ageUnit}
+          onValueChange={(next) => setPatientForm((p) => ({ ...p, age: next }))}
+          onUnitChange={(next) => setPatientForm((p) => ({ ...p, ageUnit: next }))}
+          inputClassName={patientFieldInputCls}
+        />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Gender</label>
+        <select value={patientForm.gender} onChange={e => setPatientForm(p => ({ ...p, gender: e.target.value }))}
+          className={patientFieldInputCls}>
+          <option value="">-- Select gender --</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Blood Group</label>
+        <select value={patientForm.blood_group} onChange={e => setPatientForm(p => ({ ...p, blood_group: e.target.value }))}
+          className={patientFieldInputCls}>
+          <option value="">Unknown</option>
+          {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(g => <option key={g} value={g}>{g}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Guardian</label>
+        <input value={patientForm.guardian_name} onChange={e => setPatientForm(p => ({ ...p, guardian_name: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">Guardian relationship</label>
+        <select value={patientForm.guardian_relationship} onChange={e => setPatientForm(p => ({ ...p, guardian_relationship: e.target.value }))}
+          className={patientFieldInputCls}>
+          {GUARDIAN_RELATIONSHIP_OPTIONS.map((opt) => (
+            <option key={opt.value || 'none'} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </div>
+      <div className="md:col-span-2">
+        <label className="text-xs text-gray-500 mb-1 block">Address</label>
+        <input value={patientForm.address_line1} onChange={e => setPatientForm(p => ({ ...p, address_line1: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">City</label>
+        <input value={patientForm.city} onChange={e => setPatientForm(p => ({ ...p, city: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div>
+        <label className="text-xs text-gray-500 mb-1 block">State</label>
+        <input value={patientForm.state} onChange={e => setPatientForm(p => ({ ...p, state: e.target.value }))}
+          className={patientFieldInputCls} />
+      </div>
+      <div className="md:col-span-2">
+        <label className="text-xs text-gray-500 mb-1 block">Registration note</label>
+        <textarea rows={3} value={patientForm.registration_note} onChange={e => setPatientForm(p => ({ ...p, registration_note: e.target.value }))}
+          maxLength={2000}
+          className={`${patientFieldInputCls} resize-y min-h-[72px]`} />
+      </div>
+      <div className="md:col-span-2">
+        <label className="text-xs text-gray-500 mb-1 block">Emergency tags</label>
+        <input value={patientForm.emergency_tags} onChange={e => setPatientForm(p => ({ ...p, emergency_tags: e.target.value }))}
+          placeholder="Comma-separated"
+          className={patientFieldInputCls} />
+      </div>
+    </div>
+  )
+}
+
+function PatientEditModal({ patientId, onClose, onSaved, zIndexClass = 'z-[530]' }) {
+  const [submitting, setSubmitting] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [patientForm, setPatientForm] = useState(() => ({ ...EMPTY_PATIENT_FORM }))
+  const [baselinePatientForm, setBaselinePatientForm] = useState(() => ({ ...EMPTY_PATIENT_FORM }))
+  const [uhidLabel, setUhidLabel] = useState('')
+
+  useEffect(() => {
+    if (!patientId) return
+    let cancelled = false
+    setLoading(true)
+    ;(async () => {
+      try {
+        const { data } = await api.get(`/patients/${patientId}/`)
+        const p = data?.data ?? data ?? {}
+        if (cancelled) return
+        const next = mapPatientApiToForm(p)
+        setPatientForm(next)
+        setBaselinePatientForm(next)
+        setUhidLabel(p.uhid || '')
+      } catch {
+        if (!cancelled) toast.error('Failed to load patient')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [patientId])
+
+  async function handleSave() {
+    if (!patientId) return
+    setSubmitting(true)
+    try {
+      const patientPayload = buildPatientPatchPayload(baselinePatientForm, patientForm)
+      if (Object.keys(patientPayload).length === 0) {
+        onClose()
+        return
+      }
+      await api.patch(`/patients/${patientId}/`, patientPayload)
+      toast.success('Patient details updated')
+      setBaselinePatientForm({ ...patientForm })
+      onSaved?.({ patientForm, uhid: uhidLabel })
+      onClose()
+    } catch (err) {
+      const apiErrors = err?.response?.data?.errors
+      const firstFieldError =
+        apiErrors && typeof apiErrors === 'object'
+          ? Object.values(apiErrors).flat().find(Boolean)
+          : null
+      toast.error(firstFieldError || err?.response?.data?.detail || 'Failed to update patient')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className={`fixed inset-0 ${zIndexClass} flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm`} onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col border border-gray-100" onClick={e => e.stopPropagation()}>
+        <div className="bg-gradient-to-r from-blue-600 to-blue-500 px-5 py-3 flex items-center justify-between text-white shrink-0">
+          <div>
+            <h4 className="font-black text-base">Edit Patient</h4>
+            {uhidLabel ? <p className="text-blue-100 text-xs font-mono">{uhidLabel}</p> : null}
+          </div>
+          <button type="button" onClick={onClose} className="text-white/80 hover:text-white">
+            <XCircle size={20} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <PatientEditFormFields patientForm={patientForm} setPatientForm={setPatientForm} loading={loading} />
+        </div>
+        <div className="px-5 py-4 flex items-center justify-end gap-3 border-t border-gray-100 shrink-0">
+          <button type="button" onClick={onClose}
+            className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200">
+            Cancel
+          </button>
+          <button type="button" disabled={submitting || loading} onClick={handleSave}
+            className="px-5 py-2.5 rounded-xl text-sm font-black text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed">
+            {submitting ? 'Saving...' : 'Save Patient'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved }) {
   const [submitting, setSubmitting] = useState(false)
-  const [patientSubmitting, setPatientSubmitting] = useState(false)
   const [showBedPicker, setShowBedPicker] = useState(false)
   const [showPatientEditModal, setShowPatientEditModal] = useState(false)
   const [patientPreview, setPatientPreview] = useState({
@@ -3633,41 +4470,18 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
       n(form.ward_name) !== n(bedBaseline.ward_name)
     )
   }, [form.bed_code, form.room_name, form.ward_name, bedBaseline])
-  const [patientForm, setPatientForm] = useState(() => ({ ...EMPTY_PATIENT_FORM }))
-  const [baselinePatientForm, setBaselinePatientForm] = useState(() => ({ ...EMPTY_PATIENT_FORM }))
-  const [patientDetailLoading, setPatientDetailLoading] = useState(false)
-
-  useEffect(() => {
-    if (!admission?.patient) {
-      const fb = fallbackPatientFormFromAdmissionName(admission?.patient_name)
-      setPatientForm(fb)
-      setBaselinePatientForm(fb)
-      return
-    }
-    let cancelled = false
-    setPatientDetailLoading(true)
-    ;(async () => {
-      try {
-        const { data } = await api.get(`/patients/${admission.patient}/`)
-        const p = data?.data ?? data ?? {}
-        if (cancelled) return
-        const next = mapPatientApiToForm(p)
-        setPatientForm(next)
-        setBaselinePatientForm(next)
-      } catch {
-        if (!cancelled) {
-          const fb = fallbackPatientFormFromAdmissionName(admission.patient_name)
-          setPatientForm(fb)
-          setBaselinePatientForm(fb)
-        }
-      } finally {
-        if (!cancelled) setPatientDetailLoading(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [admission.patient, admission.id, showPatientEditModal])
+  async function refreshPatientPreview() {
+    if (!admission?.patient) return
+    try {
+      const { data } = await api.get(`/patients/${admission.patient}/`)
+      const p = data?.data ?? data ?? {}
+      const fullName = [p.first_name, p.last_name].filter(Boolean).join(' ').trim()
+      setPatientPreview({
+        patient_name: fullName || admission.patient_name || '--',
+        patient_uhid: p.uhid || admission.patient_uhid || 'UHID unavailable',
+      })
+    } catch { /* keep existing preview */ }
+  }
 
   function handleBedSelect(bedInfo) {
     setForm(f => ({
@@ -3713,51 +4527,6 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
       toast.error(firstFieldError || err?.response?.data?.detail || 'Failed to update admission')
     } finally {
       setSubmitting(false)
-    }
-  }
-
-  async function savePatientDetails() {
-    if (!admission.patient) {
-      toast.error('Patient id not found for this admission')
-      return
-    }
-    setPatientSubmitting(true)
-    try {
-      const patientPayload = {}
-      const patientKeys = ["first_name", "last_name", "phone", "age", "gender", "guardian_name", "address_line1", "city", "state"]
-      patientKeys.forEach((key) => {
-        const nextVal = String(patientForm[key] ?? '').trim()
-        const prevVal = String(baselinePatientForm[key] ?? '').trim()
-        if (nextVal !== prevVal) {
-          if (key === 'age') {
-            if (nextVal === '') return
-            const parsed = parseInt(nextVal, 10)
-            if (!Number.isNaN(parsed) && parsed >= 0) patientPayload.age = parsed
-            return
-          }
-          patientPayload[key] = nextVal
-        }
-      })
-      if (Object.keys(patientPayload).length === 0) {
-        setShowPatientEditModal(false)
-        return
-      }
-      await api.patch(`/patients/${admission.patient}/`, patientPayload)
-      const fullName = [patientForm.first_name, patientForm.last_name].filter(Boolean).join(' ').trim()
-      setPatientPreview((p) => ({ ...p, patient_name: fullName || p.patient_name }))
-      setBaselinePatientForm({ ...patientForm })
-      toast.success('Patient details updated')
-      setShowPatientEditModal(false)
-      onSaved()
-    } catch (err) {
-      const apiErrors = err?.response?.data?.errors
-      const firstFieldError =
-        apiErrors && typeof apiErrors === 'object'
-          ? Object.values(apiErrors).flat().find(Boolean)
-          : null
-      toast.error(firstFieldError || err?.response?.data?.detail || 'Failed to update patient')
-    } finally {
-      setPatientSubmitting(false)
     }
   }
 
@@ -3903,84 +4672,15 @@ function EditAdmissionModal({ admission, doctors, departments, onClose, onSaved 
       {showBedPicker && (
         <BedSelector onSelect={handleBedSelect} onClose={() => setShowBedPicker(false)} />
       )}
-      {showPatientEditModal && (
-        <div className="fixed inset-0 z-[530] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden border border-gray-100">
-            <div className="bg-gradient-to-r from-blue-600 to-blue-500 px-5 py-3 flex items-center justify-between text-white">
-              <h4 className="font-black text-base">Edit Patient Details</h4>
-              <button onClick={() => setShowPatientEditModal(false)} className="text-white/80 hover:text-white">
-                <XCircle size={20} />
-              </button>
-            </div>
-            <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3 relative">
-              {patientDetailLoading && admission.patient && (
-                <div className="absolute inset-0 z-10 bg-white/70 backdrop-blur-[1px] flex items-center justify-center rounded-b-2xl">
-                  <span className="text-sm font-semibold text-blue-600">Loading patient…</span>
-                </div>
-              )}
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">First Name</label>
-                <input value={patientForm.first_name} onChange={e => setPatientForm(p => ({ ...p, first_name: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Last Name</label>
-                <input value={patientForm.last_name} onChange={e => setPatientForm(p => ({ ...p, last_name: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Phone</label>
-                <input value={patientForm.phone} onChange={e => setPatientForm(p => ({ ...p, phone: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Age</label>
-                <input type="number" min="0" value={patientForm.age} onChange={e => setPatientForm(p => ({ ...p, age: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Gender</label>
-                <select value={patientForm.gender} onChange={e => setPatientForm(p => ({ ...p, gender: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                  <option value="">-- Select gender --</option>
-                  <option value="male">Male</option>
-                  <option value="female">Female</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">Guardian</label>
-                <input value={patientForm.guardian_name} onChange={e => setPatientForm(p => ({ ...p, guardian_name: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-gray-500 mb-1 block">Address</label>
-                <input value={patientForm.address_line1} onChange={e => setPatientForm(p => ({ ...p, address_line1: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">City</label>
-                <input value={patientForm.city} onChange={e => setPatientForm(p => ({ ...p, city: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 mb-1 block">State</label>
-                <input value={patientForm.state} onChange={e => setPatientForm(p => ({ ...p, state: e.target.value }))}
-                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              </div>
-            </div>
-            <div className="px-5 pb-5 flex items-center justify-end gap-3">
-              <button type="button" onClick={() => setShowPatientEditModal(false)}
-                className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200">
-                Cancel
-              </button>
-              <button type="button" disabled={patientSubmitting} onClick={savePatientDetails}
-                className="px-5 py-2.5 rounded-xl text-sm font-black text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed">
-                {patientSubmitting ? 'Saving...' : 'Save Patient'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {showPatientEditModal && admission.patient && (
+        <PatientEditModal
+          patientId={admission.patient}
+          onClose={() => setShowPatientEditModal(false)}
+          onSaved={() => {
+            refreshPatientPreview()
+            onSaved()
+          }}
+        />
       )}
     </div>
   )
@@ -4058,11 +4758,16 @@ function AdmissionPaymentsModal({ admission, onClose }) {
 
   async function handleAddAdvance(e) {
     e.preventDefault()
-    if (!amount || parseFloat(amount) <= 0) return
+    const amountValue = parseMoneyInput(amount)
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      toast.error('Enter a valid amount greater than zero')
+      return
+    }
+    const amountText = String(amountValue)
     setSubmitting(true)
     try {
       await api.post(`/ipd-admissions/${admission.id}/capture-advance/`, {
-        amount, payment_mode: mode, reference: ref
+        amount: amountText, payment_mode: mode, reference: ref
       })
       toast.success('Advance captured successfully!')
       setAmount(''); setRef('')
@@ -4115,7 +4820,7 @@ function AdmissionPaymentsModal({ admission, onClose }) {
                   <div key={p.id} className="bg-white border border-gray-100 rounded-xl p-3 shadow-sm flex items-center justify-between group hover:border-amber-200 transition-colors">
                     <div>
                       <p className="text-xs font-bold text-gray-800">₹{parseFloat(p.amount).toLocaleString()}</p>
-                      <p className="text-[10px] text-gray-400">{format(new Date(p.created_at), 'dd MMM, HH:mm')}</p>
+                      <p className="text-[10px] text-gray-400">{format(new Date(p.created_at), withTimeTokens('dd MMM, HH:mm'))}</p>
                     </div>
                     <div className="text-right">
                       <span className="text-[10px] font-bold text-gray-500 uppercase px-1.5 py-0.5 bg-gray-50 rounded border border-gray-100">{p.payment_mode}</span>
@@ -4137,7 +4842,15 @@ function AdmissionPaymentsModal({ admission, onClose }) {
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₹</span>
                   <input
-                    type="number" value={amount} onChange={e => setAmount(e.target.value)} required
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={amount}
+                    onChange={e => {
+                      const next = e.target.value
+                      if (isAllowedMoneyInput(next)) setAmount(next)
+                    }}
+                    required
                     placeholder="0.00"
                     className="w-full pl-7 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-emerald-500 focus:outline-none transition-all"
                   />
@@ -4294,15 +5007,14 @@ function EmergencySection() {
   }
 
   function printEmergencyReceipt({ invoiceNo, slipNumber, patientName, patientGender, patientUhid, patientPhone, description, amount, paymentMode }) {
-    // html built below, then printed via printHtmlInFrame
+    const w = createSameTabPrintWindow()
     const slipProfile = getPaymentSlipProfile()
-    const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
     const address = escapeHtml(slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address)
     const pinCode = escapeHtml(slipProfile.pin_code || DEFAULT_PAYMENT_SLIP_PROFILE.pin_code)
     const phone = escapeHtml(slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone)
     const email = escapeHtml(slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email)
     const website = escapeHtml(slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website)
-    const dateTimeStr = format(new Date(), 'd/M/yyyy HH:mm:ss')
+    const dateTimeStr = formatDateTime(new Date(), { withSeconds: true })
     const upPatient = (patientName || 'PATIENT').toUpperCase()
     const payModeLabel =
       paymentMode === 'cash'
@@ -4314,20 +5026,21 @@ function EmergencySection() {
             : (paymentMode || 'Payment').toUpperCase()
     const genderLabel = patientGender === 'female' ? 'Female' : patientGender === 'male' ? 'Male' : patientGender === 'other' ? 'Other' : ''
     const amountFixed = Number(amount || 0).toFixed(2)
+    const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
+    const profileLines = `<strong>${address}</strong><br/>
+            Pincode: ${pinCode}<br/>
+            Phone: ${phone}<br/>
+            Email: ${email}${website ? `<br/>Website: ${website}` : ''}`
 
-    const emergencyReceiptHtml = `<!DOCTYPE html><html><head>
+    w.document.write(`<!DOCTYPE html><html><head>
       <meta charset="utf-8"/>
       <title>Receipt — ${invoiceNo || 'Payment'}</title>
       <style>
         @page { size: A4 portrait; margin: 0; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: Arial, sans-serif; font-size: 11px; color: #111; width: 210mm; background: #fff; }
-        .slip { width: 210mm; height: 148.5mm; padding: 6mm 8mm 4mm; display: flex; flex-direction: column; border-bottom: 2px dashed #aaa; }
-        .top { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 4mm; border-bottom: 2px solid #111; margin-bottom: 3mm; }
-        .hosp-name { font-size: 22px; font-weight: 900; color: #1a6b3f; letter-spacing: -0.5px; line-height: 1; margin-bottom: 2px; }
-        .hosp-tag { font-size: 9px; color: #555; letter-spacing: 0.5px; text-transform: uppercase; }
-        .address { text-align: right; font-size: 9.5px; color: #333; line-height: 1.55; }
-        .address strong { font-size: 10px; }
+        .slip { width: 210mm; min-height: 148.5mm; padding: 6mm 8mm 4mm; display: flex; flex-direction: column; border-bottom: 2px dashed #aaa; }
+        ${buildPaymentSlipHeaderCss()}
         .receipt-title { text-align: center; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; border-bottom: 1px solid #111; padding-bottom: 2mm; margin-bottom: 2.5mm; }
         .info-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5mm 4mm; margin-bottom: 2.5mm; font-size: 10px; }
         .info-cell { display: flex; flex-direction: column; gap: 1px; }
@@ -4355,18 +5068,13 @@ function EmergencySection() {
       </style>
     </head><body>
       <div class="slip">
-        <div class="top">
-          <div>
-            <div class="hosp-name">${hospitalName}</div>
-            <div class="hosp-tag">Healthcare &amp; Diagnostics</div>
-          </div>
-          <div class="address">
-            <strong>${address}</strong><br/>
-            Pincode: ${pinCode}<br/>
-            Phone: ${phone}<br/>
-            Email: ${email}${website ? `<br/>Website: ${website}` : ''}
-          </div>
-        </div>
+        ${buildPaymentSlipTopHeaderHtml({
+          hospitalName: slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name,
+          logoUrl,
+          tagline: 'Healthcare &amp; Diagnostics',
+          profileLines,
+          escapeHtml,
+        })}
         <div class="receipt-title">Receipt</div>
         <div class="info-grid">
           <div class="info-cell"><span class="info-label">Slip Number</span><span class="info-val">${slipNumber || '--'}</span></div>
@@ -4391,8 +5099,9 @@ function EmergencySection() {
           <div class="paid-box">✓ PAID</div>
         </div>
       </div>
-    </body></html>`
-    printHtmlInFrame(emergencyReceiptHtml)
+      ${PRINT_WINDOW_CLOSE_SCRIPT}
+    </body></html>`)
+    w.document.close()
   }
 
   /** ER registration / triage slip (no payment) — given to patient at triage. */
@@ -4403,14 +5112,14 @@ function EmergencySection() {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
+    const w = createSameTabPrintWindow()
     const slipProfile = getPaymentSlipProfile()
-    const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
     const address = escapeHtml(slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address)
     const pinCode = escapeHtml(slipProfile.pin_code || DEFAULT_PAYMENT_SLIP_PROFILE.pin_code)
     const phone = escapeHtml(slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone)
     const email = escapeHtml(slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email)
     const website = escapeHtml(slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website)
-    const arrived = c.arrived_at ? format(new Date(c.arrived_at), 'd/M/yyyy HH:mm:ss') : format(new Date(), 'd/M/yyyy HH:mm:ss')
+    const arrived = c.arrived_at ? formatDateTime(c.arrived_at, { withSeconds: true }) : formatDateTime(new Date(), { withSeconds: true })
     const caseRef = `ER-${c.id}`
     const triageLabel =
       c.triage === 'red' ? 'CRITICAL (Red)' : c.triage === 'green' ? 'Minor (Green)' : 'Moderate (Yellow)'
@@ -4418,8 +5127,13 @@ function EmergencySection() {
     const complaintEsc = esc(c.complaint || '—')
     const contactEsc = esc(c.contact || '—')
     const statusEsc = esc((c.status || 'waiting').replace(/_/g, ' ').toUpperCase())
+    const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
+    const profileLines = `<strong>${address}</strong><br/>
+            Pincode: ${pinCode}<br/>
+            Phone: ${phone}<br/>
+            Email: ${email}${website ? `<br/>Website: ${website}` : ''}`
 
-    const erCaseSlipHtml = `<!DOCTYPE html><html><head>
+    w.document.write(`<!DOCTYPE html><html><head>
       <meta charset="utf-8"/>
       <title>Emergency Slip — ${caseRef}</title>
       <style>
@@ -4427,12 +5141,8 @@ function EmergencySection() {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: Arial, sans-serif; font-size: 11px; color: #111; width: 210mm; background: #fff; }
         .slip { width: 210mm; min-height: 148.5mm; padding: 6mm 8mm 4mm; display: flex; flex-direction: column; }
-        .top { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 4mm; border-bottom: 2px solid #b91c1c; margin-bottom: 3mm; }
-        .hosp-name { font-size: 22px; font-weight: 900; color: #b91c1c; letter-spacing: -0.5px; line-height: 1; margin-bottom: 2px; }
-        .hosp-tag { font-size: 9px; color: #555; letter-spacing: 0.5px; text-transform: uppercase; }
+        ${buildPaymentSlipHeaderCss({ accentColor: '#b91c1c', topBorderColor: '#b91c1c' })}
         .er-badge { background: #b91c1c; color: #fff; font-weight: 900; font-size: 11px; padding: 4px 10px; border-radius: 4px; letter-spacing: 1px; }
-        .address { text-align: right; font-size: 9.5px; color: #333; line-height: 1.55; }
-        .address strong { font-size: 10px; }
         .slip-title { text-align: center; font-size: 14px; font-weight: 800; text-transform: uppercase; letter-spacing: 2px; border-bottom: 1px solid #111; padding-bottom: 2mm; margin-bottom: 3mm; color: #991b1b; }
         .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5mm 5mm; margin-bottom: 3mm; font-size: 10.5px; }
         .info-cell { display: flex; flex-direction: column; gap: 2px; }
@@ -4445,19 +5155,14 @@ function EmergencySection() {
       </style>
     </head><body>
       <div class="slip">
-        <div class="top">
-          <div>
-            <div class="hosp-name">${hospitalName}</div>
-            <div class="hosp-tag">Emergency &amp; Trauma</div>
-            <div style="margin-top:6px"><span class="er-badge">EMERGENCY</span></div>
-          </div>
-          <div class="address">
-            <strong>${address}</strong><br/>
-            Pincode: ${pinCode}<br/>
-            Phone: ${phone}<br/>
-            Email: ${email}${website ? `<br/>Website: ${website}` : ''}
-          </div>
-        </div>
+        ${buildPaymentSlipTopHeaderHtml({
+          hospitalName: slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name,
+          logoUrl,
+          tagline: 'Emergency &amp; Trauma',
+          profileLines,
+          leftExtraHtml: '<div style="margin-top:6px"><span class="er-badge">EMERGENCY</span></div>',
+          escapeHtml,
+        })}
         <div class="slip-title">Emergency registration slip</div>
         <div class="info-grid">
           <div class="info-cell"><span class="info-label">Case reference</span><span class="info-val">${caseRef}</span></div>
@@ -4476,8 +5181,9 @@ function EmergencySection() {
           <p>Show this slip at billing if any emergency charges apply. This is not a payment receipt.</p>
         </div>
       </div>
-    </body></html>`
-    printHtmlInFrame(erCaseSlipHtml)
+      ${PRINT_WINDOW_CLOSE_SCRIPT}
+    </body></html>`)
+    w.document.close()
   }
 
   async function resolveEmergencyPatient(caseRow) {
@@ -4494,7 +5200,7 @@ function EmergencySection() {
     const parts = String(caseRow?.patient_name || 'Emergency Patient').trim().split(/\s+/)
     const payload = {
       first_name: parts[0] || 'Emergency',
-      last_name: parts.slice(1).join(' ') || 'Patient',
+      last_name: parts.slice(1).join(' ') || '',
       gender: caseRow?.gender || 'other',
       phone: digits || '',
     }
@@ -4625,7 +5331,7 @@ function EmergencySection() {
         const parts = String(admitCase.patient_name || 'Emergency Patient').trim().split(/\s+/)
         const payload = {
           first_name: parts[0] || 'Emergency',
-          last_name: parts.slice(1).join(' ') || 'Patient',
+          last_name: parts.slice(1).join(' ') || '',
           gender: admitCase?.gender || 'other',
           phone: digits || '',
         }
@@ -4644,7 +5350,7 @@ function EmergencySection() {
       const notes = [
         admitForm.admission_notes?.trim(),
         `Emergency triage: ${(admitCase.triage || '').toUpperCase()}`,
-        `Arrival: ${admitCase.arrived_at ? format(new Date(admitCase.arrived_at), 'd/M/yyyy HH:mm') : 'N/A'}`,
+        `Arrival: ${admitCase.arrived_at ? formatDateTime(admitCase.arrived_at) : 'N/A'}`,
         admitCase.complaint ? `Chief complaint: ${admitCase.complaint}` : '',
       ].filter(Boolean).join('\n')
 
@@ -4795,7 +5501,7 @@ function EmergencySection() {
               <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${triageDot[c.triage]}`} />
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-gray-800">{c.patient_name}</p>
-                <p className="text-xs text-gray-400">{c.complaint} · {format(new Date(c.arrived_at), 'd/M/yyyy (HH:mm)')} · {c.contact || 'No contact'}</p>
+                <p className="text-xs text-gray-400">{c.complaint} · {formatDateTime(c.arrived_at, { paren: true })} · {c.contact || 'No contact'}</p>
               </div>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium border ${triageColors[c.triage]}`}>
                 {c.triage === 'red' ? 'Critical' : c.triage === 'yellow' ? 'Moderate' : 'Minor'}
@@ -4866,7 +5572,7 @@ function EmergencySection() {
               </div>
               <div className="bg-gray-50 rounded-xl p-3">
                 <p className="text-[11px] text-gray-400 uppercase">Arrived At</p>
-                <p className="text-sm font-semibold text-gray-800">{selectedCase.arrived_at ? format(new Date(selectedCase.arrived_at), 'd/M/yyyy (HH:mm)') : '—'}</p>
+                <p className="text-sm font-semibold text-gray-800">{selectedCase.arrived_at ? formatDateTime(selectedCase.arrived_at, { paren: true }) : '—'}</p>
               </div>
               <div className="bg-gray-50 rounded-xl p-3">
                 <p className="text-[11px] text-gray-400 uppercase">Status</p>
@@ -4964,7 +5670,7 @@ function EmergencySection() {
                       <Bed size={16} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-bold text-gray-800">{pickedBed.bed_code} · {pickedBed.room_name}</p>
+                      <p className="text-sm font-bold text-gray-800">{getBedDisplayLabel(pickedBed, getReceptionOpdSettings().admission_bed_label_mode)} · {pickedBed.room_name}</p>
                       <p className="text-xs text-gray-500">{pickedBed.floor_name} · ₹{Number(pickedBed.daily_charge || 0).toLocaleString()}/day</p>
                     </div>
                     <button
@@ -5111,24 +5817,42 @@ function EmergencySection() {
 // ─── OPD Receipt Print ────────────────────────────────────────────────────────
 function PrintOpdReceipt({ visit, patient, onClose }) {
   const slipProfile = getPaymentSlipProfile()
+  const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
-  const now = format(new Date(), 'd/M/yyyy (HH:mm)')
+  const now = formatDateTime(new Date(), { paren: true })
   const patientName = [patient?.first_name, patient?.last_name].filter(Boolean).join(' ') || patient?.uhid || '—'
   const visitDateDisplay =
     visit.visit_date
       ? `${format(new Date(visit.visit_date), 'd/M/yyyy')}${
-          visit.created_at ? ` ${format(new Date(visit.created_at), 'HH:mm')}` : ''
+          visit.created_at ? ` ${formatTime(visit.created_at)}` : ''
         }`
       : '—'
 
   useEffect(() => {
-    const t = setTimeout(() => window.print(), 800)
+    let cancelled = false
+    const runPrint = () => {
+      if (!cancelled) window.print()
+    }
+    const schedulePrint = () => {
+      if (!logoUrl) {
+        runPrint()
+        return
+      }
+      const img = document.querySelector('#__opd_receipt_root .hosp-logo-print')
+      if (!img || img.complete) {
+        runPrint()
+        return
+      }
+      img.onload = runPrint
+      img.onerror = runPrint
+    }
+    const t = setTimeout(schedulePrint, 800)
     function after() { onClose() }
     window.addEventListener('afterprint', after)
-    return () => { clearTimeout(t); window.removeEventListener('afterprint', after) }
-  }, [])
+    return () => { cancelled = true; clearTimeout(t); window.removeEventListener('afterprint', after) }
+  }, [logoUrl, onClose])
 
   const content = (
     <div id="__opd_receipt_root" className="fixed inset-0 z-[700] bg-white overflow-y-auto print:static print:h-auto print:overflow-visible">
@@ -5136,13 +5860,23 @@ function PrintOpdReceipt({ visit, patient, onClose }) {
         <button onClick={onClose} className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-5 py-2 rounded-xl font-bold text-sm">✕ Close</button>
       </div>
       
-      <div className="shadow-2xl print:shadow-none" style={{ width: '210mm', height: '148.5mm', margin: '0 auto', background: '#fff', color: '#111', fontFamily: 'Arial, sans-serif', padding: '10mm 12mm', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', borderBottom: '2px dashed #aaa' }}>
+      <div className="shadow-2xl print:shadow-none" style={{ width: '210mm', minHeight: '148.5mm', margin: '0 auto', background: '#fff', color: '#111', fontFamily: 'Arial, sans-serif', padding: '10mm 12mm', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', borderBottom: '2px dashed #aaa' }}>
         
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '2px solid #111', paddingBottom: '3mm', marginBottom: '4mm' }}>
-           <div>
-             <p style={{ fontSize: 24, fontWeight: 900, color: '#1a6b3f', margin: 0 }}>{hospitalName}</p>
-             <p style={{ fontSize: 9, color: '#555', letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>OPD Consultation Receipt</p>
+           <div style={{ display: 'flex', alignItems: 'center', gap: '3mm', minWidth: 0 }}>
+             {logoUrl ? (
+               <img
+                 src={logoUrl}
+                 alt=""
+                 className="hosp-logo-print"
+                 style={{ height: '14mm', maxWidth: '28mm', objectFit: 'contain', flexShrink: 0 }}
+               />
+             ) : null}
+             <div style={{ minWidth: 0 }}>
+               <p style={{ fontSize: 24, fontWeight: 900, color: '#1a6b3f', margin: 0 }}>{hospitalName}</p>
+               <p style={{ fontSize: 9, color: '#555', letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>OPD Consultation Receipt</p>
+             </div>
            </div>
            <div style={{ textAlign: 'right', fontSize: 10, color: '#333' }}>
              <p><strong>{address}</strong></p>
@@ -5468,7 +6202,8 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                   doc_name: v.doctor_name,
                                   patient_name: [patient?.first_name, patient?.last_name].filter(Boolean).join(' ') || patient?.uhid,
                                   patient_uhid: patient?.uhid,
-                                  patient_age: patient?.age,
+                                  patient_age: patient?.age_value ?? patient?.age,
+                                  patient_age_unit: patient?.age_unit || 'years',
                                   patient_gender: patient?.gender,
                                   patient_address: patient?.address,
                                   patient_guardian_name: patient?.guardian_name
@@ -5502,7 +6237,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                   const isLL = loadingLedger[a.id]
                   const balVal = parseFloat(ledger?.balance_due || 0)
                   const isDischarged = a.status === 'discharged'
-                  const admObj = { patient_name:fullName, patient_uhid:patient?.uhid, ward_name:a.ward_name, room_name:a.room_name, bed_code:a.bed_code, admission_date:a.admission_date, created_at:a.created_at, ipd_no:a.id, admission_diagnosis:a.admission_diagnosis }
+                  const admObj = { patient_name:fullName, patient_uhid:patient?.uhid, assigned_doctor_name:a.assigned_doctor_name, ward_name:a.ward_name, room_name:a.room_name, bed_code:a.bed_code, admission_date:a.admission_date, created_at:a.created_at, ipd_no:a.id, admission_diagnosis:a.admission_diagnosis }
                   return (
                     <div key={a.id}>
                       {/* Admission row */}
@@ -5550,46 +6285,16 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                             </div>
 
                             {/* ── Sub-section 1: Charges ── */}
-                            {(ledger.charges||[]).filter(c=>c.type!=='payment'&&c.type!=='pharmacy_payment').length>0 && (() => {
+                            {buildIpdBillLineItems(ledger).length > 0 && (() => {
                               const subKey = `${a.id}_charges`
                               const subOpen = expandedSubs[subKey]
-                              const rawCharges = (ledger.charges||[]).filter(c=>c.type!=='payment'&&c.type!=='pharmacy_payment')
-                              
-                              // Grouping logic
-                              const groupedMap = {}
-                              rawCharges.forEach(c => {
-                                let desc = c.description || 'Service'
-                                let key = desc.trim()
-                                
-                                // Normalize Bed/Room charges to group manual + auto entries
-                                const lower = key.toLowerCase()
-                                if (lower.includes('room rent') || lower.includes('bed charge') || lower.includes('room charge')) {
-                                  key = 'Room Rent / Bed Charges'
-                                  desc = 'Room Rent / Bed Charges'
-                                }
-
-                                // One row per billing invoice (same desc on two invoices must not merge)
-                                const invPart = c.invoice_id != null && String(c.invoice_id) !== '' ? String(c.invoice_id) : String(c.id || '')
-                                key = `${key}::__inv__${invPart}`
-
-                                if (!groupedMap[key]) {
-                                  groupedMap[key] = { ...c, description: desc, qty: 1, total_amount: parseFloat(c.amount || 0), invoice_status: c.invoice_status }
-                                } else {
-                                  groupedMap[key].qty += 1
-                                  groupedMap[key].total_amount += parseFloat(c.amount || 0)
-                                  if (c.date && new Date(c.date) > new Date(groupedMap[key].date)) {
-                                    groupedMap[key].date = c.date
-                                  }
-                                }
-                              })
-                              const chargeRows = Object.values(groupedMap).sort((a, b) => {
-                                const ca = String(a.invoice_status || '').toLowerCase() === 'cancelled'
-                                const cb = String(b.invoice_status || '').toLowerCase() === 'cancelled'
-                                if (ca !== cb) return ca ? 1 : -1
-                                const da = a.date ? new Date(a.date).getTime() : 0
-                                const db = b.date ? new Date(b.date).getTime() : 0
-                                return da - db
-                              })
+                              const chargeRows = buildIpdBillLineItems(ledger).map((item) => ({
+                                description: item.description,
+                                qty: item.quantity,
+                                total_amount: item.total_amount,
+                                date: null,
+                                invoice_status: 'finalized',
+                              }))
 
                               return (
                                 <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
@@ -5606,7 +6311,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                         <thead className="bg-gray-50 text-gray-400 text-[10px] uppercase">
                                           <tr>
                                             <th className="px-3 py-2 text-left font-semibold">Description</th>
-                                            <th className="px-3 py-2 text-center font-semibold">Qty</th>
+                                            <th className="px-3 py-2 text-center font-semibold">Qty/Days</th>
                                             <th className="px-3 py-2 text-left font-semibold">Date</th>
                                             <th className="px-3 py-2 text-right font-semibold">Amount</th>
                                           </tr>
@@ -5678,7 +6383,12 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                         <tbody className="divide-y divide-gray-50">
                                           {activePayRows.map((p,i)=>{
                                             const md=(p.description||'').toUpperCase().includes('UPI')?'upi':(p.description||'').toUpperCase().includes('CREDIT')?'credit':'cash'
-                                            const isAdv=(p.description||'').toLowerCase().includes('advance')
+                                            const invNoPay = String(p?.invoice_no || '').toUpperCase()
+                                            const descUpperPay = String(p?.description || '').toUpperCase()
+                                            const isRef = invNoPay.includes('IPDREF') || descUpperPay.includes('REFUND') || parseFloat(p?.amount || 0) < 0
+                                            const isAdv = !isRef && (p.description||'').toLowerCase().includes('advance')
+                                            const receiptType = isRef ? 'refund' : isAdv ? 'advance' : 'service'
+                                            const receiptAmount = Math.abs(parseFloat(p?.amount || 0) || 0)
                                             const rawPid = p?.id != null ? String(p.id) : ''
                                             const isPharmacy = p?.type === 'pharmacy_payment' || rawPid.startsWith('pharmacy-paid-')
                                             const payId = isPharmacy ? '' : rawPid
@@ -5702,7 +6412,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                                 <td className="px-3 py-2.5 text-center">
                                                   <div className="inline-flex flex-nowrap items-center justify-center gap-1.5 max-w-full overflow-x-auto py-0.5">
                                                     <button type="button"
-                                                      onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:p.amount,mode:md,invoice_no:p.invoice_no,paid_at:p.date,slip_number:slip},receiptType:isAdv?'advance':'service',viewOnly:true})}
+                                                      onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:receiptAmount,mode:md,invoice_no:p.invoice_no,paid_at:p.date,slip_number:slip},receiptType,viewOnly:true})}
                                                       title="View"
                                                       aria-label="View receipt"
                                                       className="h-8 w-8 hover:w-[72px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-indigo-600 hover:text-white bg-indigo-50 hover:bg-indigo-600 rounded-lg transition-all duration-150 border border-indigo-100 shadow-sm hover:shadow-md active:scale-95 group"
@@ -5711,7 +6421,7 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
                                                       <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[40px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">View</span>
                                                     </button>
                                                     <button type="button"
-                                                      onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:p.amount,mode:md,invoice_no:p.invoice_no,paid_at:p.date,slip_number:slip},receiptType:isAdv?'advance':'service',viewOnly:isPayReadOnly})}
+                                                      onClick={()=>setPrintTarget({type:'ipd_receipt',admission:admObj,receiptData:{description:p.description,amount:receiptAmount,mode:md,invoice_no:p.invoice_no,paid_at:p.date,slip_number:slip},receiptType,viewOnly:isPayReadOnly})}
                                                       title="Print"
                                                       aria-label="Print receipt"
                                                       className="h-8 w-8 hover:w-[74px] shrink-0 flex items-center justify-center gap-1 overflow-hidden rounded-lg transition-all duration-150 border shadow-sm hover:shadow-md active:scale-95 group text-sky-600 hover:text-white bg-sky-50 hover:bg-sky-600 border-sky-100"
@@ -5834,7 +6544,15 @@ function PatientLifetimeTimelineModal({ patient, onClose }) {
             </p>
             <div>
               <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation reason *</label>
-              <textarea value={tlPayCancelReason} onChange={e => setTlPayCancelReason(e.target.value)} rows={4} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none resize-none" disabled={tlPayCancelling} placeholder="Enter reason" />
+              <textarea
+                value={tlPayCancelReason}
+                onChange={e => setTlPayCancelReason(e.target.value)}
+                onKeyDown={e => handleCancelReasonKeyDown(e, submitTlPayCancel, { disabled: tlPayCancelling })}
+                rows={4}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none resize-none"
+                disabled={tlPayCancelling}
+                placeholder="Enter reason"
+              />
             </div>
           </div>
           <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
@@ -5924,6 +6642,8 @@ function PatientListSection() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const [selected, setSelected] = useState(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [editPatientId, setEditPatientId] = useState(null)
   const [timelineFor, setTimelineFor] = useState(null)
   const PAGE_SIZE = 10
   const debounceRef = useRef(null)
@@ -5987,6 +6707,38 @@ function PatientListSection() {
     setTimelineFor(patient)
   }
 
+  async function loadPatientDetail(patient) {
+    if (!patient?.id) return patient
+    try {
+      const { data } = await api.get(`/patients/${patient.id}/`)
+      return data?.data ?? data ?? patient
+    } catch {
+      toast.error('Failed to load patient details')
+      return patient
+    }
+  }
+
+  async function openView(patient) {
+    setSelected(patient)
+    setDetailLoading(true)
+    const full = await loadPatientDetail(patient)
+    setSelected(full)
+    setDetailLoading(false)
+  }
+
+  async function refreshSelectedDetail() {
+    if (!selected?.id) return
+    setDetailLoading(true)
+    const full = await loadPatientDetail(selected)
+    setSelected(full)
+    setDetailLoading(false)
+  }
+
+  function formatDobDisplay(dob) {
+    if (!dob) return '—'
+    try { return format(new Date(dob), 'd/M/yyyy') } catch { return String(dob) }
+  }
+
   return (
     <div className="space-y-3">
       {/* Stats row */}
@@ -6021,12 +6773,13 @@ function PatientListSection() {
 
         {/* Column headers */}
         <div className="grid grid-cols-12 px-4 py-2 bg-gray-100/80 border-b border-gray-200 text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-          <div className="col-span-4">Patient</div>
-          <div className="col-span-3">UHID</div>
+          <div className="col-span-3">Patient</div>
+          <div className="col-span-2">UHID</div>
           <div className="col-span-2">Phone</div>
           <div className="col-span-1 text-center">Gender</div>
           <div className="col-span-1 text-center">Age</div>
           <div className="col-span-1 text-right">Registered</div>
+          <div className="col-span-2 text-right">Actions</div>
         </div>
 
         {/* Rows */}
@@ -6042,16 +6795,16 @@ function PatientListSection() {
             return (
               <div
                 key={p.id}
-                onClick={() => setSelected(p)}
+                onClick={() => openView(p)}
                 className="grid grid-cols-12 px-4 py-2.5 items-center hover:bg-emerald-50/40 cursor-pointer group transition-colors"
               >
-                <div className="col-span-4 flex items-center gap-2.5 min-w-0">
+                <div className="col-span-3 flex items-center gap-2.5 min-w-0">
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${avatarColor[idx % 5]}`}>
                     {initials}
                   </div>
                   <p className="text-sm font-medium text-gray-900 truncate group-hover:text-emerald-800">{pName(p)}</p>
                 </div>
-                <div className="col-span-3 text-xs text-gray-500 font-mono truncate">{p.uhid}</div>
+                <div className="col-span-2 text-xs text-gray-500 font-mono truncate">{p.uhid}</div>
                 <div className="col-span-2 text-xs text-gray-500">{p.phone || '—'}</div>
                 <div className="col-span-1 flex justify-center">
                   <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full border ${genderColor[p.gender] || 'bg-gray-50 text-gray-500 border-gray-200'}`}>
@@ -6060,13 +6813,28 @@ function PatientListSection() {
                 </div>
                 <div className="col-span-1 text-center text-xs text-gray-500">{age ?? '—'}</div>
                 <div className="col-span-1 text-right text-xs text-gray-400">{regDate}</div>
-                <div className="col-span-12 mt-2 flex justify-end">
+                <div className="col-span-2 flex justify-end gap-1" onClick={e => e.stopPropagation()}>
                   <button
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); openTimeline(p) }}
-                    className="text-[10px] bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-md font-bold hover:bg-indigo-200"
+                    onClick={() => openView(p)}
+                    className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-1 rounded-md font-bold hover:bg-emerald-200 inline-flex items-center gap-0.5"
                   >
-                    View Timeline
+                    <Eye size={12} /> View
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditPatientId(p.id)}
+                    className="text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-md font-bold hover:bg-amber-200 inline-flex items-center gap-0.5"
+                  >
+                    <Edit2 size={12} /> Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openTimeline(p)}
+                    title="Lifetime timeline"
+                    className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-1 rounded-md font-bold hover:bg-indigo-200"
+                  >
+                    Timeline
                   </button>
                 </div>
               </div>
@@ -6114,41 +6882,53 @@ function PatientListSection() {
           onClick={() => setSelected(null)}
         >
           <div
-            className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
             onClick={e => e.stopPropagation()}
           >
-            {/* Header */}
-            <div className="bg-gradient-to-r from-emerald-500 to-teal-600 px-5 py-4 flex items-center gap-4">
+            <div className="bg-gradient-to-r from-emerald-500 to-teal-600 px-5 py-4 flex items-center gap-4 shrink-0">
               <div className={`w-14 h-14 rounded-full flex items-center justify-center text-xl font-black shrink-0 ${avatarColor[0]}`}>
                 {((selected.first_name?.[0] || '') + (selected.last_name?.[0] || '')).toUpperCase() || '?'}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-white font-bold text-lg truncate">{pName(selected)}</p>
-                <p className="text-emerald-100 text-sm">{selected.uhid}</p>
+                <p className="text-emerald-100 text-sm font-mono">{selected.uhid}</p>
               </div>
-              <button onClick={() => setSelected(null)} className="text-white/70 hover:text-white shrink-0">
+              <button type="button" onClick={() => setSelected(null)} className="text-white/70 hover:text-white shrink-0">
                 <XCircle size={22} strokeWidth={1.8} />
               </button>
             </div>
 
-            {/* Details grid */}
-            <div className="p-5">
+            <div className="p-5 overflow-y-auto flex-1 relative">
+              {detailLoading && (
+                <div className="absolute inset-0 bg-white/80 flex items-center justify-center z-10">
+                  <span className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 {[
                   ['Phone', selected.phone || '—', '📞'],
-                  ['Gender', genderLabel[selected.gender] || selected.gender || '—', '🧬'],
-                  ['Age', (selected.age ?? calcAge(selected.dob) ?? '—') + (selected.age || calcAge(selected.dob) ? ' yrs' : ''), '🎂'],
-                  ['Date of Birth', selected.dob || '—', '📅'],
-                  ['Blood Group', selected.blood_group || '—', '🩸'],
                   ['Email', selected.email || '—', '✉️'],
-                  ['Address', [selected.address_line1, selected.city, selected.state].filter(Boolean).join(', ') || '—', '📍'],
+                  ['Gender', genderLabel[selected.gender] || selected.gender || '—', '🧬'],
+                  ['Age', (() => {
+                    const a = selected.age ?? calcAge(selected.dob)
+                    return a != null && a !== '' ? `${a} yrs` : '—'
+                  })(), '🎂'],
+                  ['Date of Birth', formatDobDisplay(selected.dob), '📅'],
+                  ['Blood Group', selected.blood_group || '—', '🩸'],
+                  ['Guardian', selected.guardian_name || '—', '👤'],
+                  ['Guardian relation', selected.guardian_relationship || '—', '🔗'],
+                  ['Address', selected.address_line1 || '—', '📍'],
+                  ['City', selected.city || '—', '🏙️'],
+                  ['State', selected.state || '—', '🗺️'],
+                  ['Patient type', selected.patient_type || '—', '🏥'],
+                  ['Status', selected.status || '—', '●'],
                   ['Registered', selected.created_at ? format(new Date(selected.created_at), 'd/M/yyyy') : '—', '🗓️'],
                 ].map(([label, value, icon]) => (
                   <div key={label} className="bg-gray-50 rounded-xl px-3 py-2.5 flex items-start gap-2">
                     <span className="text-base shrink-0 mt-0.5">{icon}</span>
                     <div className="min-w-0">
                       <p className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">{label}</p>
-                      <p className="text-sm font-semibold text-gray-800 truncate">{value}</p>
+                      <p className="text-sm font-semibold text-gray-800 break-words">{value}</p>
                     </div>
                   </div>
                 ))}
@@ -6156,7 +6936,7 @@ function PatientListSection() {
 
               {selected.emergency_tags && (
                 <div className="mt-3 flex flex-wrap gap-1.5">
-                  {selected.emergency_tags.split(',').filter(Boolean).map(t => (
+                  {String(selected.emergency_tags).split(',').filter(Boolean).map(t => (
                     <span key={t} className="text-[11px] px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200 font-medium">{t.trim()}</span>
                   ))}
                 </div>
@@ -6170,14 +6950,45 @@ function PatientListSection() {
               )}
             </div>
 
-            <div className="px-5 pb-4">
-              <button onClick={() => setSelected(null)}
-                className="w-full py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 font-medium">
+            <div className="px-5 pb-4 flex flex-wrap gap-2 shrink-0 border-t border-gray-100 pt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditPatientId(selected.id)
+                }}
+                className="flex-1 min-w-[100px] py-2 rounded-xl bg-amber-600 text-white text-sm font-bold hover:bg-amber-700 inline-flex items-center justify-center gap-1"
+              >
+                <Edit2 size={14} /> Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => { setSelected(null); openTimeline(selected) }}
+                className="flex-1 min-w-[100px] py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold hover:bg-indigo-700"
+              >
+                Timeline
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelected(null)}
+                className="flex-1 min-w-[100px] py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 font-medium"
+              >
                 Close
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {editPatientId && (
+        <PatientEditModal
+          patientId={editPatientId}
+          onClose={() => setEditPatientId(null)}
+          onSaved={async () => {
+            await fetchPatients(page, search)
+            if (selected?.id === editPatientId) await refreshSelectedDetail()
+          }}
+          zIndexClass="z-[310]"
+        />
       )}
 
       {timelineFor && (
@@ -6192,118 +7003,47 @@ function PatientListSection() {
 
 // ─── Register Patient ─────────────────────────────────────────────────────────
 function RegisterPatientSection() {
-  const EMPTY = { first_name: '', last_name: '', dob: '', gender: 'male', phone: '', email: '', blood_group: '', registration_note: '' }
-  const [form, setForm] = useState(EMPTY)
+  const [form, setForm] = useState(() => buildPatientRegistrationInitial('', registrationDefaultsFromOpd()))
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit(e) {
     e.preventDefault()
+    const validationError = validatePatientRegistrationForm(form)
+    if (validationError) {
+      toast.error(validationError)
+      return
+    }
     setSubmitting(true)
     try {
-      const payload = {
-        first_name: form.first_name,
-        last_name: form.last_name,
-        gender: form.gender,
-        dob: form.dob || undefined,
-        phone: form.phone,
-        email: form.email,
-        blood_group: form.blood_group,
-        registration_note: form.registration_note?.trim() || undefined,
-      }
-      const { data } = await api.post('/patients/', payload)
-      const patient = data?.data || data
+      const patient = await registerPatientFromForm(form)
       toast.success(`Patient registered! UHID: ${patient?.uhid || '—'}`)
-      setForm(EMPTY)
+      setForm(buildPatientRegistrationInitial('', registrationDefaultsFromOpd()))
     } catch (err) {
-      const errData = err.response?.data
-      const msg = errData?.detail || (errData?.errors ? JSON.stringify(errData.errors) : null) || 'Registration failed'
-      toast.error(msg)
-    } finally { setSubmitting(false) }
+      if (err?.response?.data) {
+        const errData = err.response.data
+        toast.error(errData?.detail || (errData?.errors ? JSON.stringify(errData.errors) : null) || 'Registration failed')
+      } else {
+        toast.error(err?.message || 'Registration failed')
+      }
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  const tf = (label, key, type = 'text', placeholder = '', required = false) => (
-    <div>
-      <label className="text-xs text-gray-500 mb-1 block">{label}{required && ' *'}</label>
-      {type === 'date' ? (
-        <div className="relative">
-          <input
-            type="text"
-            readOnly
-            value={form[key] ? format(new Date(form[key]), 'd/M/yyyy') : ''}
-            onClick={(e) => e.target.nextSibling.showPicker()}
-            className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none cursor-pointer bg-white"
-            placeholder={placeholder || "Select date..."}
-          />
-          <input
-            type="date"
-            className="absolute inset-0 opacity-0 pointer-events-none"
-            value={form[key]}
-            onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
-            required={required}
-          />
-        </div>
-      ) : (
-        <input type={type} 
-          value={form[key]} 
-          onChange={e => {
-            let v = e.target.value;
-            if (type === 'tel') v = v.replace(/\D/g, '').slice(0, 10);
-            setForm(f => ({ ...f, [key]: v }));
-          }}
-          maxLength={type === 'tel' ? 10 : undefined}
-          placeholder={placeholder} required={required}
-          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
-      )}
-    </div>
-  )
-
   return (
-    <div className="max-w-2xl">
-      <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+    <div className="max-w-4xl mx-auto w-full">
+      <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
         <UserPlus size={20} className="text-emerald-500" /> Register New Patient
       </h2>
-      <form onSubmit={handleSubmit} className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          {tf('First Name', 'first_name', 'text', 'First name', true)}
-          {tf('Last Name', 'last_name', 'text', 'Last name', true)}
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">Gender</label>
-            <select value={form.gender} onChange={e => setForm(f => ({ ...f, gender: e.target.value }))}
-              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
-              <option value="male">Male</option>
-              <option value="female">Female</option>
-              <option value="other">Other</option>
-            </select>
-          </div>
-          {tf('Date of Birth', 'dob', 'date')}
-          {tf('Phone', 'phone', 'tel', '10-digit mobile number')}
-          {tf('Email', 'email', 'email', 'optional')}
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">Blood Group</label>
-            <select value={form.blood_group} onChange={e => setForm(f => ({ ...f, blood_group: e.target.value }))}
-              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
-              <option value="">Unknown</option>
-              {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(g => <option key={g} value={g}>{g}</option>)}
-            </select>
-          </div>
-        </div>
-        <div>
-          <label className="text-xs text-gray-500 mb-1 block">Registration note</label>
-          <textarea
-            value={form.registration_note}
-            onChange={e => setForm(f => ({ ...f, registration_note: e.target.value }))}
-            rows={4}
-            maxLength={2000}
-            placeholder="Optional — why this patient is being registered (visible on their record)"
-            className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none resize-y min-h-[88px]"
-          />
-          <p className="text-[11px] text-gray-400 mt-1">{form.registration_note?.length || 0} / 2000</p>
-        </div>
-        <button type="submit" disabled={submitting}
-          className="bg-emerald-600 text-white px-8 py-2.5 rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-60 flex items-center gap-2">
-          <UserPlus size={14} /> {submitting ? 'Registering…' : 'Register Patient'}
-        </button>
-      </form>
+      <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-sm border border-gray-100">
+        <PatientRegistrationForm
+          form={form}
+          setForm={setForm}
+          onSubmit={handleSubmit}
+          submitting={submitting}
+          submitLabel="Register Patient"
+        />
+      </div>
     </div>
   )
 }
@@ -6368,7 +7108,7 @@ function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrint
         return '—'
       }
     }
-    return rec.created_at ? format(new Date(rec.created_at), 'd/M/yyyy HH:mm') : '—'
+    return rec.created_at ? formatDateTime(rec.created_at) : '—'
   }
 
   const vitals = rec.vitals_at_discharge && typeof rec.vitals_at_discharge === 'object' ? rec.vitals_at_discharge : {}
@@ -6490,10 +7230,16 @@ function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrint
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">ABHA / Insurance</span> <span className="text-right text-[10px]">{[rec.abha_id, rec.insurance_provider, rec.policy_number].filter(Boolean).join(' · ') || '—'}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">IPD / Ward / Bed</span> <span className="text-right">{rec.admission_ipd_no || '—'} / {adm.ward_name || '—'} / {adm.bed_code || '—'}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Department</span> <span>{adm.department || '—'}</span></div>
+            {(adm.scheme_name || rec.scheme_name) ? (
+              <div className="flex justify-between border-b border-gray-100 py-0.5 col-span-2">
+                <span className="font-bold">Scheme</span>
+                <span className="font-bold uppercase text-right bg-yellow-100 text-yellow-900 px-2 py-0.5 rounded">{adm.scheme_name || rec.scheme_name}</span>
+              </div>
+            ) : null}
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Discharge type</span> <span className="font-bold uppercase">{(rec.discharge_type || 'routine').replace(/_/g, ' ')}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Admission</span> <span>{rec.admission_date ? format(new Date(rec.admission_date), 'd/M/yyyy') : '—'}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Discharge</span> <span>{fmtDischargeWhen()}</span></div>
-            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Printed at</span> <span>{format(new Date(), 'd/M/yyyy HH:mm')}</span></div>
+            <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Printed at</span> <span>{formatDateTime(new Date())}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Treating consultant</span> <span className="text-right">{rec.treating_consultant || adm.assigned_doctor_name || '—'}</span></div>
             <div className="flex justify-between border-b border-gray-100 py-0.5"><span className="font-bold">Reg. no. / RMO</span> <span className="text-right text-[10px]">{[rec.consultant_registration_no, rec.rmo_signed_by].filter(Boolean).join(' · ') || '—'}</span></div>
             <div className="col-span-2 flex justify-between border-b border-gray-200 py-0.5"><span className="font-bold">Condition at discharge</span> <span className="font-bold text-right">{rec.condition_at_discharge || '—'}</span></div>
@@ -6621,7 +7367,7 @@ function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrint
               <h3 className="font-black uppercase text-red-800 text-sm mb-2">Death summary</h3>
               <div className="text-xs space-y-1 whitespace-pre-wrap">
                 {rec.cause_of_death && <p><span className="font-bold">Cause:</span> {rec.cause_of_death}</p>}
-                {rec.time_of_death && <p><span className="font-bold">Time:</span> {format(new Date(rec.time_of_death), 'd/M/yyyy HH:mm')}</p>}
+                {rec.time_of_death && <p><span className="font-bold">Time:</span> {formatDateTime(rec.time_of_death)}</p>}
                 {rec.notified_to && <p><span className="font-bold">Notified to:</span> {rec.notified_to}</p>}
                 {rec.autopsy_required && <p className="font-bold text-red-700">Autopsy required: Yes</p>}
               </div>
@@ -6682,6 +7428,26 @@ function PrintDischargeSummary({ rec, admission: admissionProp, onClose, onPrint
   )
 }
 
+function compareDischargeSummariesNewestFirst(a, b) {
+  const timeFor = (rec) => {
+    const candidates = [
+      rec?.updated_at,
+      rec?.discharged_at,
+      rec?.discharge_date ? `${rec.discharge_date}T${rec.discharge_time || '00:00:00'}` : null,
+      rec?.created_at,
+    ]
+    for (const raw of candidates) {
+      if (!raw) continue
+      const stamp = new Date(raw)
+      if (!Number.isNaN(stamp.getTime())) return stamp.getTime()
+    }
+    return 0
+  }
+  const diff = timeFor(b) - timeFor(a)
+  if (diff !== 0) return diff
+  return String(b?.id || '').localeCompare(String(a?.id || ''))
+}
+
 function DischargeSection() {
   const [records, setRecords] = useState([])
   const [loading, setLoading] = useState(true)
@@ -6702,18 +7468,33 @@ function DischargeSection() {
     fetchDischarged()
   }, [])
 
+  useEffect(() => {
+    function handleRefreshAdmissions() {
+      fetchDischarged()
+    }
+    window.addEventListener('refresh-admissions', handleRefreshAdmissions)
+    return () => window.removeEventListener('refresh-admissions', handleRefreshAdmissions)
+  }, [])
+
   async function fetchDischarged() {
     setLoading(true)
     try {
       const { data } = await api.get('/summaries/?limit=500')
-      setRecords(data?.data || data?.results || data || [])
+      const list = data?.data || data?.results || data || []
+      setRecords([...list].sort(compareDischargeSummariesNewestFirst))
     } catch { toast.error('Failed to load discharge records') }
     finally { setLoading(false) }
   }
 
 
-  function handlePrintClick(rec) {
-    setPrintData({ rec })
+  async function handlePrintClick(rec) {
+    try {
+      const { data } = await api.get(`/ipd-admissions/${rec.admission}/`)
+      const admission = data?.data || data || {}
+      setPrintData({ rec, admission })
+    } catch {
+      setPrintData({ rec })
+    }
   }
 
   async function handlePrintBillFromHistory(r) {
@@ -6754,7 +7535,7 @@ function DischargeSection() {
   const filteredHistory = records.filter(r => {
     const q = search.toLowerCase()
     return !q || (r.patient_name || '').toLowerCase().includes(q) || (r.patient_uhid || '').toLowerCase().includes(q)
-  })
+  }).sort(compareDischargeSummariesNewestFirst)
 
   const total = filteredHistory.length
   const totalPages = Math.ceil(total / PAGE_SIZE)
@@ -6772,6 +7553,7 @@ function DischargeSection() {
       {printData && (
         <PrintDischargeSummary
           rec={printData.rec}
+          admission={printData.admission}
           onClose={() => setPrintData(null)}
           onPrintBill={handlePrintBillFromHistory}
           externalPrintBillLoading={billPrintLoading}
@@ -6815,13 +7597,19 @@ function DischargeSection() {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-gray-800">{r.patient_name || 'Unknown Patient'}</p>
                   <p className="text-xs text-gray-400">
-                    Adm: {r.admission_date ? `${format(new Date(r.admission_date), 'd/M/yyyy')} (${format(new Date(r.created_at || Date.now()), 'HH:mm')})` : '--'} · ID: {r.id.slice(0,8)}
+                    Adm: {r.admission_date ? formatDateTime(r.created_at || Date.now(), { paren: true }) : '--'} · ID: {r.id.slice(0,8)}
                   </p>
                 </div>
                 <div className="text-right mr-4">
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${parseFloat(r.outstanding_balance) > 0 ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
-                    Balance: ₹{Number(r.outstanding_balance).toLocaleString()}
-                  </span>
+                  {r.scheme_name ? (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-yellow-400 text-yellow-950 border border-yellow-300">
+                      Scheme: {r.scheme_name}
+                    </span>
+                  ) : (
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${parseFloat(r.outstanding_balance) > 0 ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
+                      Balance: ₹{Number(r.outstanding_balance).toLocaleString()}
+                    </span>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -6885,51 +7673,77 @@ function DischargeSection() {
   )
 }
 
-// ─── Payment Slip ─────────────────────────────────────────────────────────────
-const QUICK_SERVICES_STORAGE_KEY = 'payment_quick_services'
-const QUICK_SERVICE_CATEGORIES_STORAGE_KEY = 'payment_quick_service_categories'
-const QUICK_SERVICE_DEFAULT_CATEGORY = 'Custom'
-const QUICK_SERVICE_ALL_CATEGORY = 'All'
-function normalizeQuickService(service) {
-  const label = String(service?.label || '').trim()
-  const price = Number(service?.price || 0)
-  const category = String(service?.category || QUICK_SERVICE_DEFAULT_CATEGORY).trim() || QUICK_SERVICE_DEFAULT_CATEGORY
-  return { label, price, category }
-}
-function normalizeQuickServices(rows) {
-  return (rows || [])
-    .map(normalizeQuickService)
-    .filter(s => s.label && Number.isFinite(s.price) && s.price >= 0)
-}
-const DEFAULT_QUICK_SERVICES = [
-  { label: 'X-Ray', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 300 },
-  { label: 'ECG', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 200 },
-  { label: 'Blood Test (CBC)', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 250 },
-  { label: 'Urine Test', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 150 },
-  { label: 'OPD Consultation', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 500 },
-  { label: 'Dressing', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 100 },
-  { label: 'Injection', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 80 },
-  { label: 'Ultrasound', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 600 },
-  { label: 'MRI', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 3500 },
-  { label: 'CT Scan', category: QUICK_SERVICE_DEFAULT_CATEGORY, price: 2500 },
-]
+function printPaymentSlipImmediately(invoice, options = {}) {
+  const { onComplete } = options
+  const w = createSameTabPrintWindow({ onComplete })
+  const dateTimeStr = invoice.paid_at
+    ? formatDateTime(invoice.paid_at, { withSeconds: true })
+    : formatDateTime(new Date(), { withSeconds: true })
+  const patientName = [invoice.patient?.first_name, invoice.patient?.last_name].filter(Boolean).join(' ').toUpperCase() || 'PATIENT'
+  const genderAge = formatPaymentSlipGenderAge(invoice.patient || {})
+  const guardianLine = formatPaymentSlipGuardianLine(invoice.patient || {})
+  const attributedDoctor = formatPaymentSlipAttributedDoctor(invoice.attributedDoctor || invoice.referredBy || '')
+  const payModeLabel = invoice.paymentMode === 'cash'
+    ? 'Cash Payment'
+    : invoice.paymentMode === 'card'
+      ? 'Card Payment'
+      : invoice.paymentMode === 'upi'
+        ? 'UPI Payment'
+        : 'Credit / Due'
+  const slipProfile = getPaymentSlipProfile()
+  const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
+  const profileLines = buildPaymentSlipProfileLines(slipProfile, escapeHtml)
+  const slipItems = Array.isArray(invoice.items) ? invoice.items : []
+  const isCredit = invoice.paymentMode === 'credit'
 
+  w.document.write(buildPaymentSlipDocumentHtml({
+    title: `Receipt — ${invoice.invoice_no}`,
+    hospitalName: slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name,
+    logoUrl,
+    profileLines,
+    escapeHtml,
+    slipNumber: invoice.slip_number || '--',
+    invoiceNumber: invoice.invoice_no,
+    patientName,
+    genderAge,
+    payModeLabel,
+    mobile: invoice.patient?.phone || '—',
+    dateTimeStr,
+    guardianLine,
+    attributedDoctor,
+    referredBy: invoice.referredBy || '',
+    purpose: invoice.purpose || '',
+    lineItems: slipItems,
+    subtotal: invoice.subtotal,
+    discount: invoice.discountAmt,
+    total: invoice.total,
+    isCredit,
+    paidBoxLabel: isCredit ? 'CREDIT / DUE' : '✓ PAID',
+    printCloseScript: PAYMENT_SLIP_PRINT_CLOSE_SCRIPT,
+  }))
+  w.document.close()
+}
+
+// ─── Payment Slip ─────────────────────────────────────────────────────────────
 function PaymentSlipSection() {
   const [ptSearch, setPtSearch] = useState('')
   const [ptResults, setPtResults] = useState([])
   const [ptSearching, setPtSearching] = useState(false)
   const [patient, setPatient] = useState(null)
-  const [items, setItems] = useState([{ description: '', unit_price: '', quantity: 1 }])
+  const [items, setItems] = useState([{ description: '', unit_price: '', quantity: 1, category: '' }])
   const [discount, setDiscount] = useState('')
   const [paymentMode, setPaymentMode] = useState('cash')
   const [encounterType, setEncounterType] = useState('opd')
   const [referredBy, setReferredBy] = useState('')
   const [purpose, setPurpose] = useState('')
+  const [paidAt, setPaidAt] = useState(() => toDateTimeInputValue(new Date()))
   const [submitting, setSubmitting] = useState(false)
-  const [invoice, setInvoice] = useState(null)
+  const [slipDoctors, setSlipDoctors] = useState([])
+  const [collectionAttribution, setCollectionAttribution] = useState('hospital_self')
+  const [attributedDoctorUser, setAttributedDoctorUser] = useState('')
 
   const [isAddingNew, setIsAddingNew] = useState(false)
-  const [newPt, setNewPt] = useState({ name: '', phone: '', address: '' })
+  const [newPt, setNewPt] = useState({ search: '' })
   const [quickServices, setQuickServices] = useState(DEFAULT_QUICK_SERVICES)
   const [quickCategoryExtras, setQuickCategoryExtras] = useState([])
   const [activeQuickCategory, setActiveQuickCategory] = useState(QUICK_SERVICE_ALL_CATEGORY)
@@ -6944,66 +7758,14 @@ function PaymentSlipSection() {
   const [showQuickItemCreator, setShowQuickItemCreator] = useState(false)
   const [draggingQuickIndex, setDraggingQuickIndex] = useState(null)
   const [activeIpdByPatient, setActiveIpdByPatient] = useState({})
-  const autoPrintedInvoiceNoRef = useRef(null)
-  const autoResetPendingRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      try {
-        const { data } = await api.get('/payments/quick-services/')
-        const payload = data?.data
-        const rows = Array.isArray(payload?.services)
-          ? payload.services
-          : (Array.isArray(payload) ? payload : [])
-        const serverCategories = Array.isArray(payload?.categories)
-          ? payload.categories
-          : []
-        const normalized = normalizeQuickServices(rows)
-        if (!cancelled && normalized.length > 0) {
-          setQuickServices(normalized)
-          if (serverCategories.length > 0) {
-            const categories = Array.from(
-              new Set(
-                serverCategories
-                  .map(c => String(c || '').trim())
-                  .filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
-              )
-            )
-            setQuickCategoryExtras(categories)
-          }
-          return
-        }
-        if (!cancelled && serverCategories.length > 0) {
-          const categories = Array.from(
-            new Set(
-              serverCategories
-                .map(c => String(c || '').trim())
-                .filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
-            )
-          )
-          setQuickCategoryExtras(categories)
-          return
-        }
-      } catch {
-        // fallback below
-      }
-      try {
-        const raw = JSON.parse(localStorage.getItem(QUICK_SERVICES_STORAGE_KEY) || '[]')
-        if (Array.isArray(raw) && raw.length > 0) {
-          const normalized = normalizeQuickServices(raw)
-          if (!cancelled && normalized.length > 0) setQuickServices(normalized)
-        }
-      } catch {}
-      try {
-        const rawCats = JSON.parse(localStorage.getItem(QUICK_SERVICE_CATEGORIES_STORAGE_KEY) || '[]')
-        if (Array.isArray(rawCats) && !cancelled) {
-          const normalized = rawCats
-            .map(c => String(c || '').trim())
-            .filter(c => c && c !== QUICK_SERVICE_ALL_CATEGORY)
-          setQuickCategoryExtras(Array.from(new Set(normalized)))
-        }
-      } catch {}
+      const { services, categories } = await loadPaymentQuickServices()
+      if (cancelled) return
+      if (services) setQuickServices(services)
+      if (categories.length > 0) setQuickCategoryExtras(categories)
     })()
     return () => {
       cancelled = true
@@ -7072,6 +7834,57 @@ function PaymentSlipSection() {
     fetchActiveIpdAdmissions()
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    async function loadSlipDoctors() {
+      try {
+        const { data } = await api.get('/doctor-profiles/?limit=500')
+        if (cancelled) return
+        const rows = Array.isArray(data?.data) ? data.data : (data?.results || data || [])
+        setSlipDoctors(rows.filter((d) => d?.user))
+      } catch {
+        if (!cancelled) setSlipDoctors([])
+      }
+    }
+    loadSlipDoctors()
+    return () => { cancelled = true }
+  }, [])
+
+  const linkedAdmissionForPatient = patient ? (activeIpdByPatient[String(patient.id)] || null) : null
+  const attributionLocked = !!linkedAdmissionForPatient?.assigned_doctor
+
+  useEffect(() => {
+    if (attributionLocked) {
+      setCollectionAttribution('doctor')
+      setAttributedDoctorUser(String(linkedAdmissionForPatient.assigned_doctor || ''))
+    }
+  }, [attributionLocked, linkedAdmissionForPatient?.id, linkedAdmissionForPatient?.assigned_doctor])
+
+  function slipDoctorUserId(doc) {
+    return String(doc?.user ?? doc?.user_id ?? '')
+  }
+  function slipDoctorLabel(doc) {
+    return doc?.name || doc?.full_name || doc?.user_name || 'Doctor'
+  }
+  function resolveSlipAttributionLabel() {
+    if (linkedAdmissionForPatient?.assigned_doctor_name) {
+      return linkedAdmissionForPatient.assigned_doctor_name
+    }
+    if (collectionAttribution === 'doctor' && attributedDoctorUser) {
+      const doc = slipDoctors.find((d) => slipDoctorUserId(d) === String(attributedDoctorUser))
+      return doc ? slipDoctorLabel(doc) : 'Doctor'
+    }
+    return 'Self (Hospital)'
+  }
+
+  useEffect(() => {
+    function handleRefreshAdmissions() {
+      fetchActiveIpdAdmissions()
+    }
+    window.addEventListener('refresh-admissions', handleRefreshAdmissions)
+    return () => window.removeEventListener('refresh-admissions', handleRefreshAdmissions)
+  }, [])
+
   async function fetchActiveIpdAdmissions() {
     try {
       const { data } = await api.get('/ipd-admissions/?status=admitted&limit=500')
@@ -7088,15 +7901,15 @@ function PaymentSlipSection() {
   }
 
   function addItem() {
-    setItems(prev => [...prev, { description: '', unit_price: '', quantity: 1 }])
+    setItems(prev => [...prev, { description: '', unit_price: '', quantity: 1, category: '' }])
   }
   function removeItem(i) {
     setItems(prev => {
       if (prev.length <= 1) {
-        return [{ description: '', unit_price: '', quantity: 1 }]
+        return [{ description: '', unit_price: '', quantity: 1, category: '' }]
       }
       const next = prev.filter((_, idx) => idx !== i)
-      return next.length > 0 ? next : [{ description: '', unit_price: '', quantity: 1 }]
+      return next.length > 0 ? next : [{ description: '', unit_price: '', quantity: 1, category: '' }]
     })
   }
   function updateItem(i, field, val) {
@@ -7111,15 +7924,16 @@ function PaymentSlipSection() {
     setItems(prev => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it))
   }
   function applyServiceSuggestion(rowIndex, suggestion) {
+    const category = String(suggestion.category || QUICK_SERVICE_DEFAULT_CATEGORY).trim() || QUICK_SERVICE_DEFAULT_CATEGORY
     setItems(prev => {
       const next = prev.map((it, idx) => (
         idx === rowIndex
-          ? { ...it, description: suggestion.label, unit_price: String(suggestion.price) }
+          ? { ...it, description: suggestion.label, unit_price: String(suggestion.price), category }
           : it
       ))
       const hasEmptyRow = next.some(it => !String(it.description || '').trim())
       if (!hasEmptyRow) {
-        next.push({ description: '', unit_price: '', quantity: 1 })
+        next.push({ description: '', unit_price: '', quantity: 1, category: '' })
       }
       return next
     })
@@ -7128,6 +7942,7 @@ function PaymentSlipSection() {
   function quickAdd(svc) {
     const label = String(svc.label || '').trim()
     const price = Number(svc.price)
+    const category = String(svc.category || QUICK_SERVICE_DEFAULT_CATEGORY).trim() || QUICK_SERVICE_DEFAULT_CATEGORY
     setItems(prev => {
       const sameIdx = prev.findIndex(
         it =>
@@ -7139,14 +7954,14 @@ function PaymentSlipSection() {
         return prev.map((it, i) => {
           if (i !== sameIdx) return it
           const q = parseFloat(String(it.quantity)) || 0
-          return { ...it, quantity: q + 1 }
+          return { ...it, quantity: q + 1, category: it.category || category }
         })
       }
       const empty = prev.findIndex(it => !it.description)
       if (empty !== -1) {
-        return prev.map((it, i) => (i === empty ? { description: svc.label, unit_price: svc.price, quantity: 1 } : it))
+        return prev.map((it, i) => (i === empty ? { description: svc.label, unit_price: svc.price, quantity: 1, category } : it))
       }
-      return [...prev, { description: svc.label, unit_price: svc.price, quantity: 1 }]
+      return [...prev, { description: svc.label, unit_price: svc.price, quantity: 1, category }]
     })
   }
 
@@ -7221,16 +8036,18 @@ function PaymentSlipSection() {
       const key = label.toLowerCase()
       if (seen.has(key)) return
       seen.add(key)
-      out.push({ label, price })
+      out.push({
+        label,
+        price,
+        category: String(svc?.category || QUICK_SERVICE_DEFAULT_CATEGORY).trim() || QUICK_SERVICE_DEFAULT_CATEGORY,
+      })
     })
     return out
   }, [quickServices])
 
-  const subtotal = items.reduce((sum, it) => {
-    const p = parseFloat(it.unit_price) || 0
-    const q = parseFloat(it.quantity) || 0
-    return sum + p * q
-  }, 0)
+  const consolidatedItems = useMemo(() => consolidatePaymentSlipItems(items), [items])
+
+  const subtotal = consolidatedItems.reduce((sum, it) => sum + resolvePaymentSlipLineTotal(it), 0)
   const discountAmt = Math.min(parseFloat(discount) || 0, subtotal)
   const total = subtotal - discountAmt
   const selectedPatientHasActiveIpd = !!(patient && activeIpdByPatient[String(patient.id)])
@@ -7251,52 +8068,72 @@ function PaymentSlipSection() {
     let currentPatient = patient
     let targetPatientId = patient?.id
 
-    if (isAddingNew) {
-      if (!newPt.name.trim()) { toast.error('Patient name is required'); return }
-      if (!newPt.gender) { toast.error('Please select patient gender'); return }
-      if ((newPt.phone || '').replace(/\D/g, '').length >= 10) {
-        try {
-          const ten = (newPt.phone || '').replace(/\D/g, '').slice(-10)
-          const existingByPhone = await api.get(`/patients/by-phone/?phone=${encodeURIComponent(ten)}`)
-          const matches = Array.isArray(existingByPhone.data?.data) ? existingByPhone.data.data : []
-          if (matches.length > 0) {
-            toast.error(`Existing patient found with this mobile: UHID ${matches[0].uhid}. Please select existing patient.`)
-            setIsAddingNew(false)
-            setPtSearch(newPt.phone)
-            setPtResults(matches)
-            setSubmitting(false)
-            return
-          }
-        } catch {}
-      }
-      setSubmitting(true)
-      try {
-        const parts = newPt.name.trim().split(/\s+/)
-        const payload = {
-          first_name: parts[0] || 'New',
-          last_name: parts.slice(1).join(' ') || 'Patient',
-          gender: newPt.gender,
-          phone: newPt.phone || '',
-          address_line1: newPt.address || '',
-        }
-        const { data } = await api.post('/patients/', payload)
-        const created = data?.data || data?.entity || data
-        targetPatientId = created.id
-        currentPatient = created // Use this for the invoice set below
-        setPatient(created) 
-        setIsAddingNew(false)
-      } catch (err) {
-        toast.error('Failed to create new patient'); setSubmitting(false); return
-      }
-    }
+    if (isAddingNew) { toast.error('Complete patient registration popup first'); return }
 
     if (!targetPatientId) { toast.error('Select or create a patient first'); return }
-    const validItems = items.filter(it => it.description && parseFloat(it.unit_price) > 0)
+    const validItems = consolidatedItems
     if (!validItems.length) { toast.error('Add at least one service with a price'); return }
-    
+    if (!paidAt || !dateTimeInputToIso(paidAt)) {
+      toast.error('Enter a valid payment date and time')
+      return
+    }
+
     setSubmitting(true)
+    const paidAtIso = dateTimeInputToIso(paidAt) || new Date().toISOString()
     try {
       const linkedAdmission = activeIpdByPatient[String(targetPatientId)] || null
+      const isCreditSlip = paymentMode === 'credit'
+      const printAttributionLabel = linkedAdmission?.assigned_doctor_name
+        || (collectionAttribution === 'doctor' && attributedDoctorUser
+          ? slipDoctorLabel(slipDoctors.find((d) => slipDoctorUserId(d) === String(attributedDoctorUser)) || {})
+          : 'Self (Hospital)')
+
+      if (linkedAdmission && discountAmt <= 0) {
+        let lastCharge = null
+        for (const it of validItems) {
+          const qty = parseFloat(it.quantity) || 1
+          const unitPrice = parseFloat(it.unit_price)
+          const lineTotal = qty * unitPrice
+          const { data } = await api.post(`/ipd-admissions/${linkedAdmission.id}/add-charge/`, {
+            description: it.description,
+            amount: lineTotal,
+            quantity: qty,
+            unit_price: unitPrice,
+            payment_mode: isCreditSlip ? 'credit' : mapIpdChargePaymentMode(paymentMode),
+            paid_at: paidAtIso,
+          })
+          lastCharge = resolveAdmissionApiRow(data)
+        }
+
+        const slipItems = validItems.map(it => ({
+          description: it.description,
+          quantity: parseFloat(it.quantity) || 1,
+          unit_price: parseFloat(it.unit_price),
+          line_total: resolvePaymentSlipLineTotal(it),
+        }))
+        const paymentAmount = Number(parseFloat(lastCharge?.payment?.amount))
+        const slipSubtotal = slipItems.reduce((sum, it) => sum + resolvePaymentSlipLineTotal(it), 0)
+        const slipTotal = Number.isFinite(paymentAmount) && paymentAmount > 0
+          ? paymentAmount
+          : slipSubtotal
+        printPaymentSlipImmediately({
+          invoice_no: lastCharge?.invoice_no || 'IPD-Ledger',
+          items: slipItems,
+          slip_number: lastCharge?.payment?.slip_number || '',
+          patient: currentPatient || { first_name: '', last_name: '', phone: '' },
+          paymentMode,
+          subtotal: slipSubtotal,
+          discountAmt: 0,
+          total: slipTotal,
+          attributedDoctor: printAttributionLabel,
+          purpose,
+          paid_at: lastCharge?.payment?.paid_at || paidAtIso,
+        }, { onComplete: resetForm })
+        window.dispatchEvent(new Event('refresh-admissions'))
+        toast.success(isCreditSlip ? 'Charge recorded on IPD ledger (due).' : 'Payment slip recorded on IPD ledger.')
+        return
+      }
+
       const payload = {
         patient: targetPatientId,
         encounter_type: encounterType,
@@ -7307,19 +8144,29 @@ function PaymentSlipSection() {
           description: it.description,
           quantity: parseFloat(it.quantity) || 1,
           unit_price: parseFloat(it.unit_price),
+          category: it.category || '',
         })),
+      }
+      if (linkedAdmission?.assigned_doctor) {
+        payload.attribution_type = 'doctor'
+        payload.attributed_doctor_user = linkedAdmission.assigned_doctor
+      } else if (collectionAttribution === 'doctor' && attributedDoctorUser) {
+        payload.attribution_type = 'doctor'
+        payload.attributed_doctor_user = attributedDoctorUser
+      } else {
+        payload.attribution_type = 'hospital_self'
       }
       const { data } = await api.post('/invoices/', payload)
       const inv = data?.data || data?.entity || data
 
       // Always create a payment transaction so every slip is visible in Payment Slips.
       // Credit entries are stored as pending dues (amount due, not collected yet).
-      const isCreditSlip = paymentMode === 'credit'
       const paymentRes = await api.post('/payments/', {
         invoice: inv.id,
         payment_mode: isCreditSlip ? 'other' : paymentMode,
         amount: total.toFixed(2),
         status: isCreditSlip ? 'pending' : 'success',
+        paid_at: paidAtIso,
         transaction_reference: isCreditSlip
           ? `CREDIT DUE${(linkedAdmission?.ipd_no || linkedAdmission?.ipd_id || linkedAdmission?.admission_no)
             ? ` | IPD ID:${linkedAdmission?.ipd_no || linkedAdmission?.ipd_id || linkedAdmission?.admission_no}`
@@ -7328,16 +8175,24 @@ function PaymentSlipSection() {
       })
       const paymentRecord = paymentRes?.data?.data || paymentRes?.data?.entity || paymentRes?.data
 
-      setInvoice({ 
-        ...inv, 
+      printPaymentSlipImmediately({
+        invoice_no: inv.invoice_no,
+        items: validItems.map(it => ({
+          description: it.description,
+          quantity: parseFloat(it.quantity) || 1,
+          unit_price: parseFloat(it.unit_price),
+          line_total: resolvePaymentSlipLineTotal(it),
+        })),
         slip_number: paymentRecord?.slip_number || '',
-        patient: currentPatient || { 
-          first_name: newPt.name.split(' ')[0], 
-          last_name: newPt.name.split(' ').slice(1).join(' '), 
-          phone: newPt.phone 
-        },
-        paymentMode, subtotal, discountAmt, total, referredBy, purpose, linkedAdmission
-      })
+        patient: currentPatient || { first_name: '', last_name: '', phone: '' },
+        paymentMode,
+        subtotal,
+        discountAmt,
+        total,
+        attributedDoctor: printAttributionLabel,
+        purpose,
+        paid_at: paymentRecord?.paid_at || paidAtIso,
+      }, { onComplete: resetForm })
       toast.success(`Invoice ${inv.invoice_no} created!`)
       toast.success(paymentMode === 'credit' ? 'Credit slip generated and registered in Payment Slips!' : 'Payment slip recorded successfully!')
     } catch (err) {
@@ -7346,291 +8201,21 @@ function PaymentSlipSection() {
   }
 
   function resetForm() {
-    autoResetPendingRef.current = false
-    autoPrintedInvoiceNoRef.current = null
     setPatient(null)
     setIsAddingNew(false)
-    setNewPt({ name: '', phone: '', address: '', gender: '' })
+    setNewPt({ search: '' })
     setPtSearch('')
-    setItems([{ description: '', unit_price: '', quantity: 1 }])
+    setItems([{ description: '', unit_price: '', quantity: 1, category: '' }])
     setDiscount('')
     setPaymentMode('cash')
     setReferredBy('')
     setPurpose('')
-    setInvoice(null)
+    setPaidAt(toDateTimeInputValue(new Date()))
   }
-
-  function printInvoice(options = {}) {
-    const { onComplete } = options
-    const dateTimeStr = format(new Date(), 'd/M/yyyy HH:mm:ss')
-    const patientName = [invoice.patient.first_name, invoice.patient.last_name].filter(Boolean).join(' ').toUpperCase() || 'PATIENT'
-    const gender = invoice.patient.gender ? (invoice.patient.gender === 'male' ? 'Male' : invoice.patient.gender === 'female' ? 'Female' : 'Other') : ''
-    const age = invoice.patient.age ? invoice.patient.age : ''
-    const genderAge = [gender, age].filter(Boolean).join(' / ')
-    const payModeLabel = invoice.paymentMode === 'cash'
-      ? 'Cash Payment'
-      : invoice.paymentMode === 'card'
-        ? 'Card Payment'
-        : invoice.paymentMode === 'upi'
-          ? 'UPI Payment'
-          : 'Credit / Due'
-    const slipProfile = getPaymentSlipProfile()
-    const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
-    const address = escapeHtml(slipProfile.address || '')
-    const pinCode = escapeHtml(slipProfile.pin_code || '')
-    const phone = escapeHtml(slipProfile.phone || '')
-    const email = escapeHtml(slipProfile.email || '')
-    const website = escapeHtml(slipProfile.website || '')
-    const profileLines = [
-      address ? `${address}<br/>` : '',
-      pinCode ? `Pin Code: ${pinCode}<br/>` : '',
-      phone ? `Phone: ${phone}<br/>` : '',
-      email ? `Email: ${email}<br/>` : '',
-      website ? `Website: ${website}` : '',
-    ].filter(Boolean).join('')
-
-    const rows = (invoice.items || []).map((it, i) =>
-      `<tr>
-        <td class="c">${i + 1}</td>
-        <td class="l">${it.description}</td>
-        <td class="r">₹${parseFloat(it.line_total).toFixed(2)}</td>
-      </tr>`
-    ).join('')
-
-    const invoiceHtml = `<!DOCTYPE html><html><head>
-    <meta charset="utf-8"/>
-    <title>Receipt — ${invoice.invoice_no}</title>
-    <style>
-      @page { size: A4 portrait; margin: 0; }
-      * { box-sizing: border-box; margin: 0; padding: 0; }
-      body {
-        font-family: Arial, sans-serif;
-        font-size: 11px;
-        color: #111;
-        width: 210mm;
-        background: #fff;
-      }
-
-      /* Slip occupies exactly the top half of A4 portrait */
-      .slip {
-        width: 210mm;
-        height: 148.5mm;
-        padding: 6mm 8mm 4mm;
-        display: flex;
-        flex-direction: column;
-        border-bottom: 2px dashed #aaa; /* cut-line */
-      }
-
-      /* ── TOP: logo left / address right ── */
-      .top {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        padding-bottom: 4mm;
-        border-bottom: 2px solid #111;
-        margin-bottom: 3mm;
-      }
-      .hosp-name {
-        font-size: 22px;
-        font-weight: 900;
-        color: #1a6b3f;
-        letter-spacing: -0.5px;
-        line-height: 1;
-        margin-bottom: 2px;
-      }
-      .hosp-tag { font-size: 9px; color: #555; letter-spacing: 0.5px; text-transform: uppercase; }
-      .address { text-align: right; font-size: 9.5px; color: #333; line-height: 1.55; }
-      .address strong { font-size: 10px; }
-
-      /* ── RECEIPT title ── */
-      .receipt-title {
-        text-align: center;
-        font-size: 13px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        border-bottom: 1px solid #111;
-        padding-bottom: 2mm;
-        margin-bottom: 2.5mm;
-      }
-
-      /* ── Patient info grid ── */
-      .info-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        gap: 1.5mm 4mm;
-        margin-bottom: 2.5mm;
-        font-size: 10px;
-      }
-      .info-cell { display: flex; flex-direction: column; gap: 1px; }
-      .info-label { color: #666; font-size: 9px; }
-      .info-val { font-weight: 700; color: #111; }
-
-      /* ── Table ── */
-      table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
-      thead tr { background: #1a6b3f; color: #fff; }
-      th { padding: 3px 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
-      th.c { text-align: center; width: 26px; }
-      th.l { text-align: left; }
-      th.r { text-align: right; width: 52px; }
-      tbody tr { border-bottom: 1px solid #e5e7eb; }
-      tbody tr:last-child { border-bottom: 1.5px solid #111; }
-      td { padding: 3px 5px; }
-      td.c { text-align: center; color: #555; }
-      td.l { text-align: left; }
-      td.r { text-align: right; font-weight: 600; }
-
-      /* ── Totals ── */
-      .totals { margin-left: auto; width: 160px; margin-top: 1mm; font-size: 10.5px; }
-      .t-row { display: flex; justify-content: space-between; padding: 1px 5px; }
-      .t-row.disc { color: #dc2626; }
-      .t-row.final {
-        font-weight: 800;
-        font-size: 12px;
-        border-top: 2px solid #111;
-        padding-top: 2px;
-        margin-top: 2px;
-        color: #1a6b3f;
-      }
-
-      /* ── Footer ── */
-      .footer {
-        margin-top: auto;
-        padding-top: 2mm;
-        border-top: 1px dashed #aaa;
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
-        font-size: 9px;
-        color: #555;
-      }
-      .note { max-width: 65%; line-height: 1.5; }
-      .paid-box {
-        border: 2px solid #1a6b3f;
-        color: #1a6b3f;
-        font-weight: 900;
-        font-size: 13px;
-        padding: 2px 10px;
-        border-radius: 4px;
-        letter-spacing: 2px;
-      }
-      .due-box {
-        border: 2px solid #b45309;
-        color: #b45309;
-        background: #fffbeb;
-      }
-    </style>
-    </head><body>
-    <div class="slip">
-
-      <!-- TOP HEADER -->
-      <div class="top">
-        <div>
-          <div class="hosp-name">${hospitalName}</div>
-          <div class="hosp-tag">Healthcare &amp; Diagnostics</div>
-        </div>
-        <div class="address">
-          ${profileLines || '&mdash;'}
-        </div>
-      </div>
-
-      <!-- RECEIPT LABEL -->
-      <div class="receipt-title">Receipt</div>
-
-      <!-- PATIENT INFO -->
-      <div class="info-grid">
-        <div class="info-cell">
-          <span class="info-label">Slip Number</span>
-          <span class="info-val">${invoice.slip_number || '--'}</span>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">Invoice Number</span>
-          <span class="info-val">${invoice.invoice_no}</span>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">Name</span>
-          <span class="info-val">${patientName}</span>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">Gender / Age</span>
-          <span class="info-val">${genderAge || '—'}</span>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">Pay Mode</span>
-          <span class="info-val">${payModeLabel}</span>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">Mobile No.</span>
-          <span class="info-val">${invoice.patient.phone || '—'}</span>
-        </div>
-        <div class="info-cell">
-          <span class="info-label">Date</span>
-          <span class="info-val">${dateTimeStr}</span>
-        </div>
-        ${invoice.referredBy ? `<div class="info-cell">
-          <span class="info-label">Referred By</span>
-          <span class="info-val">${invoice.referredBy.toUpperCase()}</span>
-        </div>` : ''}
-        ${invoice.purpose ? `<div class="info-cell" style="grid-column:span 2">
-          <span class="info-label">Purpose</span>
-          <span class="info-val">${invoice.purpose}</span>
-        </div>` : ''}
-      </div>
-
-      <!-- SERVICES TABLE -->
-      <table>
-        <thead>
-          <tr>
-            <th class="c">SL No.</th>
-            <th class="l">Test Type / Service</th>
-            <th class="r">Amount</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-
-      <!-- TOTALS -->
-      <div class="totals">
-        <div class="t-row"><span>Total Amount:</span><span>₹${invoice.subtotal.toFixed(2)}</span></div>
-        <div class="t-row disc"><span>Discount:</span><span>₹${invoice.discountAmt.toFixed(2)}</span></div>
-        <div class="t-row final"><span>Net Amount:</span><span>₹${invoice.total.toFixed(2)}</span></div>
-      </div>
-
-      <!-- FOOTER -->
-      <div class="footer">
-        <div class="note">
-          <strong>Note:</strong> Your reports will be preserved only for 6 months.<br/>
-          Please retain this receipt for future reference.
-        </div>
-        <div class="paid-box ${invoice.paymentMode === 'credit' ? 'due-box' : ''}">${invoice.paymentMode === 'credit' ? 'CREDIT / DUE' : '✓ PAID'}</div>
-      </div>
-
-    </div>
-    </body></html>`
-    printHtmlInFrame(invoiceHtml, { onComplete })
-  }
-
-  useEffect(() => {
-    if (!invoice?.invoice_no) return
-    if (autoPrintedInvoiceNoRef.current === invoice.invoice_no) return
-
-    autoPrintedInvoiceNoRef.current = invoice.invoice_no
-    autoResetPendingRef.current = true
-
-    const t = setTimeout(() => {
-      printInvoice({
-        onComplete: () => {
-          if (!autoResetPendingRef.current) return
-          autoResetPendingRef.current = false
-          resetForm()
-        },
-      })
-    }, 0)
-
-    return () => clearTimeout(t)
-  }, [invoice])
 
   const inp = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-emerald-500 focus:outline-none'
+  const itemInp =
+    'w-full border border-gray-200 rounded-md px-2 py-1 text-[11px] leading-tight text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-emerald-500 focus:outline-none'
 
   return (
     <div className="h-full flex flex-col gap-3">
@@ -7640,84 +8225,12 @@ function PaymentSlipSection() {
           <Receipt size={18} className="text-emerald-600" />
           <h2 className="text-base font-semibold text-gray-900">Payment Slip</h2>
         </div>
-        {invoice && (
-          <div className="flex gap-2">
-            <button onClick={printInvoice} className="flex items-center gap-2 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700">
-              <Printer size={13} /> Print Receipt
-            </button>
-            <button onClick={resetForm} className="flex items-center gap-2 px-3 py-1.5 border border-gray-200 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-50">
-              New Slip
-            </button>
-          </div>
-        )}
       </div>
 
-      {invoice ? (
-        /* ── Receipt preview (compact) ── */
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden max-w-lg">
-          <div className="bg-gradient-to-r from-emerald-500 to-teal-600 px-4 py-3 text-white flex justify-between items-center">
-            <div>
-              <p className="text-[11px] opacity-75">Invoice No</p>
-              <p className="text-base font-bold">{invoice.invoice_no}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[11px] opacity-75">Date</p>
-              <p className="text-sm">{format(new Date(), 'MMM dd, yyyy')}</p>
-            </div>
-          </div>
-          <div className="p-4 space-y-3">
-            <div className="flex items-center gap-2.5 bg-emerald-50/60 border border-emerald-100 rounded-lg px-3 py-2">
-              <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold text-xs flex items-center justify-center shrink-0">
-                {(invoice.patient.first_name?.[0] || '') + (invoice.patient.last_name?.[0] || '')}
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-gray-900">{[invoice.patient.first_name, invoice.patient.last_name].filter(Boolean).join(' ')}</p>
-                <p className="text-xs text-gray-400">{invoice.patient.uhid} · {invoice.patient.phone || 'No phone'}</p>
-                {invoice.linkedAdmission && (
-                  <p className="text-[10px] font-bold text-blue-700 mt-0.5">
-                    IPD Active · Bed {invoice.linkedAdmission?.bed_code || '--'}
-                  </p>
-                )}
-              </div>
-            </div>
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left py-1.5 text-gray-400 font-semibold uppercase tracking-wide">Service</th>
-                  <th className="text-center py-1.5 text-gray-400 font-semibold uppercase tracking-wide">Qty</th>
-                  <th className="text-right py-1.5 text-gray-400 font-semibold uppercase tracking-wide">Rate</th>
-                  <th className="text-right py-1.5 text-gray-400 font-semibold uppercase tracking-wide">Amt</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoice.items?.map((it, i) => (
-                  <tr key={i} className="border-b border-gray-50">
-                    <td className="py-1.5 text-gray-800">{it.description}</td>
-                    <td className="py-1.5 text-center text-gray-500">{it.quantity}</td>
-                    <td className="py-1.5 text-right text-gray-500">₹{parseFloat(it.unit_price).toFixed(0)}</td>
-                    <td className="py-1.5 text-right font-medium text-gray-900">₹{parseFloat(it.line_total).toFixed(0)}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                {invoice.discountAmt > 0 && <tr><td colSpan={3} className="pt-2 text-right text-red-400">Discount</td><td className="pt-2 text-right text-red-500 font-medium">−₹{invoice.discountAmt.toFixed(0)}</td></tr>}
-                <tr><td colSpan={3} className="pt-2 text-right font-semibold text-gray-900">Total</td><td className="pt-2 text-right font-bold text-emerald-700 text-sm">₹{invoice.total.toFixed(0)}</td></tr>
-              </tfoot>
-            </table>
-            <div className="flex items-center justify-between pt-1 border-t border-gray-100">
-              <span className="text-xs text-gray-500 capitalize"><CreditCard size={12} className="inline mr-1 text-emerald-600" />{invoice.paymentMode}</span>
-              <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-semibold ${invoice.paymentMode === 'credit' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
-                {invoice.paymentMode === 'credit' ? 'CREDIT / DUE' : 'PAID'}
-              </span>
-            </div>
-          </div>
-        </div>
-      ) : (
-        /* ── Two-column form ── */
-        <form onSubmit={handleSubmit} className="flex-1 min-h-0 grid grid-cols-2 gap-3 overflow-hidden">
+      <form onSubmit={handleSubmit} className="flex-1 min-h-0 grid grid-cols-[3fr_2fr] gap-3 overflow-hidden min-w-0">
 
-          {/* LEFT column: patient + quick services + items */}
-          <div className="flex flex-col gap-3 min-h-0 overflow-y-auto pr-1">
+          {/* LEFT column (~60%): patient + quick services + items */}
+          <div className="flex flex-col gap-3 min-h-0 min-w-0 overflow-y-auto pr-1">
             {/* Patient */}
             <div className="bg-white rounded-xl border border-gray-200 p-3 shrink-0">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Patient</p>
@@ -7738,31 +8251,6 @@ function PaymentSlipSection() {
                   <button type="button" onClick={() => setPatient(null)} className="text-gray-300 hover:text-red-500">
                     <XCircle size={16} strokeWidth={1.8} />
                   </button>
-                </div>
-              ) : isAddingNew ? (
-                <div className="space-y-2 border-2 border-emerald-500/20 bg-emerald-50/20 rounded-xl p-3 shadow-inner">
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">New Patient Mode</p>
-                    <button type="button" onClick={() => { setIsAddingNew(false); setPtSearch(newPt.name) }} className="text-[10px] text-gray-400 font-bold hover:text-red-500 underline">Cancel</button>
-                  </div>
-                  <input className={`${inp} py-1.5 text-xs ring-1 ring-emerald-100`} value={newPt.name} readOnly placeholder="Name" />
-                  <input className={`${inp} py-1.5 text-xs`} 
-                    type="tel" maxLength={10}
-                    value={newPt.phone} onChange={e => {
-                      const v = e.target.value.replace(/\D/g, '').slice(0, 10);
-                      setNewPt(p => ({ ...p, phone: v }));
-                    }} placeholder="10-digit Mobile" />
-                  <select
-                    className={`${inp} py-1.5 text-xs`}
-                    value={newPt.gender}
-                    onChange={e => setNewPt(p => ({ ...p, gender: e.target.value }))}
-                  >
-                    <option value="">Select Gender *</option>
-                    <option value="male">Male</option>
-                    <option value="female">Female</option>
-                    <option value="other">Other</option>
-                  </select>
-                  <input className={`${inp} py-1.5 text-xs`} value={newPt.address} onChange={e => setNewPt(p => ({ ...p, address: e.target.value }))} placeholder="Address" />
                 </div>
               ) : (
                 <div className="relative">
@@ -7790,7 +8278,7 @@ function PaymentSlipSection() {
                         </li>
                       ))}
                       <li className="bg-emerald-50/50">
-                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ name: sanitizePersonName(ptSearch), phone: '', address: '', gender: '' }); setPtSearch(''); setPtResults([]) }}
+                        <button type="button" onClick={() => { setIsAddingNew(true); setNewPt({ search: ptSearch }); setPtSearch(''); setPtResults([]) }}
                           className="w-full text-left px-3 py-2.5 flex items-center gap-2 group transition-all">
                           <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center group-hover:scale-110 transition-transform">
                             <Plus size={14} strokeWidth={3} />
@@ -7853,22 +8341,22 @@ function PaymentSlipSection() {
             </div>
 
             {/* Line items */}
-            <div className="bg-white rounded-xl border border-gray-200 p-3 flex-1 min-h-0 flex flex-col">
-              <div className="flex items-center justify-between mb-2 shrink-0">
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Services / Items</p>
-                <button type="button" onClick={addItem} className="text-[11px] flex items-center gap-1 text-emerald-700 hover:text-emerald-900 font-medium">
-                  <Plus size={12} /> Add
+            <div className="bg-white rounded-xl border border-gray-200 p-2 flex-1 min-h-0 flex flex-col">
+              <div className="flex items-center justify-between mb-1 shrink-0">
+                <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Services / Items</p>
+                <button type="button" onClick={addItem} className="text-[10px] flex items-center gap-0.5 text-emerald-700 hover:text-emerald-900 font-medium">
+                  <Plus size={11} /> Add
                 </button>
               </div>
-              <div className="grid grid-cols-12 gap-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1 px-0.5 shrink-0">
+              <div className="grid grid-cols-12 gap-1 text-[9px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5 px-0.5 shrink-0">
                 <div className="col-span-6">Description</div>
                 <div className="col-span-2 text-center">Qty</div>
                 <div className="col-span-3">₹ Price</div>
                 <div className="col-span-1" />
               </div>
-              <div className="space-y-1.5 overflow-y-auto flex-1">
+              <div className="space-y-1 overflow-y-auto flex-1 min-h-0">
                 {items.map((it, i) => (
-                  <div key={i} className="grid grid-cols-12 gap-1.5 items-center">
+                  <div key={i} className="grid grid-cols-12 gap-1 items-center">
                     {(() => {
                       const q = String(it.description || '').trim().toLowerCase()
                       const suggestions = q
@@ -7878,7 +8366,7 @@ function PaymentSlipSection() {
                       return (
                         <div className="col-span-6 relative">
                           <input
-                            className={`${inp} w-full py-1.5 text-xs`}
+                            className={itemInp}
                             placeholder="Service"
                             value={it.description}
                             onFocus={() => setActiveServiceSearchRow(i)}
@@ -7913,13 +8401,13 @@ function PaymentSlipSection() {
                         </div>
                       )
                     })()}
-                    <input type="number" min="1" className={`${inp} col-span-2 text-center py-1.5 text-xs`}
+                    <input type="number" min="1" className={`${itemInp} col-span-2 text-center`}
                       value={it.quantity} onChange={e => updateItem(i, 'quantity', e.target.value)} />
-                    <input type="number" min="0" step="1" className={`${inp} col-span-3 py-1.5 text-xs`} placeholder="0"
+                    <input type="number" min="0" step="1" className={`${itemInp} col-span-3`} placeholder="0"
                       value={it.unit_price} onChange={e => updateItem(i, 'unit_price', e.target.value)} />
                     <button type="button" onClick={() => removeItem(i)}
-                      className="col-span-1 flex justify-center text-gray-300 hover:text-red-500">
-                      <Trash2 size={13} strokeWidth={2} />
+                      className="col-span-1 flex justify-center text-gray-300 hover:text-red-500 p-0.5">
+                      <Trash2 size={11} strokeWidth={2} />
                     </button>
                   </div>
                 ))}
@@ -7927,8 +8415,8 @@ function PaymentSlipSection() {
             </div>
           </div>
 
-          {/* RIGHT column: payment details + totals + submit */}
-          <div className="flex flex-col gap-3 min-h-0">
+          {/* RIGHT column (~40%): payment details + totals + submit */}
+          <div className="flex flex-col gap-3 min-h-0 min-w-0">
             <div className="bg-white rounded-xl border border-gray-200 p-3 shrink-0">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Payment Details</p>
               <div className="space-y-3">
@@ -7939,6 +8427,15 @@ function PaymentSlipSection() {
                       <option key={v} value={v}>{l}</option>
                     ))}
                   </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-gray-400 block mb-1">Payment date &amp; time</label>
+                  <input
+                    type="datetime-local"
+                    value={paidAt}
+                    onChange={e => setPaidAt(e.target.value)}
+                    className={`${inp} py-1.5 text-xs`}
+                  />
                 </div>
                 <div>
                   <label className="text-[11px] font-medium text-gray-400 block mb-1">Payment mode</label>
@@ -7965,9 +8462,35 @@ function PaymentSlipSection() {
                     placeholder="0.00" className={`${inp} py-1.5 text-xs`} />
                 </div>
                 <div>
-                  <label className="text-[11px] font-medium text-gray-400 block mb-1">Referred By (optional)</label>
-                  <input value={referredBy} onChange={e => setReferredBy(e.target.value)}
-                    placeholder="Doctor name…" className={`${inp} py-1.5 text-xs`} />
+                  <label className="text-[11px] font-medium text-gray-400 block mb-1">Collection for</label>
+                  {attributionLocked ? (
+                    <div className="py-1.5 px-2 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-semibold text-emerald-800">
+                      Dr. {linkedAdmissionForPatient?.assigned_doctor_name || 'Assigned doctor'} (IPD)
+                    </div>
+                  ) : (
+                    <select
+                      value={collectionAttribution === 'doctor' && attributedDoctorUser ? `doctor:${attributedDoctorUser}` : 'hospital_self'}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        if (val === 'hospital_self') {
+                          setCollectionAttribution('hospital_self')
+                          setAttributedDoctorUser('')
+                        } else if (val.startsWith('doctor:')) {
+                          setCollectionAttribution('doctor')
+                          setAttributedDoctorUser(val.slice(7))
+                        }
+                      }}
+                      className={`${inp} py-1.5 text-xs`}
+                    >
+                      <option value="hospital_self">Self (Hospital)</option>
+                      {slipDoctors.map((d) => (
+                        <option key={slipDoctorUserId(d)} value={`doctor:${slipDoctorUserId(d)}`}>
+                          {slipDoctorLabel(d)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <p className="text-[10px] text-gray-400 mt-1">Example: {resolveSlipAttributionLabel()}</p>
                 </div>
                 <div>
                   <label className="text-[11px] font-medium text-gray-400 block mb-1">Purpose / Notes (optional)</label>
@@ -7994,15 +8517,26 @@ function PaymentSlipSection() {
               </div>
             </div>
 
-            <button type="submit" disabled={submitting || (!patient && !isAddingNew) || total <= 0}
+            <button type="submit" disabled={submitting || !patient || total <= 0}
               className="py-2.5 rounded-xl bg-emerald-600 text-white font-medium text-sm hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 shrink-0">
               {submitting
                 ? <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Generating…</>
-                : <><Receipt size={15} /> {isAddingNew ? 'Register & Generate Slip' : 'Generate Payment Slip'}</>
+                : <><Receipt size={15} /> Generate Payment Slip</>
               }
             </button>
           </div>
         </form>
+      {isAddingNew && (
+        <NewPatientRegistrationModal
+          open={isAddingNew}
+          title="Register & Generate Slip"
+          initialSearch={newPt.search}
+          onClose={() => setIsAddingNew(false)}
+          onCreated={(created) => {
+            setPatient(created)
+            setNewPt({ search: '' })
+          }}
+        />
       )}
       {showQuickServiceEditor && (
         <div className="fixed inset-0 z-[120] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
@@ -8534,7 +9068,7 @@ function TVScreensSection({ rooms, setRooms, tvGroups, setTvGroups }) {
 }
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
-function Sidebar({ activeSection, onSelect }) {
+function Sidebar({ activeSection, onSelect, navGroups = NAV_GROUPS }) {
   const [collapsed, setCollapsed] = useState({})
 
   function toggleGroup(label) {
@@ -8549,7 +9083,7 @@ function Sidebar({ activeSection, onSelect }) {
         <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Reception</p>
       </div>
       <nav className="flex-1 p-2 space-y-0.5">
-        {NAV_GROUPS.map(group => (
+        {navGroups.map(group => (
           <div key={group.label}>
             <button
               onClick={() => toggleGroup(group.label)}
@@ -8594,6 +9128,8 @@ function OpdSlipsSection({ onMoveToIpd }) {
   const [cancelReason, setCancelReason] = useState('')
   const [cancelling, setCancelling] = useState(false)
   const [doctors, setDoctors] = useState([])
+  const [departments, setDepartments] = useState([])
+  const [layoutFields, setLayoutFields] = useState([])
   const PAGE_SIZE = 10
   const debounceRef = useRef(null)
   const formatPersonName = (value) => String(value || '')
@@ -8607,10 +9143,75 @@ function OpdSlipsSection({ onMoveToIpd }) {
     const matchedDoctor = doctors.find((d) => getDoctorUserId(d) === assignedDoctorUser)
     return matchedDoctor?.name || '-'
   }
+  const getDoctorDepartmentValue = (doctorRows, selectedId) => {
+    const target = String(selectedId || '')
+    if (!target) return ''
+    const matched = doctorRows.find((doctorRow) => getDoctorUserId(doctorRow) === target)
+    if (!matched) return ''
+    const entities = Array.isArray(matched.departments_entities) ? matched.departments_entities : []
+    if (entities.length > 0) {
+      const first = entities[0]
+      return String(first?.name || first?.code || '').trim()
+    }
+    const deptIds = Array.isArray(matched.departments) ? matched.departments : []
+    if (deptIds.length > 0) {
+      const id = String(deptIds[0])
+      const dep = departments.find((row) => String(row.id) === id)
+      if (dep) return String(dep.name || dep.code || '').trim()
+    }
+    return ''
+  }
+  const loadOpdLayout = useCallback(async () => {
+    try {
+      const res = await fetch('/api/templates')
+      if (!res.ok) return
+      const data = await res.json()
+      const single = (data.templates || []).find((t) => t.key === 'single')
+      const cfg = normalizeOpdFieldConfig(
+        getReceptionOpdSettings().opd_field_config,
+        getReceptionOpdSettings().opd_visible_fields,
+      )
+      if (single?.layout) {
+        const synced = syncCoreFieldsIntoLayout(single.layout, cfg)
+        const slipFields = filterLayoutFieldsForSlip(synced, cfg)
+        setLayoutFields(Object.keys(slipFields))
+      } else {
+        setLayoutFields([])
+      }
+    } catch {
+      /* keep existing fields on failure */
+    }
+  }, [])
+  const opdExtraTemplateFields = useMemo(
+    () => layoutFields.filter((f) => !templateFieldUsesMainFormOnly(f)),
+    [layoutFields],
+  )
 
   useEffect(() => {
-    api.get('/doctor-profiles/?limit=500').then(({ data }) => setDoctors(Array.isArray(data?.data) ? data.data : (data?.results || data || []))).catch(() => {})
+    Promise.all([
+      api.get('/doctor-profiles/?limit=500'),
+      api.get('/departments/?limit=500'),
+    ])
+      .then(([doctorRes, departmentRes]) => {
+        const doctorRows = Array.isArray(doctorRes.data?.data)
+          ? doctorRes.data.data
+          : (doctorRes.data?.results || doctorRes.data || [])
+        const departmentRows = Array.isArray(departmentRes.data?.data)
+          ? departmentRes.data.data
+          : (departmentRes.data?.results || departmentRes.data || [])
+        setDoctors(doctorRows)
+        setDepartments(departmentRows)
+      })
+      .catch(() => {})
   }, [])
+
+  useEffect(() => {
+    loadOpdLayout()
+    const refresh = setInterval(() => {
+      void loadOpdLayout()
+    }, 15000)
+    return () => clearInterval(refresh)
+  }, [loadOpdLayout])
 
   useEffect(() => {
     setPage(0)
@@ -8654,16 +9255,26 @@ function OpdSlipsSection({ onMoveToIpd }) {
         }
         if (editingVisit.patient_age !== '' && editingVisit.patient_age != null) {
           const a = parseInt(editingVisit.patient_age, 10)
-          if (!Number.isNaN(a)) patientPayload.age = a
+          if (!Number.isNaN(a)) {
+            patientPayload.age = a
+            patientPayload.age_unit = normalizeAgeUnit(editingVisit.patient_age_unit)
+          }
         }
         if (phoneDigits.length >= 10) {
           patientPayload.phone = phoneDigits.slice(-10)
+        }
+        if (opdExtraTemplateFields.length > 0) {
+          patientPayload.opd_custom_fields = buildOpdCustomFieldPayload(
+            opdExtraTemplateFields,
+            editingVisit.opd_custom_fields,
+          )
         }
         await api.patch(`/patients/${patientId}/`, patientPayload)
       }
 
       await api.patch(`/opd-visits/${editingVisit.id}/`, {
         doctor_user: editingVisit.doctor_user || null,
+        department: editingVisit.department || '',
         chief_complaint: editingVisit.visit_reason || '',
         visit_reason: editingVisit.visit_reason || '',
         status: editingVisit.status,
@@ -8692,18 +9303,23 @@ function OpdSlipsSection({ onMoveToIpd }) {
         const { data } = await api.get(`/patients/${visit.patient}/`)
         const p = data?.data || data || {}
         const fullName = [p.first_name, p.last_name].filter(Boolean).join(' ')
+        const ageFields = hydrateAgeFieldsFromPatient(p)
         enriched = {
           ...enriched,
           patient_name: formatPersonName(fullName || visit.patient_name || ''),
           patient_phone: p.phone || visit.patient_phone || '',
           patient_gender: p.gender || visit.patient_gender || 'male',
-          patient_age: p.age != null ? String(p.age) : (visit.patient_age || ''),
+          patient_age: ageFields.age || (visit.patient_age || ''),
+          patient_age_unit: ageFields.ageUnit,
           patient_guardian_name: formatPersonName(p.guardian_name || visit.patient_guardian_name || ''),
           patient_guardian_relationship: (p.guardian_relationship || '').trim() || visit.patient_guardian_relationship || '',
           patient_address: p.address_line1 || visit.patient_address || '',
           patient_city: p.city || visit.patient_city || '',
           patient_state: p.state || visit.patient_state || '',
           salutation_choice: normalizeSalutationChoiceFromApi(p.preferred_salutation),
+          opd_custom_fields: normalizeOpdCustomFields(
+            p.opd_custom_fields || visit.patient_opd_custom_fields,
+          ),
         }
       } catch {
         // fall back to visit payload values
@@ -8711,6 +9327,22 @@ function OpdSlipsSection({ onMoveToIpd }) {
     }
     if (enriched.salutation_choice === undefined) {
       enriched = { ...enriched, salutation_choice: 'none' }
+    }
+    if (!enriched.opd_custom_fields) {
+      enriched = {
+        ...enriched,
+        opd_custom_fields: normalizeOpdCustomFields(visit.patient_opd_custom_fields),
+      }
+    }
+    if (!enriched.department) {
+      enriched = {
+        ...enriched,
+        department: getDoctorDepartmentValue(doctors, enriched.doctor_user),
+      }
+    }
+    enriched = {
+      ...enriched,
+      patient_age_unit: normalizeAgeUnit(enriched.patient_age_unit || visit.patient_age_unit || 'years'),
     }
     setEditingVisit(enriched)
   }
@@ -8726,6 +9358,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
       doc_name: getVisitDoctorName(visit),
       chief_complaint: visit.chief_complaint || visit.visit_reason || '',
       display_token: visit.display_token || String(visit.queue_number || visit.token_number || ''),
+      patient_opd_custom_fields: visit.patient_opd_custom_fields || {},
     })
   }
 
@@ -8751,6 +9384,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
         patient_id: visit.patient,
         patient_uhid: visit.patient_uhid || '',
         patient_name: visit.patient_name || '',
+        patient_phone: visit.patient_phone || '',
         doctor_user: visit.doctor_user || '',
         visit_reason: visit.visit_reason || '',
         notes: `Shifted from OPD slip #${visit.queue_number || visit.token_number || '--'}`,
@@ -8829,7 +9463,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
                 <div className="col-span-2 flex flex-col items-start min-w-0 pr-2">
                   <span className="font-bold text-gray-800">
                     {v.created_at
-                      ? `${format(new Date(v.created_at), 'd/M/yyyy')} (${format(new Date(v.created_at), 'h:mm a')})`
+                      ? `${format(new Date(v.created_at), 'd/M/yyyy')} (${formatTime(v.created_at)})`
                       : v.visit_date
                         ? format(new Date(`${v.visit_date}T12:00:00`), 'd/M/yyyy')
                         : '--'}
@@ -9001,13 +9635,12 @@ function OpdSlipsSection({ onMoveToIpd }) {
                  </div>
                  <div>
                     <label className="block text-xs font-bold text-gray-600 mb-1">Age</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="150"
+                    <AgeWithUnitInput
                       value={editingVisit.patient_age || ''}
-                      onChange={e => setEditingVisit({ ...editingVisit, patient_age: e.target.value })}
-                      className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                      unit={editingVisit.patient_age_unit || 'years'}
+                      onValueChange={(next) => setEditingVisit({ ...editingVisit, patient_age: next })}
+                      onUnitChange={(next) => setEditingVisit({ ...editingVisit, patient_age_unit: next })}
+                      inputClassName="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
                     />
                  </div>
                  <div>
@@ -9075,7 +9708,20 @@ function OpdSlipsSection({ onMoveToIpd }) {
                </div>
                <div>
                   <label className="block text-xs font-bold text-gray-600 mb-1">Doctor</label>
-                  <select value={editingVisit.doctor_user || ''} onChange={e => setEditingVisit({...editingVisit, doctor_user: e.target.value})} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none">
+                  <select
+                    value={editingVisit.doctor_user || ''}
+                    onChange={(e) => {
+                      const selectedDocId = e.target.value
+                      setEditingVisit({
+                        ...editingVisit,
+                        doctor_user: selectedDocId,
+                        department: selectedDocId
+                          ? (getDoctorDepartmentValue(doctors, selectedDocId) || editingVisit.department || '')
+                          : (editingVisit.department || ''),
+                      })
+                    }}
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                  >
                      <option value="">-- No Doctor --</option>
                      {doctors
                        .filter(d => getDoctorUserId(d))
@@ -9084,6 +9730,25 @@ function OpdSlipsSection({ onMoveToIpd }) {
                            Dr. {d.name || d.first_name || d.email}
                          </option>
                        ))}
+                  </select>
+               </div>
+               <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Department</label>
+                  <select
+                    value={editingVisit.department || ''}
+                    onChange={(e) => setEditingVisit({ ...editingVisit, department: e.target.value })}
+                    className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                  >
+                    <option value="">-- Select department --</option>
+                    {editingVisit.department
+                      && !departments.some((dep) => (dep.name || dep.code || '') === editingVisit.department) ? (
+                        <option value={editingVisit.department}>{editingVisit.department}</option>
+                      ) : null}
+                    {departments.map((dep) => (
+                      <option key={dep.id} value={dep.name || dep.code || ''}>
+                        {dep.name || dep.code}
+                      </option>
+                    ))}
                   </select>
                </div>
                <div>
@@ -9113,6 +9778,29 @@ function OpdSlipsSection({ onMoveToIpd }) {
                      <option value="cancelled">Cancelled</option>
                   </select>
                </div>
+               {opdExtraTemplateFields.length > 0 && (
+                 <div className="col-span-2 border-t border-gray-100 pt-3 space-y-3">
+                   <p className="text-xs font-bold text-gray-500">Slip template fields</p>
+                   {opdExtraTemplateFields.map((fieldName) => (
+                     <div key={fieldName}>
+                       <label className="block text-xs font-bold text-gray-600 mb-1">{fieldName}</label>
+                       <input
+                         type="text"
+                         value={editingVisit.opd_custom_fields?.[fieldName] ?? ''}
+                         onChange={(e) => setEditingVisit({
+                           ...editingVisit,
+                           opd_custom_fields: {
+                             ...normalizeOpdCustomFields(editingVisit.opd_custom_fields),
+                             [fieldName]: e.target.value,
+                           },
+                         })}
+                         className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                         placeholder={`Enter ${fieldName}`}
+                       />
+                     </div>
+                   ))}
+                 </div>
+               )}
             </div>
             <div className="p-4 border-t border-gray-100 flex gap-2 justify-end bg-gray-50 mt-auto shrink-0">
                <button type="button" onClick={() => setEditingVisit(null)} className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-200 transition-colors">Cancel</button>
@@ -9137,6 +9825,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
                       viewVisit.patient_gender,
                       viewVisit.patient_age,
                       viewVisit.patient_salutation,
+                      viewVisit.patient_age_unit,
                     ) || '--'}
                   </h2>
                   <p className="text-xs text-gray-400 font-mono tracking-tighter">{viewVisit.patient_uhid || 'No UHID'}</p>
@@ -9163,7 +9852,9 @@ function OpdSlipsSection({ onMoveToIpd }) {
                     </div>
                     <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
                       <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Age</p>
-                      <p className="text-sm font-bold text-gray-800">{viewVisit.patient_age ? `${viewVisit.patient_age} Years` : '--'}</p>
+                      <p className="text-sm font-bold text-gray-800">
+                        {formatAgeDisplayLabel(viewVisit.patient_age, viewVisit.patient_age_unit)}
+                      </p>
                     </div>
                   </div>
 
@@ -9209,13 +9900,13 @@ function OpdSlipsSection({ onMoveToIpd }) {
                     <div className="flex flex-col">
                       <span className="text-[10px] font-black text-gray-400 uppercase">Token / Date</span>
                       <span className="text-sm font-bold text-gray-700">
-                        #{viewVisit.queue_number || viewVisit.token_number} · {viewVisit.visit_date ? `${format(new Date(viewVisit.visit_date), 'd/M/yyyy')} (${viewVisit.created_at ? format(new Date(viewVisit.created_at), 'HH:mm') : '--'})` : '--'}
+                        #{viewVisit.queue_number || viewVisit.token_number} · {viewVisit.visit_date ? `${format(new Date(viewVisit.visit_date), 'd/M/yyyy')} (${viewVisit.created_at ? formatTime(viewVisit.created_at) : '--'})` : '--'}
                       </span>
                     </div>
                     <div className="flex flex-col col-span-2">
                       <span className="text-[10px] font-black text-gray-400 uppercase">Registration Time</span>
                       <span className="text-sm font-bold text-gray-600">
-                        {viewVisit.patient_registered_at ? format(new Date(viewVisit.patient_registered_at), 'd/M/yyyy (HH:mm)') : '--'}
+                        {viewVisit.patient_registered_at ? formatDateTime(viewVisit.patient_registered_at, { paren: true }) : '--'}
                       </span>
                     </div>
                     <div className="flex flex-col col-span-2">
@@ -9248,7 +9939,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
                       <p className="text-[10px] font-black text-red-700 uppercase tracking-widest">Cancellation Details</p>
                       <p className="text-xs text-gray-700"><span className="font-bold">Reason:</span> {viewVisit.cancel_reason || '--'}</p>
                       <p className="text-xs text-gray-700"><span className="font-bold">Cancelled By:</span> {viewVisit.cancelled_by_name || '--'}</p>
-                      <p className="text-xs text-gray-700"><span className="font-bold">Cancelled At:</span> {viewVisit.cancelled_at ? format(new Date(viewVisit.cancelled_at), 'd/M/yyyy (HH:mm)') : '--'}</p>
+                      <p className="text-xs text-gray-700"><span className="font-bold">Cancelled At:</span> {viewVisit.cancelled_at ? formatDateTime(viewVisit.cancelled_at, { paren: true }) : '--'}</p>
                     </div>
                   )}
                 </div>
@@ -9301,6 +9992,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
                 <textarea
                   value={cancelReason}
                   onChange={e => setCancelReason(e.target.value)}
+                  onKeyDown={e => handleCancelReasonKeyDown(e, submitCancelVisit, { disabled: cancelling })}
                   rows={4}
                   className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none"
                   placeholder="Enter reason for cancellation"
@@ -9375,10 +10067,14 @@ function PaymentSlipsListSection() {
     setLoading(true)
     try {
       const params = new URLSearchParams({ limit: PAGE_SIZE, offset: pg * PAGE_SIZE, ordering: '-paid_at' })
-      if (q.trim()) params.set('search', q.trim())
+      const query = q.trim()
+      if (query) params.set('search', query)
       const { data } = await api.get(`/payments/?${params}`)
-      setPayments(data?.data || data?.results || data || [])
-      setTotal(data?.count ?? data?.total ?? (data?.data?.length ?? 0))
+      const rows = Array.isArray(data?.results)
+        ? data.results
+        : (Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []))
+      setPayments(rows)
+      setTotal(Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length)
     } catch {
       toast.error('Failed to load payment slips')
     } finally {
@@ -9391,6 +10087,7 @@ function PaymentSlipsListSection() {
     try {
       const invoiceId = editingPayment.invoice_details?.id || editingPayment.invoice
       const editItems = editingPayment._editItems || []
+      let amountForPayment = Number(editingPayment.amount) || 0
       if (invoiceId && editItems.length > 0) {
         const itemsPayload = editItems.map(it => ({
           description: it.description || 'Service',
@@ -9399,15 +10096,19 @@ function PaymentSlipsListSection() {
           quantity: Number(it.quantity) || 1,
           unit_price: Number(it.unit_price) || 0,
         }))
-        await api.patch(`/invoices/${invoiceId}/update-items/`, {
+        const { data: invRes } = await api.patch(`/invoices/${invoiceId}/update-items/`, {
           items: itemsPayload,
           discount_amount: editingPayment._discount ?? undefined,
           tax_rate: editingPayment._taxRate ?? undefined,
         })
+        const inv = invRes?.data ?? invRes
+        if (inv?.total_amount != null && Number.isFinite(Number(inv.total_amount))) {
+          amountForPayment = Number(inv.total_amount)
+        }
       }
       await api.patch(`/payments/${editingPayment.id}/`, {
         payment_mode: editingPayment.payment_mode || 'cash',
-        amount: editingPayment.amount || 0,
+        amount: amountForPayment,
         transaction_reference: editingPayment.transaction_reference || '',
         receipt_no: editingPayment.receipt_no || '',
         status: editingPayment.status || 'success',
@@ -9417,7 +10118,7 @@ function PaymentSlipsListSection() {
       setEditingPayment(null)
       fetchPayments(page, search)
     } catch (err) {
-      toast.error(err?.response?.data?.errors?.detail?.[0] || err?.response?.data?.detail || 'Failed to update payment slip')
+      toast.error(formatApiError(err, 'Failed to update payment slip'))
     }
   }
 
@@ -9463,9 +10164,32 @@ function PaymentSlipsListSection() {
     }
   }
 
+  function resolvePaymentSlipMobile(payment) {
+    const raw =
+      payment?.patient_phone
+      || payment?.invoice_details?.patient_phone
+      || payment?.invoice_details?.patient?.phone
+      || ''
+    const digits = String(raw).replace(/\D/g, '')
+    if (digits.length >= 10) return digits.slice(-10)
+    const trimmed = String(raw).trim()
+    return trimmed || '—'
+  }
+
+  function resolvePaymentSlipPatientFields(payment) {
+    return {
+      gender: payment?.patient_gender,
+      age_value: payment?.patient_age,
+      age_unit: payment?.patient_age_unit,
+      guardian_name: payment?.patient_guardian_name,
+      guardian_relationship: payment?.patient_guardian_relationship,
+    }
+  }
+
   function printPaymentSlip(payment) {
     if (!payment) return
-    const dateTimeStr = payment.paid_at ? format(new Date(payment.paid_at), 'd/M/yyyy HH:mm:ss') : format(new Date(), 'd/M/yyyy HH:mm:ss')
+    const w = createSameTabPrintWindow()
+    const dateTimeStr = payment.paid_at ? formatDateTime(payment.paid_at, { withSeconds: true }) : formatDateTime(new Date(), { withSeconds: true })
     const patientName = (payment.patient_name || 'PATIENT').toUpperCase()
     const isCreditDue = payment.status === 'pending' && /credit/i.test(String(payment.transaction_reference || ''))
     const payModeLabel =
@@ -9479,218 +10203,48 @@ function PaymentSlipsListSection() {
               ? 'UPI Payment'
               : (payment.payment_mode || 'Payment').toUpperCase()
     const amountNum = Number(payment.amount || 0)
-    const amountFixed = Number.isFinite(amountNum) ? amountNum.toFixed(2) : '0.00'
+    const amountFixed = Number.isFinite(amountNum) ? amountNum : 0
     const slipProfile = getPaymentSlipProfile()
-    const hospitalName = escapeHtml(slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name)
-    const address = escapeHtml(slipProfile.address || '')
-    const pinCode = escapeHtml(slipProfile.pin_code || '')
-    const phone = escapeHtml(slipProfile.phone || '')
-    const email = escapeHtml(slipProfile.email || '')
-    const website = escapeHtml(slipProfile.website || '')
-    const profileLines = [
-      address ? `${address}<br/>` : '',
-      pinCode ? `Pin Code: ${pinCode}<br/>` : '',
-      phone ? `Phone: ${phone}<br/>` : '',
-      email ? `Email: ${email}<br/>` : '',
-      website ? `Website: ${website}` : '',
-    ].filter(Boolean).join('')
+    const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
+    const profileLines = buildPaymentSlipProfileLines(slipProfile, escapeHtml)
     const invoiceDetails = payment.invoice_details || null
-    const lineItems = Array.isArray(invoiceDetails?.items) ? invoiceDetails.items : []
-    const rows = lineItems.length
-      ? lineItems.map((it, i) => {
-          const lineTotal = Number(it?.line_total || 0)
-          return `<tr>
-              <td class="c">${i + 1}</td>
-              <td class="l">${it?.description || 'Service'}</td>
-              <td class="r">₹${lineTotal.toFixed(2)}</td>
-            </tr>`
-        }).join('')
-      : `<tr>
-            <td class="c">1</td>
-            <td class="l">${payment.transaction_reference || payment.receipt_no || 'Payment'}</td>
-            <td class="r">₹${amountFixed}</td>
-          </tr>`
-    const subtotalFixed = Number(invoiceDetails?.subtotal_amount ?? payment.amount ?? 0).toFixed(2)
-    const discountFixed = Number(invoiceDetails?.discount_amount ?? 0).toFixed(2)
-    const totalFixed = Number(invoiceDetails?.total_amount ?? payment.amount ?? 0).toFixed(2)
+    let lineItems = buildPaymentSlipItemsForPayment(payment, invoiceDetails)
+    if (!lineItems.length) {
+      lineItems = [{
+        description: payment.transaction_reference || payment.receipt_no || 'Payment',
+        quantity: 1,
+        unit_price: amountFixed,
+        line_total: amountFixed,
+      }]
+    }
+    const discountFixed = Number(invoiceDetails?.discount_amount ?? 0)
 
-    const paymentSlipHtml = `<!DOCTYPE html><html><head>
-      <meta charset="utf-8"/>
-      <title>Receipt — ${payment.slip_number || payment.invoice_no || payment.receipt_no || 'Payment'}</title>
-      <style>
-        @page { size: A4 portrait; margin: 0; }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-          font-family: Arial, sans-serif;
-          font-size: 11px;
-          color: #111;
-          width: 210mm;
-          background: #fff;
-        }
-        .slip {
-          width: 210mm;
-          height: 148.5mm;
-          padding: 6mm 8mm 4mm;
-          display: flex;
-          flex-direction: column;
-          border-bottom: 2px dashed #aaa;
-        }
-        .top {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          padding-bottom: 4mm;
-          border-bottom: 2px solid #111;
-          margin-bottom: 3mm;
-        }
-        .hosp-name {
-          font-size: 22px;
-          font-weight: 900;
-          color: #1a6b3f;
-          letter-spacing: -0.5px;
-          line-height: 1;
-          margin-bottom: 2px;
-        }
-        .hosp-tag { font-size: 9px; color: #555; letter-spacing: 0.5px; text-transform: uppercase; }
-        .address { text-align: right; font-size: 9.5px; color: #333; line-height: 1.55; }
-        .address strong { font-size: 10px; }
-        .receipt-title {
-          text-align: center;
-          font-size: 13px;
-          font-weight: 700;
-          text-transform: uppercase;
-          letter-spacing: 2px;
-          border-bottom: 1px solid #111;
-          padding-bottom: 2mm;
-          margin-bottom: 2.5mm;
-        }
-        .info-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr 1fr;
-          gap: 1.5mm 4mm;
-          margin-bottom: 2.5mm;
-          font-size: 10px;
-        }
-        .info-cell { display: flex; flex-direction: column; gap: 1px; }
-        .info-label { color: #666; font-size: 9px; }
-        .info-val { font-weight: 700; color: #111; }
-        table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
-        thead tr { background: #1a6b3f; color: #fff; }
-        th { padding: 3px 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
-        th.c { text-align: center; width: 26px; }
-        th.l { text-align: left; }
-        th.r { text-align: right; width: 52px; }
-        tbody tr { border-bottom: 1px solid #e5e7eb; }
-        tbody tr:last-child { border-bottom: 1.5px solid #111; }
-        td { padding: 3px 5px; }
-        td.c { text-align: center; color: #555; }
-        td.l { text-align: left; }
-        td.r { text-align: right; font-weight: 600; }
-        .totals { margin-left: auto; width: 160px; margin-top: 1mm; font-size: 10.5px; }
-        .t-row { display: flex; justify-content: space-between; padding: 1px 5px; }
-        .t-row.disc { color: #dc2626; }
-        .t-row.final {
-          font-weight: 800;
-          font-size: 12px;
-          border-top: 2px solid #111;
-          padding-top: 2px;
-          margin-top: 2px;
-          color: #1a6b3f;
-        }
-        .footer {
-          margin-top: auto;
-          padding-top: 2mm;
-          border-top: 1px dashed #aaa;
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-end;
-          font-size: 9px;
-          color: #555;
-        }
-        .note { max-width: 65%; line-height: 1.5; }
-        .paid-box {
-          border: 2px solid #1a6b3f;
-          color: #1a6b3f;
-          font-weight: 900;
-          font-size: 13px;
-          padding: 2px 10px;
-          border-radius: 4px;
-          letter-spacing: 2px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="slip">
-        <div class="top">
-          <div>
-            <div class="hosp-name">${hospitalName}</div>
-            <div class="hosp-tag">Healthcare &amp; Diagnostics</div>
-          </div>
-          <div class="address">
-            ${profileLines || 'Phone: --'}
-          </div>
-        </div>
-
-        <div class="receipt-title">Receipt</div>
-
-        <div class="info-grid">
-          <div class="info-cell">
-            <span class="info-label">Slip Number</span>
-            <span class="info-val">${payment.slip_number || '--'}</span>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">Invoice Number</span>
-            <span class="info-val">${payment.invoice_no || '--'}</span>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">Name</span>
-            <span class="info-val">${patientName}</span>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">Gender / Age</span>
-            <span class="info-val">Other</span>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">Pay Mode</span>
-            <span class="info-val">${payModeLabel}</span>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">Mobile No.</span>
-            <span class="info-val">—</span>
-          </div>
-          <div class="info-cell">
-            <span class="info-label">Date</span>
-            <span class="info-val">${dateTimeStr}</span>
-          </div>
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th class="c">SL No.</th>
-              <th class="l">Test Type / Service</th>
-              <th class="r">Amount</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-
-        <div class="totals">
-          <div class="t-row"><span>Total Amount:</span><span>₹${subtotalFixed}</span></div>
-          <div class="t-row disc"><span>Discount:</span><span>₹${discountFixed}</span></div>
-          <div class="t-row final"><span>Net Amount:</span><span>₹${totalFixed}</span></div>
-        </div>
-
-        <div class="footer">
-          <div class="note">
-            <strong>Note:</strong> Your reports will be preserved only for 6 months.<br/>
-            Please retain this receipt for future reference.
-          </div>
-          <div class="paid-box">✓ PAID</div>
-        </div>
-      </div>
-    </body></html>`
-    printHtmlInFrame(paymentSlipHtml)
+    w.document.write(buildPaymentSlipDocumentHtml({
+      title: `Receipt — ${payment.slip_number || payment.invoice_no || payment.receipt_no || 'Payment'}`,
+      hospitalName: slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name,
+      logoUrl,
+      profileLines,
+      escapeHtml,
+      slipNumber: payment.slip_number || '--',
+      invoiceNumber: payment.invoice_no || '--',
+      patientName,
+      genderAge: formatPaymentSlipGenderAge(resolvePaymentSlipPatientFields(payment)),
+      payModeLabel,
+      mobile: resolvePaymentSlipMobile(payment),
+      dateTimeStr,
+      guardianLine: formatPaymentSlipGuardianLine(resolvePaymentSlipPatientFields(payment)),
+      attributedDoctor: formatPaymentSlipAttributedDoctor(
+        payment.attributed_doctor_name || payment.invoice_details?.attributed_doctor_name,
+      ),
+      lineItems,
+      subtotal: amountFixed,
+      discount: discountFixed,
+      total: amountFixed,
+      isCredit: isCreditDue,
+      paidBoxLabel: isCreditDue ? 'CREDIT / DUE' : '✓ PAID',
+      printCloseScript: PRINT_WINDOW_CLOSE_SCRIPT,
+    }))
+    w.document.close()
   }
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
@@ -9717,7 +10271,7 @@ function PaymentSlipsListSection() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden relative flex flex-col min-h-[calc(100vh-320px)]">
         <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-3 bg-gray-50/60">
           <Search size={15} className="text-gray-400 shrink-0" strokeWidth={2} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by invoice, UHID, ref, receipt…" className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by patient name, mobile, or UHID…" className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400" />
           {loading && <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0" />}
           <button onClick={() => fetchPayments(page, search)} className="text-gray-400 hover:text-emerald-600 shrink-0"><RefreshCw size={14} strokeWidth={2} /></button>
           <span className="text-xs text-gray-400 shrink-0">{total} slips</span>
@@ -9736,12 +10290,13 @@ function PaymentSlipsListSection() {
           {loading ? <div className="py-12 text-center text-sm text-gray-400">Loading…</div> : payments.length === 0 ? <div className="py-12 text-center text-sm text-gray-400">No payment slips found</div> : payments.map((p) => (
             <div key={p.id} className="grid grid-cols-12 px-4 py-3 items-center text-sm hover:bg-gray-50/50 transition-colors">
               <div className="col-span-2 flex flex-col items-start min-w-0 pr-2">
-                <span className="font-bold text-gray-800">{p.paid_at ? format(new Date(p.paid_at), 'd/M/yyyy') : '--'}</span>
+                <span className="font-bold text-gray-800">{p.paid_at ? formatDateTime(p.paid_at, { paren: true }) : '--'}</span>
                 <span className="text-xs text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 mt-0.5 rounded">{p.receipt_no || '--'}</span>
               </div>
               <div className="col-span-2 min-w-0 pr-2">
                 <p className="font-bold text-gray-800 truncate">{p.patient_name || 'Patient'}</p>
                 <p className="text-[10px] text-gray-500 font-mono truncate">{p.patient_uhid || '--'}</p>
+                <p className="text-[10px] text-indigo-600 font-bold mt-0.5 truncate">{p.attributed_doctor_name || 'Self (Hospital)'}</p>
                 {p.collected_by_name && <p className="text-[10px] text-gray-400 font-bold mt-0.5">By: {p.collected_by_name}</p>}
               </div>
               <div className="col-span-2 min-w-0 pr-2">
@@ -10105,6 +10660,7 @@ function PaymentSlipsListSection() {
                 <textarea
                   value={cancelPaymentReason}
                   onChange={e => setCancelPaymentReason(e.target.value)}
+                  onKeyDown={e => handleCancelReasonKeyDown(e, submitCancelPayment, { disabled: cancellingPayment })}
                   rows={4}
                   className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none"
                   placeholder="Enter reason for cancellation"
@@ -10173,7 +10729,7 @@ function PaymentSlipsListSection() {
               </div>
               <div className="bg-gray-50 rounded-lg p-2 border border-gray-100 md:col-span-2">
                 <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Paid At</p>
-                <p className="text-xs font-bold text-gray-800">{viewPayment.paid_at ? format(new Date(viewPayment.paid_at), 'd/M/yyyy (HH:mm)') : '--'}</p>
+                <p className="text-xs font-bold text-gray-800">{viewPayment.paid_at ? formatDateTime(viewPayment.paid_at, { paren: true }) : '--'}</p>
               </div>
               <div className="bg-gray-50 rounded-lg p-2 border border-gray-100 md:col-span-2">
                 <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Transaction Reference</p>
@@ -10241,6 +10797,10 @@ function PaymentSlipsListSection() {
 function PaymentSlipSettingsSection() {
   const [form, setForm] = useState(() => getPaymentSlipProfile())
   const [logoPreview, setLogoPreview] = useState(() => getPaymentSlipProfile().hospital_logo_url || '')
+  const [timeDisplayMode, setTimeDisplayMode] = useState(() => getTimeDisplayMode())
+  const [timeModeSaving, setTimeModeSaving] = useState(false)
+  const [formatsOpen, setFormatsOpen] = useState(false)
+  const [formatErrors, setFormatErrors] = useState({})
 
   useEffect(() => {
     let cancelled = false
@@ -10250,14 +10810,62 @@ function PaymentSlipSettingsSection() {
         const next = getPaymentSlipProfile()
         setForm(next)
         setLogoPreview(next.hospital_logo_url || '')
+        setTimeDisplayMode(getTimeDisplayMode())
       }
     }
     hydrate()
     return () => { cancelled = true }
   }, [])
 
+  async function handleTimeDisplayToggle(checked) {
+    const next = checked ? '24h' : '12h'
+    setTimeModeSaving(true)
+    try {
+      const { data } = await api.patch('/settings/reception-portal/', { time_display_mode: next })
+      const row = data?.data || data || {}
+      receptionPortalSettingsCache = {
+        ...receptionPortalSettingsCache,
+        time_display_mode: row.time_display_mode === '12h' ? '12h' : '24h',
+      }
+      syncTimeDisplayModeFromRow(row)
+      setTimeDisplayMode(getTimeDisplayMode())
+      toast.success(`Time format set to ${next === '24h' ? '24 hour' : '12 hour'}`)
+    } catch {
+      toast.error('Failed to update time format')
+    } finally {
+      setTimeModeSaving(false)
+    }
+  }
+
   function onChange(key, value) {
     setForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function onFormatPartFieldChange(docType, field, value) {
+    setForm((prev) => ({
+      ...prev,
+      document_number_formats: onFormatPartChange(prev.document_number_formats, docType, field, value),
+    }))
+    setFormatErrors((prev) => {
+      const next = { ...prev }
+      delete next[docType]
+      return next
+    })
+  }
+
+  function validateAllFormatTemplates(formats) {
+    return validateAllDocumentNumberFormats(formats)
+  }
+
+  function resetDocumentNumberFormats() {
+    setForm((prev) => ({
+      ...prev,
+      uhid_prefix: DEFAULT_PAYMENT_SLIP_PROFILE.uhid_prefix,
+      invoice_prefix: DEFAULT_PAYMENT_SLIP_PROFILE.invoice_prefix,
+      invoice_next_number: DEFAULT_PAYMENT_SLIP_PROFILE.invoice_next_number,
+      document_number_formats: getDefaultDocumentNumberParts(),
+    }))
+    setFormatErrors({})
   }
 
   function onLogoFileChange(file) {
@@ -10283,6 +10891,14 @@ function PaymentSlipSettingsSection() {
 
   async function handleSave(e) {
     e.preventDefault()
+    const errors = validateAllFormatTemplates(form.document_number_formats)
+    if (Object.keys(errors).length > 0) {
+      setFormatErrors(errors)
+      setFormatsOpen(true)
+      toast.error('Fix document number format errors before saving')
+      return
+    }
+    setFormatErrors({})
     try {
       await savePaymentSlipProfile(form)
       const next = getPaymentSlipProfile()
@@ -10297,6 +10913,7 @@ function PaymentSlipSettingsSection() {
   async function handleReset() {
     setForm({ ...DEFAULT_PAYMENT_SLIP_PROFILE, remove_hospital_logo: true })
     setLogoPreview('')
+    setFormatErrors({})
     try {
       await savePaymentSlipProfile({ ...DEFAULT_PAYMENT_SLIP_PROFILE, remove_hospital_logo: true })
       const next = getPaymentSlipProfile()
@@ -10308,15 +10925,271 @@ function PaymentSlipSettingsSection() {
     }
   }
 
+  const normalizedFormats = normalizeDocumentNumberFormats(form.document_number_formats)
+
   return (
     <div className="max-w-3xl mx-auto">
       <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-5 md:p-6">
         <h2 className="text-lg font-black text-gray-800">Hospital Settings</h2>
         <p className="text-sm text-gray-500 mt-1">
-          These details will be printed in the payment slip header.
+          Hospital branding for payment slips and configurable document number formats.
         </p>
 
+        <div className="mt-5 border border-gray-100 rounded-xl p-4 bg-gray-50/50">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-bold text-gray-800">Time display format</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Controls how times appear across reception, doctor, pharmacy, lab, reports, and printed receipts.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 px-3 py-1.5 border border-emerald-200 rounded-full bg-white">
+              <span className={`text-xs font-bold select-none ${timeDisplayMode === '12h' ? 'text-emerald-700' : 'text-gray-400'}`}>
+                12 hour
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={timeDisplayMode === '24h'}
+                disabled={timeModeSaving}
+                onClick={() => handleTimeDisplayToggle(timeDisplayMode !== '24h')}
+                className={`relative w-14 h-7 rounded-full transition-colors duration-200 focus:outline-none shrink-0 disabled:opacity-60 ${
+                  timeDisplayMode === '24h' ? 'bg-emerald-500' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-200 ${
+                  timeDisplayMode === '24h' ? 'translate-x-7' : 'translate-x-0'
+                }`} />
+              </button>
+              <span className={`text-xs font-bold select-none ${timeDisplayMode === '24h' ? 'text-emerald-700' : 'text-gray-400'}`}>
+                24 hour
+              </span>
+            </div>
+          </div>
+        </div>
+
         <form onSubmit={handleSave} className="mt-5 space-y-4">
+          <div className="border border-gray-100 rounded-xl overflow-hidden bg-gray-50/50">
+            <button
+              type="button"
+              onClick={() => setFormatsOpen((open) => !open)}
+              className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+            >
+              <div>
+                <p className="text-sm font-bold text-gray-800">Document Number Formats</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Configure UHID, OPD, IPD, payment slips, receipts, and IPD ledger number templates.
+                </p>
+              </div>
+              {formatsOpen ? (
+                <ChevronDown className="text-gray-500 shrink-0" />
+              ) : (
+                <ChevronRight className="text-gray-500 shrink-0" />
+              )}
+            </button>
+
+            {formatsOpen && (
+              <div className="px-4 pb-4 space-y-4 border-t border-gray-100 bg-white">
+                <div className="pt-4">
+                  <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Hospital Prefix</label>
+                  <input
+                    type="text"
+                    value={form.uhid_prefix || ''}
+                    onChange={(e) => onChange('uhid_prefix', e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))}
+                    className="w-full max-w-xs border border-gray-200 rounded-xl px-3 py-2.5 text-sm uppercase focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
+                    placeholder="DEF"
+                    maxLength={8}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Used when a slip type has “Use hospital prefix” enabled.</p>
+                </div>
+
+                <p className="text-xs text-gray-500">
+                  Leave any box empty to skip that part in the final number. Sequence is always included.
+                </p>
+
+                <div className="space-y-3">
+                  {DOCUMENT_NUMBER_FORMAT_ROWS.map((row) => {
+                    const formatRow = normalizedFormats[row.key] || {}
+                    const isReceipt = row.key === 'receipt'
+                    const preview = getDocumentNumberPreview(row.key, normalizedFormats, {
+                      uhidPrefix: form.uhid_prefix || 'VAR',
+                      invoicePrefix: form.invoice_prefix || 'INV',
+                      seq: isReceipt ? (Number(form.invoice_next_number) || 1) : undefined,
+                    })
+
+                    return (
+                      <div key={row.key} className="rounded-xl border border-gray-100 p-3 bg-gray-50/60">
+                        <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+                          <p className="text-sm font-bold text-gray-800">{row.label}</p>
+                          <span className="text-xs font-mono text-emerald-700 bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-100">
+                            Example: {preview || '—'}
+                          </span>
+                        </div>
+
+                        {isReceipt ? (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Invoice Prefix</label>
+                              <input
+                                type="text"
+                                value={form.invoice_prefix || ''}
+                                onChange={(e) => onChange('invoice_prefix', e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20))}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm uppercase focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="INV"
+                                maxLength={20}
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Next Invoice Number</label>
+                              <input
+                                type="number"
+                                min="1"
+                                value={form.invoice_next_number ?? 1}
+                                onChange={(e) => onChange('invoice_next_number', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Separator</label>
+                              <input
+                                type="text"
+                                value={formatRow.separator ?? ''}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'separator', e.target.value.slice(0, 3))}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="Leave empty for none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Sequence Digits</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="8"
+                                value={formatRow.seq_padding ?? 0}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'seq_padding', e.target.value)}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="0 = no padding"
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Kind</label>
+                              <input
+                                type="text"
+                                value={formatRow.kind || ''}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'kind', e.target.value)}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm uppercase focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="Leave empty to skip"
+                                maxLength={12}
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Prefix</label>
+                              <input
+                                type="text"
+                                value={formatRow.prefix || ''}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'prefix', e.target.value)}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm uppercase focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="Leave empty to skip"
+                                maxLength={20}
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Separator</label>
+                              <input
+                                type="text"
+                                value={formatRow.separator ?? ''}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'separator', e.target.value.slice(0, 3))}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="- or empty"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Sequence Digits</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="8"
+                                value={formatRow.seq_padding ?? 0}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'seq_padding', e.target.value)}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none bg-white"
+                                placeholder="0 = no padding"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {!isReceipt && (
+                          <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-700">
+                            {row.showHospitalPrefixToggle && (
+                              <label className="inline-flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={formatRow.use_hospital_prefix === true}
+                                  onChange={(e) => onFormatPartFieldChange(row.key, 'use_hospital_prefix', e.target.checked)}
+                                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                />
+                                <span>Use hospital prefix</span>
+                              </label>
+                            )}
+                            <label className="inline-flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={formatRow.include_year === true}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'include_year', e.target.checked)}
+                                className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span>Include year</span>
+                            </label>
+                            {row.showSlug && (
+                              <label className="inline-flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={formatRow.include_slug === true}
+                                  onChange={(e) => onFormatPartFieldChange(row.key, 'include_slug', e.target.checked)}
+                                  className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                />
+                                <span>Include slug</span>
+                              </label>
+                            )}
+                          </div>
+                        )}
+
+                        {isReceipt && (
+                          <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-700">
+                            <label className="inline-flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={formatRow.include_year === true}
+                                onChange={(e) => onFormatPartFieldChange(row.key, 'include_year', e.target.checked)}
+                                className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span>Include year</span>
+                            </label>
+                          </div>
+                        )}
+
+                        {formatErrors[row.key] && (
+                          <p className="text-xs text-red-600 mt-2">{formatErrors[row.key]}</p>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={resetDocumentNumberFormats}
+                  className="px-3 py-2 rounded-lg bg-white border border-gray-200 text-gray-700 text-xs font-bold hover:bg-gray-50 transition-colors"
+                >
+                  Reset format defaults
+                </button>
+              </div>
+            )}
+          </div>
+
           <div>
             <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Hospital Name</label>
             <input
@@ -10610,17 +11483,24 @@ function OpdSettingsSection() {
           }),
       }
       await saveReceptionOpdSettings(prepared)
+      await loadReceptionPortalSettings()
       setForm(getReceptionOpdSettings())
       toast.success('OPD settings saved')
-    } catch {
-      toast.error('Failed to save OPD settings')
+    } catch (err) {
+      const errors = err?.response?.data?.errors
+      const detail = errors?.detail || errors?.default_doctor_user?.[0]
+      toast.error(detail ? String(detail) : 'Failed to save OPD settings')
     }
   }
 
   async function handleReset() {
-    setForm({ ...DEFAULT_RECEPTION_OPD_SETTINGS })
+    const resetForm = {
+      ...DEFAULT_RECEPTION_OPD_SETTINGS,
+    }
+    setForm(resetForm)
     try {
-      await saveReceptionOpdSettings(DEFAULT_RECEPTION_OPD_SETTINGS)
+      await saveReceptionOpdSettings(resetForm)
+      setForm(getReceptionOpdSettings())
       toast.success('OPD settings reset')
     } catch {
       toast.error('Failed to reset OPD settings')
@@ -10651,13 +11531,19 @@ function OpdSettingsSection() {
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Default State</label>
-              <input
-                type="text"
+              <select
                 value={form.default_state || ''}
                 onChange={(e) => onChange('default_state', e.target.value)}
                 className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
-                placeholder="State"
-              />
+              >
+                {form.default_state
+                  && !INDIAN_STATE_OPTIONS.includes(form.default_state) ? (
+                    <option value={form.default_state}>{form.default_state}</option>
+                  ) : null}
+                {INDIAN_STATE_OPTIONS.map((stateName) => (
+                  <option key={stateName} value={stateName}>{stateName}</option>
+                ))}
+              </select>
             </div>
           </div>
           <div>
@@ -10668,13 +11554,17 @@ function OpdSettingsSection() {
               className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 outline-none"
             >
               <option value="">Walk-in / Any</option>
-              {doctors.map((d) => (
-                <option key={d.user || d.id} value={String(d.user || d.id)}>
-                  {d.name}
-                </option>
-              ))}
+              {doctors.filter((d) => d.user || d.user_id || d.doctor_user).map((d) => {
+                const doctorUserId = String(d.user ?? d.user_id ?? d.doctor_user ?? '')
+                return (
+                  <option key={doctorUserId} value={doctorUserId}>
+                    {d.name}
+                  </option>
+                )
+              })}
             </select>
           </div>
+
           <div className="border border-gray-100 rounded-xl p-4 bg-gray-50/50 space-y-3">
             <div>
               <p className="text-sm font-bold text-gray-800">OPD Fee Mode</p>
@@ -11134,6 +12024,7 @@ function ReceptionSettingsSection({ rooms, setRooms, tvGroups, setTvGroups }) {
     { id: 'payment_slip', label: 'Hospital Settings', icon: Receipt },
   ]
   const [tab, setTab] = useState('opd')
+  const [opdTemplateSettingsRevision, setOpdTemplateSettingsRevision] = useState(0)
 
   return (
     <div className="flex flex-col gap-4 min-h-0">
@@ -11160,10 +12051,15 @@ function ReceptionSettingsSection({ rooms, setRooms, tvGroups, setTvGroups }) {
       </div>
 
       <div className="flex-1 min-h-0">
-        {tab === 'opd' && <OpdSettingsSection />}
+        {tab === 'opd' && (
+          <OpdSettingsSection />
+        )}
         {tab === 'opd_template' && (
           <div className="h-full min-h-[72vh] bg-white rounded-2xl border border-gray-100 shadow-sm p-3">
-            <OpdGeneratorTab />
+            <OpdGeneratorTab
+              settingsRevision={opdTemplateSettingsRevision}
+              onOpdFieldConfigSaved={() => setOpdTemplateSettingsRevision((v) => v + 1)}
+            />
           </div>
         )}
         {tab === 'tv' && (
@@ -11178,25 +12074,57 @@ function ReceptionSettingsSection({ rooms, setRooms, tvGroups, setTvGroups }) {
 // ─── A4 Payment Slip (Advance / Service) ─────────────────────────────────────
 function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) {
   const slipProfile = getPaymentSlipProfile()
+  const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
 
+  const receiptLine = buildPaymentSlipReceiptLine(data)
+  const label =
+    type === 'refund'
+      ? 'REFUND RECEIPT'
+      : type === 'advance'
+        ? 'ADVANCE PAYMENT RECEIPT'
+        : type === 'charge' && receiptLine.line_total < 0
+          ? 'DISCOUNT RECEIPT'
+          : type === 'charge'
+            ? 'CHARGE RECEIPT'
+            : 'IPD PAYMENT RECEIPT'
+
+  function triggerPrint() {
+    const runPrint = () => window.print()
+    if (!logoUrl) {
+      runPrint()
+      return
+    }
+    const img = document.querySelector('#__receipt_root .hosp-logo-print')
+    if (!img || img.complete) {
+      runPrint()
+      return
+    }
+    img.onload = runPrint
+    img.onerror = runPrint
+  }
+
   useEffect(() => {
     if (viewOnly) return undefined
-    const timer = setTimeout(() => window.print(), 800)
+    let cancelled = false
+    const runPrint = () => {
+      if (!cancelled) triggerPrint()
+    }
+    const timer = setTimeout(runPrint, 800)
     function after() { onClose() }
     window.addEventListener('afterprint', after)
-    return () => { clearTimeout(timer); window.removeEventListener('afterprint', after) }
-  }, [viewOnly, onClose])
+    return () => { cancelled = true; clearTimeout(timer); window.removeEventListener('afterprint', after) }
+  }, [viewOnly, onClose, logoUrl])
 
-  const label = type === 'advance' ? 'ADVANCE PAYMENT RECEIPT' : 'IPD PAYMENT RECEIPT'
   const receiptStamp = formatReceiptDateTime(data.paid_at || new Date())
 
   const isCredit = data.mode === 'credit'
-  const totalLabel = isCredit ? 'TOTAL DUE' : 'TOTAL PAID'
-  const totalColor = isCredit ? '#b45309' : '#16a34a'
-  const totalBg = isCredit ? '#fffbeb' : '#f0fdf4'
+  const isRefund = type === 'refund'
+  const totalLabel = isRefund ? 'TOTAL REFUNDED' : isCredit ? 'TOTAL DUE' : 'TOTAL PAID'
+  const totalColor = isRefund ? '#2563eb' : isCredit ? '#b45309' : '#16a34a'
+  const totalBg = isRefund ? '#eff6ff' : isCredit ? '#fffbeb' : '#f0fdf4'
 
   const content = (
     <div id="__receipt_root" className="fixed inset-0 z-[600] bg-white overflow-y-auto print:static print:h-auto print:overflow-visible print:bg-transparent">
@@ -11204,7 +12132,7 @@ function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) 
         {viewOnly && (
           <button
             type="button"
-            onClick={() => window.print()}
+            onClick={triggerPrint}
             className="shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-xl font-bold text-sm transition-colors inline-flex items-center gap-1.5"
           >
             <Printer sx={{ fontSize: 18 }} /> Print
@@ -11213,13 +12141,23 @@ function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) 
         <button type="button" onClick={onClose} className="shrink-0 bg-gray-100 hover:bg-gray-200 text-gray-700 px-5 py-2 rounded-xl font-bold text-sm transition-colors">✕ Close</button>
       </div>
 
-      <div className="shadow-2xl print:shadow-none" style={{ width: '210mm', height: '148.5mm', margin: '0 auto', background: '#fff', color: '#111', fontFamily: 'Arial, sans-serif', padding: '10mm 12mm', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', borderBottom: '2px dashed #aaa' }}>
+      <div className="shadow-2xl print:shadow-none" style={{ width: '210mm', minHeight: '148.5mm', margin: '0 auto', background: '#fff', color: '#111', fontFamily: 'Arial, sans-serif', padding: '10mm 12mm', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', borderBottom: '2px dashed #aaa' }}>
         
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '2px solid #111', paddingBottom: '3mm', marginBottom: '4mm' }}>
-           <div>
-             <p style={{ fontSize: 24, fontWeight: 900, color: '#1a6b3f', margin: 0 }}>{hospitalName}</p>
-             <p style={{ fontSize: 9, color: '#555', letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>Inpatient Services Receipt</p>
+           <div style={{ display: 'flex', alignItems: 'center', gap: '3mm', minWidth: 0 }}>
+             {logoUrl ? (
+               <img
+                 src={logoUrl}
+                 alt=""
+                 className="hosp-logo-print"
+                 style={{ height: '14mm', maxWidth: '28mm', objectFit: 'contain', flexShrink: 0 }}
+               />
+             ) : null}
+             <div style={{ minWidth: 0 }}>
+               <p style={{ fontSize: 24, fontWeight: 900, color: '#1a6b3f', margin: 0 }}>{hospitalName}</p>
+               <p style={{ fontSize: 9, color: '#555', letterSpacing: 1, textTransform: 'uppercase', fontWeight: 700 }}>Inpatient Services Receipt</p>
+             </div>
            </div>
            <div style={{ textAlign: 'right', fontSize: 10, color: '#333' }}>
              <p><strong>{address}</strong></p>
@@ -11228,12 +12166,29 @@ function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) 
            </div>
         </div>
 
-        <p style={{ textAlign: 'center', fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 2, borderBottom: '1px solid #111', paddingBottom: '2mm', marginBottom: '4mm' }}>{label}</p>
+        <p
+          style={{
+            textAlign: 'center',
+            fontSize: 13,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: 2,
+            color: isRefund ? '#1d4ed8' : '#111',
+            borderBottom: '1px solid #111',
+            paddingBottom: '2mm',
+            marginBottom: '4mm',
+          }}
+        >
+          {label}
+        </p>
 
         {/* Info Grid */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '2mm 5mm', marginBottom: '4mm', fontSize: '11px' }}>
           {[
             ['Patient Name', (admission.patient_name || '—').toUpperCase()],
+            ['Doctor', (admission.assigned_doctor_name || '').trim()
+              ? `Dr. ${(admission.assigned_doctor_name || '').trim()}`
+              : '—'],
             ['UHID', admission.patient_uhid || '—'],
             ['IPD ID', admission.ipd_no || '—'],
             ['Ward / Room', formatWardRoomReceiptLabel(admission.ward_name, admission.room_name)],
@@ -11254,19 +12209,23 @@ function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) 
           <thead>
             <tr style={{ background: '#1a6b3f', color: '#fff' }}>
               <th style={{ padding: '6px 10px', textAlign: 'left', textTransform: 'uppercase' }}>Description</th>
-              <th style={{ padding: '6px 10px', textAlign: 'right', textTransform: 'uppercase', width: '30%' }}>Amount (₹)</th>
+              <th style={{ padding: '6px 10px', textAlign: 'center', textTransform: 'uppercase', width: '12%' }}>Qty</th>
+              <th style={{ padding: '6px 10px', textAlign: 'right', textTransform: 'uppercase', width: '18%' }}>Rate (₹)</th>
+              <th style={{ padding: '6px 10px', textAlign: 'right', textTransform: 'uppercase', width: '20%' }}>Amount (₹)</th>
             </tr>
           </thead>
           <tbody>
             <tr style={{ borderBottom: '1.5px solid #111' }}>
-              <td style={{ padding: '10px' }}>{data.description || 'IPD Service / Advance Payment'}</td>
-              <td style={{ padding: '10px', textAlign: 'right', fontWeight: 700 }}>{parseFloat(data.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td style={{ padding: '10px' }}>{receiptLine.description}</td>
+              <td style={{ padding: '10px', textAlign: 'center', fontWeight: 700 }}>{receiptLine.quantity}</td>
+              <td style={{ padding: '10px', textAlign: 'right', fontWeight: 700 }}>{receiptLine.unit_price.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td style={{ padding: '10px', textAlign: 'right', fontWeight: 700 }}>{receiptLine.line_total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
             </tr>
           </tbody>
           <tfoot>
             <tr style={{ background: totalBg }}>
-              <td style={{ padding: '8px 10px', fontWeight: 800 }}>{totalLabel}</td>
-              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 900, fontSize: 14, color: totalColor }}>₹ {parseFloat(data.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td colSpan={3} style={{ padding: '8px 10px', fontWeight: 800 }}>{totalLabel}</td>
+              <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 900, fontSize: 14, color: totalColor }}>₹ {receiptLine.line_total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
             </tr>
           </tfoot>
         </table>
@@ -11301,13 +12260,346 @@ function PrintMiniReceipt({ admission, data, type, onClose, viewOnly = false }) 
 
 function isIpdLedgerGroupedRowCancelled(row) {
   if (!row) return false
-  if (String(row.description || '').includes('(Cancelled)')) return true
-  return (row.events || []).some(e => String(e?.invoice_status || '').toLowerCase() === 'cancelled')
+  const events = row.events || []
+  if (events.length) {
+    return events.every((e) => String(e?.invoice_status || '').toLowerCase() === 'cancelled')
+  }
+  return String(row.description || '').includes('(Cancelled)')
+}
+
+function buildIpdBillLineItems(ledger) {
+  if (!ledger) return []
+  const items = []
+
+  for (const row of ledger.grouped_charges || []) {
+    if (isIpdLedgerGroupedRowCancelled(row)) continue
+    const rowTotal = parseFloat(row.total_amount || 0)
+    if (!Number.isFinite(rowTotal) || rowTotal <= 0) continue
+
+    const events = Array.isArray(row.events) ? row.events : []
+    const positiveEvents = events.filter(
+      (ev) =>
+        parseFloat(ev?.price || 0) > 0
+        && String(ev?.invoice_status || '').toLowerCase() !== 'cancelled',
+    )
+    if (positiveEvents.length) {
+      for (const ev of positiveEvents) {
+        const totalAmount = parseFloat(ev.price || 0)
+        if (!Number.isFinite(totalAmount) || totalAmount <= 0) continue
+        const quantity = parseFloat(ev.quantity || 0)
+        const resolvedQty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1
+        const fromEventUnit = parseFloat(ev.unit_price)
+        const unitPrice = Number.isFinite(fromEventUnit) && fromEventUnit > 0
+          ? fromEventUnit
+          : (resolvedQty > 0 ? totalAmount / resolvedQty : totalAmount)
+        items.push({
+          description: String(ev.name || row.description || 'Service').trim() || 'Service',
+          quantity: resolvedQty,
+          unit_price: unitPrice,
+          total_amount: totalAmount,
+        })
+      }
+      continue
+    }
+
+    const quantity = parseFloat(row.quantity || 0)
+    const resolvedQty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1
+    const unitPrice = resolvedQty > 0 ? rowTotal / resolvedQty : rowTotal
+    items.push({
+      description: String(row.description || 'Service').trim() || 'Service',
+      quantity: resolvedQty,
+      unit_price: unitPrice,
+      total_amount: rowTotal,
+    })
+  }
+
+  for (const charge of ledger.charges || []) {
+    if (charge.type === 'room_rent') {
+      if (String(charge.invoice_status || '').toLowerCase() === 'cancelled') continue
+      const totalAmount = parseFloat(charge.amount || 0)
+      if (!Number.isFinite(totalAmount) || totalAmount <= 0) continue
+      const quantity = parseFloat(charge.quantity || 0)
+      const resolvedQty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1
+      const fromApiUnit = parseFloat(charge.unit_price)
+      const unitPrice = Number.isFinite(fromApiUnit) && fromApiUnit > 0
+        ? fromApiUnit
+        : (resolvedQty > 0 ? totalAmount / resolvedQty : totalAmount)
+      items.push({
+        description: String(charge.description || 'Room Rent').trim() || 'Room Rent',
+        quantity: resolvedQty,
+        unit_price: unitPrice,
+        total_amount: totalAmount,
+      })
+    }
+  }
+
+  return items.sort((a, b) => a.description.localeCompare(b.description))
+}
+
+function buildIpdBillDiscountLines(ledger) {
+  if (!ledger) return []
+  const lines = []
+  const seenEventIds = new Set()
+
+  for (const row of ledger.grouped_charges || []) {
+    if (isIpdLedgerGroupedRowCancelled(row)) continue
+    const rowTotal = parseFloat(row.total_amount || 0)
+
+    const events = Array.isArray(row.events) ? row.events : []
+    const negativeEvents = events.filter((ev) => parseFloat(ev?.price || 0) < 0)
+    if (negativeEvents.length) {
+      for (const ev of negativeEvents) {
+        const amount = Math.abs(parseFloat(ev.price || 0))
+        if (!amount) continue
+        if (ev.id) seenEventIds.add(String(ev.id))
+        lines.push({
+          description: String(ev.name || row.description || 'Discount').trim() || 'Discount',
+          amount,
+          date: ev.date || null,
+        })
+      }
+      continue
+    }
+
+    if (!Number.isFinite(rowTotal) || rowTotal >= 0) continue
+
+    lines.push({
+      description: String(row.description || 'Discount').trim() || 'Discount',
+      amount: Math.abs(rowTotal),
+      date: null,
+    })
+  }
+
+  for (const charge of ledger.charges || []) {
+    if (charge.type !== 'charge') continue
+    if (String(charge.invoice_status || '').toLowerCase() === 'cancelled') continue
+    const chargeId = String(charge.id || charge.invoice_id || '').trim()
+    if (chargeId && seenEventIds.has(chargeId)) continue
+    const amount = parseFloat(charge.amount || 0)
+    if (!Number.isFinite(amount) || amount >= 0) continue
+    lines.push({
+      description: String(charge.description || 'Discount').trim() || 'Discount',
+      amount: Math.abs(amount),
+      date: charge.date || null,
+    })
+  }
+
+  return lines.sort((a, b) => {
+    const da = a.date ? new Date(a.date).getTime() : 0
+    const db = b.date ? new Date(b.date).getTime() : 0
+    return da - db
+  })
+}
+
+function parseAdmissionMoney(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
+function isAllowedMoneyInput(value) {
+  return value === '' || /^\d*\.?\d{0,2}$/.test(String(value))
+}
+
+function parseMoneyInput(value) {
+  const normalized = String(value ?? '').trim().replace(/,/g, '')
+  if (!normalized) return NaN
+  const amount = Number(normalized)
+  return Number.isFinite(amount) ? amount : NaN
+}
+
+function resolveAdmissionApiRow(data) {
+  return data?.data ?? data?.entity ?? data ?? {}
+}
+
+function normalizeDischargeBillingSummary(summaryRow, ledgerRow) {
+  const totalBilled = parseAdmissionMoney(ledgerRow.total_charges ?? summaryRow.total_billed)
+  const totalPaid = parseAdmissionMoney(ledgerRow.total_paid ?? summaryRow.total_paid)
+  const roomTotal = parseAdmissionMoney(summaryRow.room_total ?? ledgerRow.room_rent)
+  const hasSignedBalance =
+    ledgerRow.balance_due != null && String(ledgerRow.balance_due).trim() !== ''
+  const netBalance = hasSignedBalance
+    ? parseAdmissionMoney(ledgerRow.balance_due)
+    : (totalBilled - totalPaid)
+  const amountDue = Math.max(0, netBalance)
+  const refundDue = Math.max(0, -netBalance)
+  const outstanding = amountDue
+  return {
+    ...summaryRow,
+    total_billed: totalBilled,
+    total_paid: totalPaid,
+    outstanding,
+    net_balance: netBalance,
+    amount_due: amountDue,
+    refund_due: refundDue,
+    room_total: roomTotal,
+    total_services: parseAdmissionMoney(
+      summaryRow.total_services ?? Math.max(0, totalBilled - roomTotal),
+    ),
+  }
+}
+
+function mapDischargeSettlementMode(mode) {
+  const normalized = String(mode || 'cash').toLowerCase()
+  if (normalized === 'cash' || normalized === 'upi' || normalized === 'other') return normalized
+  return 'other'
+}
+
+function mapIpdChargePaymentMode(mode) {
+  const normalized = String(mode || 'cash').toLowerCase()
+  if (normalized === 'credit') return 'credit'
+  if (normalized === 'cash' || normalized === 'upi') return normalized
+  return 'other'
+}
+
+function consolidatePaymentSlipItems(items) {
+  const map = new Map()
+  for (const raw of items || []) {
+    const description = String(raw?.description || '').trim()
+    if (!description) continue
+    const unitPrice = Number(parseFloat(raw?.unit_price))
+    const quantity = Number(parseFloat(raw?.quantity))
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) continue
+    if (!Number.isFinite(quantity) || quantity <= 0) continue
+    const key = `${description.toLowerCase()}::${unitPrice.toFixed(4)}`
+    const existing = map.get(key)
+    if (existing) {
+      existing.quantity += quantity
+      if (!existing.category && raw?.category) existing.category = raw.category
+    } else {
+      map.set(key, {
+        description,
+        unit_price: unitPrice,
+        quantity,
+        category: String(raw?.category || '').trim(),
+      })
+    }
+  }
+  return Array.from(map.values()).map((row) => ({
+    ...row,
+    line_total: row.quantity * row.unit_price,
+  }))
+}
+
+function resolvePaymentSlipLineTotal(item) {
+  const lineTotal = Number(parseFloat(item?.line_total))
+  if (Number.isFinite(lineTotal)) return lineTotal
+  const amount = Number(parseFloat(item?.amount))
+  if (Number.isFinite(amount)) return amount
+  const quantity = Number(parseFloat(item?.quantity))
+  const unitPrice = Number(parseFloat(item?.unit_price))
+  if (Number.isFinite(quantity) && Number.isFinite(unitPrice)) return quantity * unitPrice
+  return 0
+}
+
+function buildPaymentSlipReceiptLine(data) {
+  const quantity = Math.max(1, Number(parseFloat(data?.quantity)) || 1)
+  const lineAmount = resolvePaymentSlipLineTotal(data)
+  const unitPrice = Number(parseFloat(data?.unit_price))
+  const resolvedUnit = Number.isFinite(unitPrice) && unitPrice > 0
+    ? unitPrice
+    : (quantity > 0 ? lineAmount / quantity : lineAmount)
+  return {
+    description: String(data?.description || 'Service').trim() || 'Service',
+    quantity,
+    unit_price: resolvedUnit,
+    line_total: lineAmount,
+  }
+}
+
+function buildPaymentSlipItemsForPayment(payment, invoiceDetails) {
+  const paymentAmount = Math.max(0, Number(parseFloat(payment?.amount)) || 0)
+  const rawItems = Array.isArray(invoiceDetails?.items) ? invoiceDetails.items : []
+  const consolidated = consolidatePaymentSlipItems(rawItems)
+  if (!paymentAmount) {
+    return consolidated.map((it) => ({
+      ...it,
+      line_total: resolvePaymentSlipLineTotal(it),
+    }))
+  }
+  if (!consolidated.length) {
+    return [{
+      description: payment?.transaction_reference || payment?.receipt_no || 'Payment',
+      quantity: 1,
+      unit_price: paymentAmount,
+      line_total: paymentAmount,
+    }]
+  }
+  const invoiceTotal = consolidated.reduce((sum, it) => sum + resolvePaymentSlipLineTotal(it), 0)
+  if (consolidated.length === 1) {
+    const item = consolidated[0]
+    const unitPrice = Number(parseFloat(item.unit_price)) || 0
+    const quantity = unitPrice > 0 ? paymentAmount / unitPrice : 1
+    return [{
+      description: item.description,
+      quantity,
+      unit_price: unitPrice > 0 ? unitPrice : paymentAmount,
+      line_total: paymentAmount,
+    }]
+  }
+  let remaining = paymentAmount
+  return consolidated.map((item, idx) => {
+    const lineBase = resolvePaymentSlipLineTotal(item)
+    const lineTotal = idx === consolidated.length - 1
+      ? remaining
+      : (invoiceTotal > 0 ? paymentAmount * (lineBase / invoiceTotal) : 0)
+    remaining -= lineTotal
+    const unitPrice = Number(parseFloat(item.unit_price)) || 0
+    const quantity = unitPrice > 0 ? lineTotal / unitPrice : (Number(parseFloat(item.quantity)) || 1)
+    return {
+      description: item.description,
+      quantity,
+      unit_price: unitPrice > 0 ? unitPrice : lineTotal,
+      line_total: Math.round(lineTotal * 100) / 100,
+    }
+  })
+}
+
+function buildIpdLedgerReceiptData(ev, rowDescription) {
+  const quantity = Math.max(0, Number(parseFloat(ev?.quantity)) || 0)
+  const unitPrice = Number(parseFloat(ev?.unit_price))
+  const paidAmount = Number(parseFloat(ev?.amount ?? ev?.paid_amount))
+  const lineAmount = Number.isFinite(paidAmount) && paidAmount > 0
+    ? paidAmount
+    : Number(parseFloat(ev?.price) || 0)
+  const resolvedUnit = Number.isFinite(unitPrice) && unitPrice > 0
+    ? unitPrice
+    : (quantity > 0 ? lineAmount / quantity : lineAmount)
+  const resolvedQty = resolvedUnit > 0 ? lineAmount / resolvedUnit : (quantity || 1)
+  return {
+    amount: lineAmount,
+    quantity: resolvedQty,
+    unit_price: resolvedUnit,
+    mode: ev?.payment_mode || 'other',
+    invoice_no: ev?.invoice_no,
+    slip_number: ev?.slip_number || '',
+    description: ev?.name || rowDescription || 'Service',
+    paid_at: ev?.date,
+  }
+}
+
+const DISCHARGE_NAV_ANCHOR_OFFSET = 16
+
+function dischargeSectionTopInContainer(scrollRoot, el) {
+  return el.getBoundingClientRect().top - scrollRoot.getBoundingClientRect().top + scrollRoot.scrollTop
+}
+
+function resolveActiveDischargeSection(scrollRoot, navItems) {
+  if (!scrollRoot || !navItems?.length) return ''
+  const anchor = scrollRoot.scrollTop + DISCHARGE_NAV_ANCHOR_OFFSET
+  let active = navItems[0].id
+  for (const { id } of navItems) {
+    const el = scrollRoot.querySelector(`#${id}`)
+    if (!el) continue
+    if (dischargeSectionTopInContainer(scrollRoot, el) <= anchor + 1) active = id
+  }
+  return active
 }
 
 // ─── IPD Ledger Modal ────────────────────────────────────────────────────────
-function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDischargeInitiated, autoOpenDischargeEdit = false }) {
+function AdmissionLedgerModal({ admission, onClose, onDischarged, autoDischarge = false, onDischargeInitiated, autoOpenDischargeEdit = false }) {
   const [ledger, setLedger]         = useState(null)
+  const [chargeCatalog, setChargeCatalog] = useState([])
+  const [quickServices, setQuickServices] = useState([])
   const [loading, setLoading]       = useState(true)
   const [mode, setMode]             = useState('charge') // 'charge' | 'receive' | 'discount'
   const [submitting, setSubmitting] = useState(false)
@@ -11324,13 +12616,20 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   const [ledgerSavingPayment, setLedgerSavingPayment] = useState(false)
   const [ledgerEditingCharge, setLedgerEditingCharge] = useState(null)
   const [ledgerSavingCharge, setLedgerSavingCharge] = useState(false)
+  const [ledgerCancellingRoomRent, setLedgerCancellingRoomRent] = useState(false)
 
   const paidReceipts = useMemo(() => {
     if (!ledger) return []
-    return (ledger.payments || []).map(p => {
+    return (ledger.payments || []).filter(p => {
+      if (p?.type === 'pharmacy_payment') return false
+      const rawId = p?.id != null ? String(p.id) : ''
+      return !rawId.startsWith('pharmacy-paid-')
+    }).map(p => {
       const desc = p?.description || ''
       const upper = String(desc || '').toUpperCase()
-      const isAdvance = upper.includes('ADVANCE') || String(p?.invoice_no || '').toUpperCase().includes('IPDADV-')
+      const invNo = String(p?.invoice_no || '').toUpperCase()
+      const isRefund = invNo.includes('IPDREF') || upper.includes('REFUND') || parseFloat(p?.amount || 0) < 0
+      const isAdvance = !isRefund && (upper.includes('ADVANCE') || invNo.includes('IPDADV-'))
       const rawId = p?.id != null ? String(p.id) : ''
       const isPharmacy = p?.type === 'pharmacy_payment' || rawId.startsWith('pharmacy-paid-')
       const rowKind = isPharmacy ? 'pharmacy_payment' : 'payment'
@@ -11352,7 +12651,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         invoice_no: p?.invoice_no || '',
         slip_number: p?.slip_number || '',
         mode,
-        receiptKind: isAdvance ? 'advance' : 'charge',
+        receiptKind: isRefund ? 'refund' : isAdvance ? 'advance' : 'charge',
       }
     }).sort((a, b) => {
       const voidA = a.rowKind === 'pharmacy_payment' ? false : (a.status === 'cancelled' || String(a.invoice_status || '').toLowerCase() === 'cancelled')
@@ -11378,7 +12677,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       ...rooms.map(row => ({ kind: 'room', row })),
       ...cancelled.map(row => ({ kind: 'group', row })),
     ]
-  }, [ledger?.grouped_charges, ledger?.charges])
+  }, [ledger?.grouped_charges, ledger?.charges, ledger?.payments])
 
   // Discharge State
   const [journey, setJourney] = useState(null) // { admission, step: 'form'|'billing' }
@@ -11431,6 +12730,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   const autoOpenedDischargeEditRef = useRef(false)
   const [dischargePreviewData, setDischargePreviewData] = useState(null)
   const dischargeScrollRootRef = useRef(null)
+  const dischargeNavLockUntilRef = useRef(0)
   const [activeDischargeSection, setActiveDischargeSection] = useState('')
 
   const dischargeSectionNavItems = useMemo(() => {
@@ -11452,6 +12752,36 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     ]
     return [...head, ...death, ...tail]
   }, [summary.discharge_type])
+
+  const scrollDischargeToSection = useCallback((sectionId) => {
+    const scrollRoot = dischargeScrollRootRef.current
+    if (!scrollRoot || !sectionId) return
+    const el = scrollRoot.querySelector(`#${sectionId}`)
+    if (!el) return
+
+    const expandedDetails = el.tagName === 'DETAILS' && !el.open
+    if (expandedDetails) el.open = true
+
+    dischargeNavLockUntilRef.current = Date.now() + (expandedDetails ? 1200 : 1000)
+    setActiveDischargeSection(sectionId)
+
+    const runScroll = () => {
+      const top = Math.max(0, dischargeSectionTopInContainer(scrollRoot, el) - DISCHARGE_NAV_ANCHOR_OFFSET)
+      scrollRoot.scrollTo({ top, behavior: 'smooth' })
+    }
+
+    if (expandedDetails) {
+      requestAnimationFrame(() => requestAnimationFrame(runScroll))
+    } else {
+      runScroll()
+    }
+
+    window.setTimeout(() => {
+      dischargeNavLockUntilRef.current = 0
+      const synced = resolveActiveDischargeSection(scrollRoot, dischargeSectionNavItems)
+      if (synced) setActiveDischargeSection(synced)
+    }, expandedDetails ? 1250 : 1050)
+  }, [dischargeSectionNavItems])
 
   // Receive Money form state (renamed from Capture Advance)
   const [advAmount, setAdvAmount] = useState('')
@@ -11479,6 +12809,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
   const dsInp = 'w-full [box-sizing:border-box] bg-white border border-slate-300 hover:border-slate-400 shadow-sm rounded-lg px-4 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none [&[type=date]]:pr-10 [&[type=time]]:pr-11 [&[type=datetime-local]]:pr-10'
   const dsLbl = 'text-[10px] font-black text-slate-400 uppercase tracking-wider mb-1 block'
+  const { getSuggestions } = useDischargeFieldCatalog(Boolean(journey?.step === 'form'))
   const setVital = (k, v) => setSummary(s => ({
     ...s,
     vitals_at_discharge: { ...emptyVitals(), ...(s.vitals_at_discharge || {}), [k]: v },
@@ -11619,7 +12950,11 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     }
   }
 
-  useEffect(() => { fetchLedger() }, [admission.id])
+  useEffect(() => {
+    fetchLedger()
+    fetchChargeCatalog()
+    fetchQuickServices()
+  }, [admission.id])
 
   useEffect(() => {
     if (autoDischarge && ledger && !loading && !journey) {
@@ -11638,48 +12973,31 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   useEffect(() => {
     if (!journey || journey.step !== 'form') {
       setActiveDischargeSection('')
+      dischargeNavLockUntilRef.current = 0
       return
     }
     const root = dischargeScrollRootRef.current
     if (!root) return
 
-    const ids = dischargeSectionNavItems.map((i) => i.id)
+    const first = dischargeSectionNavItems[0]?.id
+    if (first) setActiveDischargeSection(first)
+
     let raf = 0
-    const onObserve = (entries) => {
+    const onScroll = () => {
+      if (Date.now() < dischargeNavLockUntilRef.current) return
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
-        const visible = entries.filter((e) => e.isIntersecting && e.target?.id)
-        if (!visible.length) return
-        const rootRect = root.getBoundingClientRect()
-        const anchorY = rootRect.top + Math.min(100, rootRect.height * 0.2)
-        let bestId = ''
-        let bestDist = Infinity
-        visible.forEach((e) => {
-          const t = e.target.getBoundingClientRect().top
-          const d = Math.abs(t - anchorY)
-          if (d < bestDist) {
-            bestDist = d
-            bestId = e.target.id
-          }
-        })
-        if (bestId) setActiveDischargeSection(bestId)
+        const active = resolveActiveDischargeSection(root, dischargeSectionNavItems)
+        if (active) setActiveDischargeSection(active)
       })
     }
 
-    const observer = new IntersectionObserver(onObserve, {
-      root,
-      threshold: [0, 0.02, 0.06, 0.12, 0.25, 0.5, 1],
-      rootMargin: '-10% 0px -56% 0px',
-    })
-
-    ids.forEach((id) => {
-      const el = root.querySelector(`#${CSS.escape(id)}`)
-      if (el) observer.observe(el)
-    })
+    root.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
 
     return () => {
       cancelAnimationFrame(raf)
-      observer.disconnect()
+      root.removeEventListener('scroll', onScroll)
     }
   }, [journey?.step, journey?.admission?.id, dischargeSectionNavItems])
 
@@ -11690,6 +13008,24 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       setLedger(data)
     } catch { toast.error('Failed to load ledger') }
     finally { setLoading(false) }
+  }
+
+  async function fetchChargeCatalog() {
+    try {
+      const { data } = await api.get('/ipd-admissions/charge-catalog/')
+      setChargeCatalog(Array.isArray(data?.services) ? data.services : [])
+    } catch {
+      setChargeCatalog([])
+    }
+  }
+
+  async function fetchQuickServices() {
+    try {
+      const { services } = await loadPaymentQuickServices()
+      setQuickServices(services || DEFAULT_QUICK_SERVICES)
+    } catch {
+      setQuickServices(DEFAULT_QUICK_SERVICES)
+    }
   }
 
   async function openLedgerEditPayment(paymentId) {
@@ -11783,8 +13119,11 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       return
     }
     const qty = parseFloat(String(ev.quantity || '1')) || 1
+    const fromApiUnit = parseFloat(String(ev.unit_price))
     const price = parseFloat(String(ev.price || '0')) || 0
-    const unit = qty > 0 ? price / qty : price
+    const unit = Number.isFinite(fromApiUnit) && fromApiUnit > 0
+      ? fromApiUnit
+      : (qty > 0 ? price / qty : price)
     setLedgerEditingCharge({
       invoice_id: ev.invoice_id,
       description: ev.name || descriptionFallback || 'Service',
@@ -11829,19 +13168,59 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     }
   }
 
+  async function cancelRoomRent() {
+    const currentAmount = parseFloat(String(ledger?.room_rent || '0')) || 0
+    if (currentAmount <= 0) return
+    if (!window.confirm('Cancel bed charges for this admission? Room rent will be set to ₹0.')) return
+    setLedgerCancellingRoomRent(true)
+    try {
+      await api.patch(`/ipd-admissions/${admission.id}/update-charge/`, {
+        invoice_id: 'room_rent',
+        amount: 0,
+      })
+      toast.success('Bed charges cancelled')
+      setLedgerEditingCharge(null)
+      await fetchLedger()
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to cancel bed charges'))
+    } finally {
+      setLedgerCancellingRoomRent(false)
+    }
+  }
+
   async function handleLedgerSaveCharge(e) {
     e.preventDefault()
     if (!ledgerEditingCharge?.invoice_id) return
+    const itemName = String(ledgerEditingCharge.description || '').trim()
+    if (!itemName) {
+      toast.error('Item name is required')
+      return
+    }
     setLedgerSavingCharge(true)
     try {
       const isRoom = ledgerEditingCharge.invoice_id === 'room_rent'
-      const payload = { invoice_id: ledgerEditingCharge.invoice_id }
+      const payload = {
+        invoice_id: ledgerEditingCharge.invoice_id,
+        description: itemName,
+      }
       if (isRoom) {
-        payload.unit_price = parseFloat(String(ledgerEditingCharge.unit_price || '0'))
+        const daily = parseFloat(String(ledgerEditingCharge.unit_price || '0'))
+        const days = Math.max(1, parseInt(String(ledgerEditingCharge.quantity || ledger?.days || '1'), 10) || 1)
+        if (!Number.isFinite(daily) || daily < 0) {
+          toast.error('Per-day bed charge must be zero or greater')
+          return
+        }
+        payload.unit_price = daily
+        payload.quantity = days
       } else {
-        payload.amount = parseFloat(String(ledgerEditingCharge.amount || '0'))
-        payload.quantity = parseFloat(String(ledgerEditingCharge.quantity || '1'))
-        payload.unit_price = parseFloat(String(ledgerEditingCharge.unit_price || '0'))
+        const quantity = parseFloat(String(ledgerEditingCharge.quantity || '1'))
+        const unitPrice = parseFloat(String(ledgerEditingCharge.unit_price || '0'))
+        if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice <= 0) {
+          toast.error('Quantity and unit price must be greater than zero')
+          return
+        }
+        payload.quantity = quantity
+        payload.unit_price = unitPrice
       }
       await api.patch(`/ipd-admissions/${admission.id}/update-charge/`, payload)
       toast.success(isRoom ? 'Room rent updated' : 'Charge updated')
@@ -11904,7 +13283,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     try {
       const { data } = await api.get(`/summaries/?admission_id=${admissionId}&limit=20`)
       const list = Array.isArray(data) ? data : (data?.results ?? data?.data ?? [])
-      const existing = list[0]
+      const existing = [...list].sort(compareDischargeSummariesNewestFirst)[0]
       if (!existing) return
       const v = existing.vitals_at_discharge && typeof existing.vitals_at_discharge === 'object'
         ? { ...emptyVitals(), ...existing.vitals_at_discharge }
@@ -12181,7 +13560,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       created_at: nowIso,
       total_billed: billing?.total_billed ?? summary.total_billed ?? 0,
       total_paid: billing?.total_paid ?? summary.total_paid ?? 0,
-      outstanding_balance: billing?.outstanding ?? summary.outstanding_balance ?? 0,
+      outstanding_balance: (journey?.admission?.scheme || admission?.scheme)
+        ? 0
+        : (billing?.net_balance ?? billing?.outstanding ?? summary.outstanding_balance ?? 0),
       medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
       investigation_rows: Array.isArray(summary.investigation_rows) ? summary.investigation_rows : [],
     }
@@ -12195,37 +13576,54 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
   }
 
   async function refreshBillingSummary(admissionId = journey?.admission?.id) {
-    if (!admissionId) return
-    const { data } = await api.get(`/summaries/billing-summary/?admission_id=${admissionId}`)
-    setBilling(data)
+    if (!admissionId) return null
+    try {
+      const [summaryRes, ledgerRes] = await Promise.all([
+        api.get(`/summaries/billing-summary/?admission_id=${admissionId}`),
+        api.get(`/ipd-admissions/${admissionId}/ledger/`),
+      ])
+      const next = normalizeDischargeBillingSummary(
+        resolveAdmissionApiRow(summaryRes.data),
+        resolveAdmissionApiRow(ledgerRes.data),
+      )
+      setBilling(next)
+      return next
+    } catch {
+      return billing
+    }
   }
 
   async function handleDueSettlement() {
-    const outstanding = Number(billing?.outstanding || 0)
+    const admissionId = journey?.admission?.id || admission.id
+    let outstanding = parseAdmissionMoney(billing?.amount_due ?? billing?.outstanding)
+    if (outstanding <= 0) {
+      const latest = await refreshBillingSummary(admissionId)
+      outstanding = parseAdmissionMoney(latest?.amount_due ?? latest?.outstanding)
+    }
     if (outstanding <= 0) {
       toast.success('No pending due to settle')
       return
     }
     setSettleSubmitting(true)
     try {
-      const { data } = await api.post(`/ipd-admissions/${admission.id}/capture-advance/`, {
-        amount: outstanding,
-        payment_mode: settleMode,
-        reference: settleRef
+      const { data } = await api.post(`/ipd-admissions/${admissionId}/capture-advance/`, {
+        amount: outstanding.toFixed(2),
+        payment_mode: mapDischargeSettlementMode(settleMode),
+        reference: settleRef,
       })
+      const paymentRow = resolveAdmissionApiRow(data)
+      await Promise.all([refreshBillingSummary(admissionId), fetchLedger()])
       toast.success('Due settled successfully')
-      await refreshBillingSummary(admission.id)
-      fetchLedger()
       if (settlePrint) {
         setReceipt({
           type: 'advance',
           data: {
             amount: outstanding,
-            mode: settleMode,
-            invoice_no: data.invoice_no,
-            slip_number: data?.payment?.slip_number || '',
+            mode: mapDischargeSettlementMode(settleMode),
+            invoice_no: paymentRow.invoice_no,
+            slip_number: paymentRow?.payment?.slip_number || '',
             description: 'Final Settlement Payment',
-            paid_at: data?.payment?.paid_at || data?.payment?.created_at || undefined,
+            paid_at: paymentRow?.payment?.paid_at || paymentRow?.payment?.created_at || undefined,
           },
         })
       }
@@ -12237,13 +13635,65 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     }
   }
 
+  async function handleRefundSettlement() {
+    const admissionId = journey?.admission?.id || admission.id
+    let credit = parseAdmissionMoney(billing?.refund_due)
+    if (credit <= 0) {
+      const latest = await refreshBillingSummary(admissionId)
+      credit = parseAdmissionMoney(latest?.refund_due)
+    }
+    if (credit <= 0.009) {
+      toast.success('No refund to record')
+      return
+    }
+    setSettleSubmitting(true)
+    try {
+      const { data } = await api.post(`/ipd-admissions/${admissionId}/record-discharge-refund/`, {
+        amount: credit.toFixed(2),
+        payment_mode: mapDischargeSettlementMode(settleMode),
+        reference: settleRef,
+      })
+      const paymentRow = resolveAdmissionApiRow(data)
+      await Promise.all([refreshBillingSummary(admissionId), fetchLedger()])
+      toast.success('Refund recorded successfully')
+      if (settlePrint) {
+        setReceipt({
+          type: 'refund',
+          data: {
+            amount: credit,
+            mode: mapDischargeSettlementMode(settleMode),
+            invoice_no: paymentRow.invoice_no,
+            slip_number: paymentRow?.payment?.slip_number || '',
+            description: 'Discharge refund to patient',
+            paid_at: paymentRow?.payment?.paid_at || paymentRow?.payment?.created_at || undefined,
+          },
+        })
+      }
+      setSettleRef('')
+    } catch {
+      toast.error('Failed to record refund')
+    } finally {
+      setSettleSubmitting(false)
+    }
+  }
+
+  const isSchemePatient = !!(journey?.admission?.scheme || admission?.scheme)
+
   async function finalizeDischarge() {
-    if (!billing) {
+    const latestBilling = await refreshBillingSummary(journey?.admission?.id || admission.id)
+    if (!latestBilling) {
       toast.error('Billing details are not ready')
       return
     }
-    if (Number(billing.outstanding || 0) > 0) {
-      toast.error('Please clear pending due before discharge finalization.')
+    const net = parseAdmissionMoney(
+      latestBilling.net_balance ?? (latestBilling.total_billed - latestBilling.total_paid),
+    )
+    if (!isSchemePatient && Math.abs(net) > 0.009) {
+      toast.error(
+        net > 0.009
+          ? 'Please clear pending due before discharge finalization.'
+          : 'Please record the refund to the patient before discharge finalization.',
+      )
       return
     }
     setSubmitting(true)
@@ -12253,36 +13703,62 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       const payload = {
         admission: journey.admission.id,
         ...summary,
-        total_billed: billing.total_billed,
-        total_paid: billing.total_paid,
-        outstanding_balance: billing.outstanding,
+        total_billed: latestBilling.total_billed,
+        total_paid: latestBilling.total_paid,
+        outstanding_balance: isSchemePatient ? 0 : latestBilling.net_balance,
         medication_rows: rxItemsToMedicationRows(dischargeRxItems, DEFAULT_DOSAGE_PATTERNS, DEFAULT_TIMING_OPTIONS),
       }
       await api.post('/summaries/', payload)
       toast.success('Discharge finalized successfully!')
       setJourney(null)
-      onClose()
       window.dispatchEvent(new Event('refresh-admissions'))
-    } catch { toast.error('Failed to finalize discharge') }
+      if (typeof onDischarged === 'function') {
+        onDischarged()
+      } else {
+        onClose()
+      }
+    } catch (err) {
+      const detail = err?.response?.data?.detail
+      const firstFieldError = Object.values(err?.response?.data || {}).flat?.()?.[0]
+      toast.error(
+        typeof detail === 'string'
+          ? detail
+          : typeof firstFieldError === 'string'
+            ? firstFieldError
+            : 'Failed to finalize discharge',
+      )
+    }
     finally { setSubmitting(false) }
   }
 
   const updateBilling = (key, val) => {
     setBilling(prev => {
-      const next = { ...prev, [key]: Number(val) || 0 }
-      next.total_billed = next.total_services + next.room_total
-      next.outstanding = next.total_billed - next.total_paid
+      if (!prev) return prev
+      const next = { ...prev, [key]: parseAdmissionMoney(val) }
+      const tb = parseAdmissionMoney(next.total_services) + parseAdmissionMoney(next.room_total)
+      const tp = parseAdmissionMoney(next.total_paid)
+      const net = tb - tp
+      next.total_billed = tb
+      next.net_balance = net
+      next.amount_due = Math.max(0, net)
+      next.refund_due = Math.max(0, -net)
+      next.outstanding = next.amount_due
       return next
     })
   }
 
   async function handleAdvance(e) {
     e.preventDefault()
-    if (!advAmount) return
+    const amount = parseMoneyInput(advAmount)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast.error('Enter a valid amount greater than zero')
+      return
+    }
+    const amountText = String(amount)
     setSubmitting(true)
     try {
       const { data } = await api.post(`/ipd-admissions/${admission.id}/capture-advance/`, {
-        amount: advAmount, payment_mode: advMode, reference: advRef
+        amount: amountText, payment_mode: advMode, reference: advRef
       })
       toast.success('Payment captured')
       fetchLedger()
@@ -12290,7 +13766,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         setReceipt({
           type: 'advance',
           data: {
-            amount: advAmount,
+            amount: amountText,
             mode: advMode,
             invoice_no: data.invoice_no,
             slip_number: data?.payment?.slip_number || '',
@@ -12328,18 +13804,29 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
         unit_price: parseFloat(chgUnitPrice || 0),
         payment_mode: paymentMode,
       })
+      const chargeRow = resolveAdmissionApiRow(data)
       toast.success(chgStatus === 'paid' ? 'Charge saved & paid' : 'Charge added to bill')
       fetchLedger()
       if (chgPrint) {
+        const submittedQty = parseFloat(chgQty || 0)
+        const unitPrice = parseFloat(chgUnitPrice || 0)
+        const paymentAmount = Number(parseFloat(chargeRow?.payment?.amount))
+        const slipAmount = Number.isFinite(paymentAmount) && paymentAmount > 0 ? paymentAmount : total
+        const line = buildPaymentSlipReceiptLine({
+          description: chgDesc,
+          quantity: submittedQty,
+          unit_price: unitPrice,
+          amount: slipAmount,
+        })
         setReceipt({
           type: 'charge',
           data: {
-            amount: total,
+            ...line,
+            amount: line.line_total,
             mode: paymentMode,
-            invoice_no: data.invoice_no,
-            slip_number: data?.payment?.slip_number || '',
-            description: chgDesc,
-            paid_at: data?.payment?.paid_at || data?.payment?.created_at || undefined,
+            invoice_no: chargeRow.invoice_no,
+            slip_number: chargeRow?.payment?.slip_number || '',
+            paid_at: chargeRow?.payment?.paid_at || chargeRow?.payment?.created_at || undefined,
           },
         })
       }
@@ -12363,8 +13850,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
       toast.success('Discount applied')
       fetchLedger()
       setDiscReason(''); setDiscAmount('')
-    } catch { toast.error('Failed to apply discount') }
-    finally { setSubmitting(false) }
+    } catch (err) {
+      toast.error(formatApiError(err, 'Failed to apply discount'))
+    } finally { setSubmitting(false) }
   }
 
   function applyRoomRentDiscount() {
@@ -12378,19 +13866,45 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     setExpandedChargeRows(prev => ({ ...prev, [rowId]: !prev[rowId] }))
   }
 
-  const serviceOptions = useMemo(
-    () =>
-      (ledger?.grouped_charges || [])
-        .filter((g) => (g?.description || "").trim())
-        .filter((g) => !String(g.description || "").includes("(Cancelled)"))
-        .map((g) => ({
-          id: g.id,
-          description: String(g.description || "").trim(),
-          quantity: parseInt(g.quantity || 0, 10) || 0,
-          events: g.events || [],
-        })),
-    [ledger?.grouped_charges]
-  )
+  const serviceOptions = useMemo(() => {
+    const byDesc = new Map()
+    const normDesc = (d) => String(d || '').trim().toLowerCase()
+    const addOption = (opt) => {
+      const description = String(opt?.description || '').trim()
+      if (!description || description.includes('(Cancelled)')) return
+      const descKey = normDesc(description)
+      if (!descKey || byDesc.has(descKey)) return
+      const id = String(opt?.id || '').trim() || serviceGroupIdFromLabel(description)
+      byDesc.set(descKey, {
+        id,
+        description,
+        quantity: parseInt(opt?.quantity || 0, 10) || 0,
+        events: opt?.events || [],
+        unit_price: opt?.unit_price,
+      })
+    }
+    for (const g of ledger?.grouped_charges || []) {
+      addOption({
+        id: g.id,
+        description: g.description,
+        quantity: g.quantity,
+        events: g.events,
+      })
+    }
+    for (const s of chargeCatalog || []) {
+      addOption(s)
+    }
+    for (const s of quickServices || []) {
+      addOption({
+        id: serviceGroupIdFromLabel(s.label),
+        description: s.label,
+        unit_price: s.price,
+      })
+    }
+    return Array.from(byDesc.values()).sort((a, b) =>
+      a.description.localeCompare(b.description, undefined, { sensitivity: 'base' })
+    )
+  }, [ledger?.grouped_charges, chargeCatalog, quickServices])
 
   const filteredServiceOptions = useMemo(() => {
     const q = String(chgDesc || "").trim().toLowerCase()
@@ -12407,17 +13921,26 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
     return lineTotal
   }
 
+  function getServiceOptionUnitPrice(opt) {
+    const fromEvents = getLatestUnitPrice(opt?.events)
+    if (fromEvents) return fromEvents
+    const catalogPrice = parseFloat(opt?.unit_price)
+    return catalogPrice > 0 ? catalogPrice : 0
+  }
+
   function handleSelectExistingCharge(value) {
     setSelectedExistingCharge(value)
     if (!value) {
       setHighlightedServiceIndex(-1)
       return
     }
-    const selected = (ledger?.grouped_charges || []).find(g => g.id === value)
+    const selected =
+      serviceOptions.find((opt) => opt.id === value)
+      || (ledger?.grouped_charges || []).find((g) => g.id === value)
     if (!selected) return
     // Only fill description; user can add new qty / unit price for the new entry.
     setChgDesc(selected.description || '')
-    const last = getLatestUnitPrice(selected.events || [])
+    const last = getServiceOptionUnitPrice(selected)
     if (last) setChgUnitPrice(String(last))
     setIsServiceMenuOpen(false)
     setHighlightedServiceIndex(-1)
@@ -12525,7 +14048,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
           <div className="flex flex-1 min-h-0 bg-slate-50">
             {isStep1 && (
-              <aside className="shrink-0 w-12 sm:w-[52px] flex flex-col items-center gap-1.5 py-3 sm:py-4 px-0.5 sm:px-1 border-r border-slate-200/80 bg-gradient-to-b from-white via-slate-50/95 to-slate-100/90 shadow-[inset_-1px_0_0_rgba(15,23,42,0.05)] overflow-y-auto max-h-full">
+              <aside className="shrink-0 w-[148px] sm:w-[176px] flex flex-col items-stretch gap-1.5 py-3 sm:py-4 px-2 sm:px-2.5 border-r border-slate-200/80 bg-gradient-to-b from-white via-slate-50/95 to-slate-100/90 shadow-[inset_-1px_0_0_rgba(15,23,42,0.05)] overflow-y-auto max-h-full">
                 <span className="text-[8px] sm:text-[9px] font-black uppercase tracking-widest text-slate-400 mb-0.5 sm:mb-1 select-none text-center leading-tight px-0.5">Jump</span>
                 {dischargeSectionNavItems.map(({ id, Icon, label }, idx) => (
                   <React.Fragment key={id}>
@@ -12535,18 +14058,17 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       title={label}
                       aria-label={label}
                       aria-current={activeDischargeSection === id ? 'step' : undefined}
-                      onClick={() => {
-                        const scrollRoot = dischargeScrollRootRef.current
-                        const el = scrollRoot?.querySelector(`#${CSS.escape(id)}`)
-                        el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                      }}
-                      className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition-all duration-300 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1 focus-visible:ring-offset-slate-50 ${
+                      onClick={() => scrollDischargeToSection(id)}
+                      className={`relative w-full min-h-9 sm:min-h-10 rounded-xl px-2.5 py-1.5 flex items-center gap-2.5 transition-all duration-200 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1 focus-visible:ring-offset-slate-50 ${
                         activeDischargeSection === id
-                          ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/35 scale-110 ring-2 ring-emerald-200 ring-offset-2 ring-offset-slate-50'
+                          ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/35 ring-2 ring-emerald-200 ring-offset-2 ring-offset-slate-50'
                           : 'bg-white text-slate-500 shadow-sm border border-slate-200/90 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 hover:shadow-md hover:-translate-y-px active:scale-95'
                       }`}
                     >
-                      <Icon size={activeDischargeSection === id ? 17 : 16} strokeWidth={activeDischargeSection === id ? 2.25 : 2} className="transition-transform duration-300" />
+                      <Icon size={activeDischargeSection === id ? 17 : 16} strokeWidth={activeDischargeSection === id ? 2.25 : 2} className="transition-transform duration-300 shrink-0" />
+                      <span className={`text-[10px] sm:text-[11px] font-bold leading-tight tracking-wide truncate ${activeDischargeSection === id ? 'text-white' : 'text-slate-700'}`}>
+                        {label}
+                      </span>
                       {activeDischargeSection === id && (
                         <span className="pointer-events-none absolute inset-0 rounded-xl ring-2 ring-white/40 animate-pulse" aria-hidden />
                       )}
@@ -12565,256 +14087,60 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   </div>
                   <div className="text-[11px] font-semibold text-slate-600 bg-white border border-slate-200 px-2.5 py-1 rounded-lg">
                     Ward: {journey.admission.ward_name || 'N/A'} | Bed: {journey.admission.bed_code || 'N/A'} | Dept: {journey.admission.department || '—'}
+                    {journey.admission.scheme_name ? (
+                      <span className="ml-2 inline-block bg-yellow-400 text-yellow-950 border border-yellow-300 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest">
+                        Scheme: {journey.admission.scheme_name}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 
-                <details id="discharge-section-metadata" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Discharge metadata & identifiers</summary>
-                  <div className="px-4 sm:px-5 py-4 space-y-4 bg-slate-50/70 border-t border-slate-200">
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
-                      <div><span className={dsLbl}>Discharge type</span>
-                        <select value={summary.discharge_type} onChange={e => setSummary(s => ({ ...s, discharge_type: e.target.value }))} className={dsInp}>
-                          {[{ v: 'routine', l: 'Routine' }, { v: 'lama', l: 'LAMA' }, { v: 'dama', l: 'DAMA' }, { v: 'referred', l: 'Referred' }, { v: 'transferred', l: 'Transferred' }, { v: 'death', l: 'Death' }, { v: 'absconded', l: 'Absconded' }].map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
-                        </select></div>
-                      <div><span className={dsLbl}>Condition / status</span>
-                        <select value={summary.discharge_status} onChange={e => setSummary(s => ({ ...s, discharge_status: e.target.value }))} className={dsInp}>
-                          {[{ v: 'cured', l: 'Cured' }, { v: 'improved', l: 'Improved' }, { v: 'unchanged', l: 'Unchanged' }, { v: 'worsened', l: 'Worsened' }, { v: 'deceased', l: 'Deceased' }].map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
-                        </select></div>
-                      <div><span className={dsLbl}>Mode of admission</span>
-                        <select value={summary.mode_of_admission} onChange={e => setSummary(s => ({ ...s, mode_of_admission: e.target.value }))} className={dsInp}>
-                          <option value="emergency">Emergency</option><option value="opd">OPD</option><option value="referral">Referral</option>
-                        </select></div>
-                      <div><span className={dsLbl}>Condition at discharge (text)</span>
-                        <input value={summary.condition_at_discharge} onChange={e => setSummary(s => ({ ...s, condition_at_discharge: e.target.value }))} className={dsInp} placeholder="e.g. Stable, afebrile" /></div>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
-                      <div><span className={dsLbl}>Discharge date</span><input type="date" value={summary.discharge_date || ''} onChange={e => setSummary(s => ({ ...s, discharge_date: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Discharge time</span><input type="time" value={summary.discharge_time || ''} onChange={e => setSummary(s => ({ ...s, discharge_time: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Next follow-up</span><input type="date" value={summary.next_follow_up_date || ''} onChange={e => setSummary(s => ({ ...s, next_follow_up_date: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Stitch removal</span><input type="date" value={summary.stitch_removal_date || ''} onChange={e => setSummary(s => ({ ...s, stitch_removal_date: e.target.value }))} className={dsInp} /></div>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
-                      <div><span className={dsLbl}>Treating consultant</span><input value={summary.treating_consultant} onChange={e => setSummary(s => ({ ...s, treating_consultant: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Consultant reg. no.</span><input value={summary.consultant_registration_no} onChange={e => setSummary(s => ({ ...s, consultant_registration_no: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>RMO / Signatory name</span><input value={summary.rmo_signed_by} onChange={e => setSummary(s => ({ ...s, rmo_signed_by: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Follow-up doctor</span><input value={summary.follow_up_doctor} onChange={e => setSummary(s => ({ ...s, follow_up_doctor: e.target.value }))} className={dsInp} placeholder="Doctor name" /></div>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
-                      <div><span className={dsLbl}>Follow-up department</span><input value={summary.follow_up_department} onChange={e => setSummary(s => ({ ...s, follow_up_department: e.target.value }))} className={dsInp} placeholder="Department" /></div>
-                      <div><span className={dsLbl}>Referred to facility</span><input value={summary.referred_to_facility} onChange={e => setSummary(s => ({ ...s, referred_to_facility: e.target.value }))} className={dsInp} /></div>
-                      <div className="sm:col-span-2 lg:col-span-2"><span className={dsLbl}>Referral reason</span><input value={summary.referral_reason} onChange={e => setSummary(s => ({ ...s, referral_reason: e.target.value }))} className={dsInp} /></div>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-200 [&>*]:min-w-0">
-                      <div className="sm:col-span-2"><span className={dsLbl}>ABHA ID</span><input value={summary.abha_id} onChange={e => setSummary(s => ({ ...s, abha_id: e.target.value }))} className={dsInp} /></div>
-                      <div className="sm:col-span-2"><span className={dsLbl}>Insurance provider</span><input value={summary.insurance_provider} onChange={e => setSummary(s => ({ ...s, insurance_provider: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>TPA</span><input value={summary.tpa_name} onChange={e => setSummary(s => ({ ...s, tpa_name: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Policy no.</span><input value={summary.policy_number} onChange={e => setSummary(s => ({ ...s, policy_number: e.target.value }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Claim no.</span><input value={summary.claim_number} onChange={e => setSummary(s => ({ ...s, claim_number: e.target.value }))} className={dsInp} /></div>
-                      <div className="flex items-center gap-2.5 pt-5">
-                        <input type="checkbox" id="patient_edu" checked={summary.patient_education_given} onChange={e => setSummary(s => ({ ...s, patient_education_given: e.target.checked }))} className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer" />
-                        <label htmlFor="patient_edu" className="text-xs font-semibold text-slate-600 uppercase tracking-wide cursor-pointer select-none">Patient education given</label>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 [&>*]:min-w-0">
-                      <div className="col-span-2 sm:col-span-2"><span className={dsLbl}>Attendant counselled by</span><input value={summary.attendant_counselled_by} onChange={e => setSummary(s => ({ ...s, attendant_counselled_by: e.target.value }))} className={dsInp} /></div>
-                    </div>
-                  </div>
-                </details>
-
-                <details id="discharge-section-vitals" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Vitals at discharge</summary>
-                  <div className="px-4 sm:px-5 py-4 grid grid-cols-3 sm:grid-cols-6 gap-4 bg-slate-50/70 border-t border-slate-200">
-                    {['bp', 'pulse', 'spo2', 'temp', 'weight', 'rbs'].map(k => (
-                      <div key={k}><span className={dsLbl}>{k === 'bp' ? 'BP' : k.toUpperCase()}</span>
-                        <input value={(summary.vitals_at_discharge || {})[k] || ''} onChange={e => setVital(k, e.target.value)} className={dsInp} /></div>
-                    ))}
-                  </div>
-                </details>
-
-                {summary.discharge_type === 'death' && (
-                  <details id="discharge-section-death" open className="scroll-mt-3 bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm">
-                    <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-red-800 bg-red-100">Death summary</summary>
-                    <div className="px-5 sm:px-6 py-5 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-red-50/60 border-t border-red-200">
-                      <div className="sm:col-span-2"><span className={dsLbl}>Cause of death</span><textarea rows={2} value={summary.cause_of_death} onChange={e => setSummary(s => ({ ...s, cause_of_death: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Time of death</span><input type="datetime-local" value={summary.time_of_death ? summary.time_of_death.slice(0, 16) : ''} onChange={e => setSummary(s => ({ ...s, time_of_death: e.target.value ? `${e.target.value}:00` : '' }))} className={dsInp} /></div>
-                      <div><span className={dsLbl}>Notified to</span><input value={summary.notified_to} onChange={e => setSummary(s => ({ ...s, notified_to: e.target.value }))} className={dsInp} /></div>
-                      <label className="flex items-center gap-2 text-sm text-slate-800 pt-5"><input type="checkbox" checked={summary.autopsy_required} onChange={e => setSummary(s => ({ ...s, autopsy_required: e.target.checked }))} /> Autopsy required</label>
-                    </div>
-                  </details>
-                )}
-
-                <details id="discharge-section-narrative" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Clinical narrative</summary>
-                  <div className="px-5 sm:px-6 py-5 space-y-5 bg-slate-50/70 border-t border-slate-200">
-                    <div><span className={dsLbl}>Discharge summary / overview</span><textarea rows={2} value={summary.summary_notes} onChange={e => setSummary(s => ({ ...s, summary_notes: e.target.value }))} className={`${dsInp} min-h-[52px]`} placeholder="Brief overview..." /></div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div><span className={dsLbl}>Chief complaints</span><textarea rows={2} value={summary.chief_complaints} onChange={e => setSummary(s => ({ ...s, chief_complaints: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Reason for admission</span><textarea rows={2} value={summary.reason_for_admission} onChange={e => setSummary(s => ({ ...s, reason_for_admission: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Diagnosis</span><textarea rows={2} value={summary.diagnosis} onChange={e => setSummary(s => ({ ...s, diagnosis: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Co-morbidities</span><textarea rows={2} value={summary.co_morbidities} onChange={e => setSummary(s => ({ ...s, co_morbidities: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Medical history</span><textarea rows={2} value={summary.medical_history} onChange={e => setSummary(s => ({ ...s, medical_history: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Family history</span><textarea rows={2} value={summary.family_history} onChange={e => setSummary(s => ({ ...s, family_history: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Personal history</span><textarea rows={2} value={summary.personal_history} onChange={e => setSummary(s => ({ ...s, personal_history: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Physical examination</span><textarea rows={2} value={summary.physical_examination} onChange={e => setSummary(s => ({ ...s, physical_examination: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Allergies</span><textarea rows={2} value={summary.allergies} onChange={e => setSummary(s => ({ ...s, allergies: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                      <div><span className={dsLbl}>Treatment given</span><textarea rows={2} value={summary.treatment_given} onChange={e => setSummary(s => ({ ...s, treatment_given: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    </div>
-                  </div>
-                </details>
-
-                <details id="discharge-section-operative" className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Operative / procedure</summary>
-                  <div className="px-5 sm:px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
-                    <div><span className={dsLbl}>Surgery date</span><input type="date" value={surgeryDraft.surgery_date || ''} onChange={e => updateSurgeryDraftField('surgery_date', e.target.value)} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={surgeryDraft.procedure_name} onChange={e => updateSurgeryDraftField('procedure_name', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Surgeon</span><input value={surgeryDraft.surgeon_name} onChange={e => updateSurgeryDraftField('surgeon_name', e.target.value)} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Assistant</span><input value={surgeryDraft.assistant_name} onChange={e => updateSurgeryDraftField('assistant_name', e.target.value)} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Anaesthetist</span><input value={surgeryDraft.anaesthetist_name} onChange={e => updateSurgeryDraftField('anaesthetist_name', e.target.value)} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Anaesthesia</span><input value={surgeryDraft.anaesthesia_type} onChange={e => updateSurgeryDraftField('anaesthesia_type', e.target.value)} className={dsInp} /></div>
-                    <div className="md:col-span-2"><span className={dsLbl}>Operative findings</span><textarea rows={2} value={surgeryDraft.operative_findings} onChange={e => updateSurgeryDraftField('operative_findings', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div className="md:col-span-2"><span className={dsLbl}>Intra-op complications</span><textarea rows={2} value={surgeryDraft.intra_op_complications} onChange={e => updateSurgeryDraftField('intra_op_complications', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div className="md:col-span-2 flex items-center gap-2 pt-1">
+                <DischargeClinicalForm
+                  sectionIdPrefix="discharge-section"
+                  summary={summary}
+                  setSummary={setSummary}
+                  surgeryDraft={surgeryDraft}
+                  updateSurgeryDraftField={updateSurgeryDraftField}
+                  saveSurgeryRow={saveSurgeryRow}
+                  resetSurgeryDraft={resetSurgeryDraft}
+                  editingSurgeryIndex={editingSurgeryIndex}
+                  editSurgeryRow={editSurgeryRow}
+                  removeSurgeryRow={removeSurgeryRow}
+                  dischargeRxItems={dischargeRxItems}
+                  setDischargeRxItems={setDischargeRxItems}
+                  setVital={setVital}
+                  addInvRow={addInvRow}
+                  updateInvRow={updateInvRow}
+                  removeInvRow={removeInvRow}
+                  getSuggestions={getSuggestions}
+                  dsInp={dsInp}
+                  dsLbl={dsLbl}
+                  dosagePatternOptions={DEFAULT_DOSAGE_PATTERNS}
+                  timingOptions={DEFAULT_TIMING_OPTIONS}
+                  footer={
+                    <div className="pt-3 mt-1 border-t border-slate-200/60 flex justify-end gap-2">
                       <button
                         type="button"
-                        onClick={saveSurgeryRow}
-                        className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700"
+                        onClick={openDischargePrintPreview}
+                        className="bg-white text-slate-700 border border-slate-300 px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-slate-50 flex items-center gap-2 transition-all active:scale-95 focus:ring-4 focus:ring-slate-200"
                       >
-                        {editingSurgeryIndex >= 0 ? 'Update Surgery' : 'Save Surgery'}
+                        <Eye size={16} /> Preview print
                       </button>
-                      {editingSurgeryIndex >= 0 && (
-                        <button
-                          type="button"
-                          onClick={resetSurgeryDraft}
-                          className="px-3 py-2 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200"
-                        >
-                          Cancel Edit
+                      {dischargedEditing ? (
+                        <button type="button" onClick={saveDischargedSummaryExplicit} disabled={submitting || draftSaving}
+                          className="bg-emerald-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-800 flex items-center gap-2 transition-all active:scale-95 focus:ring-4 focus:ring-emerald-300 disabled:opacity-60">
+                          {draftSaving ? 'Saving...' : 'Save summary'}
+                        </button>
+                      ) : (
+                        <button type="button" onClick={goToBilling} disabled={submitting}
+                          className="bg-slate-800 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-black hover:shadow-lg hover:shadow-black/20 flex items-center gap-2 transition-all active:scale-95 group focus:ring-4 focus:ring-slate-300">
+                          {draftSaving ? 'Saving...' : 'Review Billing Summary'} <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
                         </button>
                       )}
                     </div>
-                    <div className="md:col-span-2">
-                      <span className={dsLbl}>Saved surgeries</span>
-                      <div className="rounded-lg border border-slate-200 overflow-x-auto bg-white">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="bg-slate-50 text-left">
-                              <th className="p-2">Date</th>
-                              <th className="p-2">Procedure</th>
-                              <th className="p-2">Surgeon</th>
-                              <th className="p-2">Anaesthesia</th>
-                              <th className="p-2 w-24">Action</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {(summary.surgery_rows || []).length === 0 ? (
-                              <tr>
-                                <td colSpan={5} className="p-3 text-slate-400">No surgery rows saved yet.</td>
-                              </tr>
-                            ) : (
-                              (summary.surgery_rows || []).map((row, idx) => (
-                                <tr key={`surgery-row-${idx}`} className="border-t border-slate-100">
-                                  <td className="p-2">{row.surgery_date || '—'}</td>
-                                  <td className="p-2">{row.procedure_name || row.procedure_surgery || '—'}</td>
-                                  <td className="p-2">{row.surgeon_name || '—'}</td>
-                                  <td className="p-2">{row.anaesthesia_type || '—'}</td>
-                                  <td className="p-2">
-                                    <div className="flex items-center gap-2">
-                                      <button type="button" onClick={() => editSurgeryRow(idx)} className="text-blue-600 font-bold">Edit</button>
-                                      <button type="button" onClick={() => removeSurgeryRow(idx)} className="text-red-600 font-bold">Delete</button>
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-                </details>
+                  }
+                />
 
-                <details id="discharge-section-investigations" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Investigations (structured)</summary>
-                  <div className="px-5 sm:px-6 py-5 bg-slate-50/70 border-t border-slate-200 space-y-3">
-                    <div className="overflow-x-auto rounded-lg border border-slate-200">
-                      <table className="w-full text-xs">
-                        <thead><tr className="bg-slate-50 text-left"><th className="px-2.5 py-2">Type</th><th className="px-2.5 py-2">Test</th><th className="px-2.5 py-2">Value</th><th className="px-2.5 py-2">Ref</th><th className="px-2.5 py-2">Date</th><th className="px-2 py-2 w-8" /></tr></thead>
-                        <tbody>
-                          {(summary.investigation_rows || []).map((row, idx) => (
-                            <tr key={idx} className="border-t border-slate-100">
-                              <td className="px-2.5 py-1.5"><select value={row.category || 'lab'} onChange={e => updateInvRow(idx, 'category', e.target.value)} className={dsInp}><option value="lab">Lab</option><option value="imaging">Imaging</option></select></td>
-                              <td className="px-2.5 py-1.5"><input value={row.test_name} onChange={e => updateInvRow(idx, 'test_name', e.target.value)} className={dsInp} placeholder="Test name" /></td>
-                              <td className="px-2.5 py-1.5"><input value={row.value} onChange={e => updateInvRow(idx, 'value', e.target.value)} className={dsInp} /></td>
-                              <td className="px-2.5 py-1.5"><input value={row.reference_range} onChange={e => updateInvRow(idx, 'reference_range', e.target.value)} className={dsInp} /></td>
-                              <td className="px-2.5 py-1.5"><input type="date" value={row.test_date || ''} onChange={e => updateInvRow(idx, 'test_date', e.target.value)} className={dsInp} /></td>
-                              <td className="px-2 py-1.5"><button type="button" onClick={() => removeInvRow(idx)} className="text-red-600 font-bold px-1">×</button></td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <button type="button" onClick={addInvRow} className="text-xs font-bold text-emerald-700 hover:underline">+ Add investigation row</button>
-                    <div><span className={dsLbl}>Investigations — free text (extra notes)</span><textarea rows={2} value={summary.investigations} onChange={e => setSummary(s => ({ ...s, investigations: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                  </div>
-                </details>
-
-                <details id="discharge-section-course" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Hospital course & complications</summary>
-                  <div className="px-5 sm:px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
-                    <div className="md:col-span-2"><span className={dsLbl}>Course in hospital</span><textarea rows={2} value={summary.course_in_hospital} onChange={e => setSummary(s => ({ ...s, course_in_hospital: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Complications</span><textarea rows={2} value={summary.complications_during_stay} onChange={e => setSummary(s => ({ ...s, complications_during_stay: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Blood transfusion</span><textarea rows={2} value={summary.blood_transfusion_details} onChange={e => setSummary(s => ({ ...s, blood_transfusion_details: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Implants</span><textarea rows={2} value={summary.implants_used} onChange={e => setSummary(s => ({ ...s, implants_used: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Indwelling devices</span><textarea rows={2} value={summary.indwelling_devices_on_discharge} onChange={e => setSummary(s => ({ ...s, indwelling_devices_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Vaccination</span><textarea rows={2} value={summary.vaccination_given} onChange={e => setSummary(s => ({ ...s, vaccination_given: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                  </div>
-                </details>
-
-                <div id="discharge-section-prescriptions" className="scroll-mt-3 space-y-2">
-                  <DischargePrescriptionPanel
-                    items={dischargeRxItems}
-                    onChange={setDischargeRxItems}
-                    dosagePatternOptions={DEFAULT_DOSAGE_PATTERNS}
-                    timingOptions={DEFAULT_TIMING_OPTIONS}
-                  />
-                  <details className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                    <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-50 hover:bg-slate-100">Extra medication notes (optional)</summary>
-                    <div className="px-5 sm:px-6 py-5 bg-slate-50/70 border-t border-slate-200">
-                      <textarea rows={2} value={summary.medications_on_discharge} onChange={e => setSummary(s => ({ ...s, medications_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px] font-mono w-full`} placeholder="Additional instructions not covered above..." />
-                    </div>
-                  </details>
-                </div>
-
-                <details id="discharge-section-advice" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Advice on discharge</summary>
-                  <div className="px-5 sm:px-6 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
-                    <div><span className={dsLbl}>Diet</span><textarea rows={2} value={summary.diet_advice} onChange={e => setSummary(s => ({ ...s, diet_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Activity</span><textarea rows={2} value={summary.activity_advice} onChange={e => setSummary(s => ({ ...s, activity_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Wound care</span><textarea rows={2} value={summary.wound_care_instructions} onChange={e => setSummary(s => ({ ...s, wound_care_instructions: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Follow-up advice</span><textarea rows={2} value={summary.follow_up_advice} onChange={e => setSummary(s => ({ ...s, follow_up_advice: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div className="md:col-span-2"><span className={dsLbl}>Warning signs</span><textarea rows={2} value={summary.warning_signs} onChange={e => setSummary(s => ({ ...s, warning_signs: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                  </div>
-                </details>
-
-                <div className="pt-3 mt-1 border-t border-slate-200/60 flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={openDischargePrintPreview}
-                    className="bg-white text-slate-700 border border-slate-300 px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-slate-50 flex items-center gap-2 transition-all active:scale-95 focus:ring-4 focus:ring-slate-200"
-                  >
-                    <Eye size={16} /> Preview print
-                  </button>
-                  {dischargedEditing ? (
-                    <button type="button" onClick={saveDischargedSummaryExplicit} disabled={submitting || draftSaving}
-                      className="bg-emerald-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-800 flex items-center gap-2 transition-all active:scale-95 focus:ring-4 focus:ring-emerald-300 disabled:opacity-60">
-                      {draftSaving ? 'Saving...' : 'Save summary'}
-                    </button>
-                  ) : (
-                    <button type="button" onClick={goToBilling} disabled={submitting}
-                      className="bg-slate-800 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-black hover:shadow-lg hover:shadow-black/20 flex items-center gap-2 transition-all active:scale-95 group focus:ring-4 focus:ring-slate-300">
-                      {draftSaving ? 'Saving...' : 'Review Billing Summary'} <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
-                    </button>
-                  )}
-                </div>
               </div>
             ) : (
               <div className="space-y-6 max-w-3xl mx-auto animate-in fade-in slide-in-from-right-8 duration-500 py-1">
@@ -12867,11 +14193,48 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                        </div>
                        <div className="relative z-10 flex justify-between items-end">
                           <div>
-                             <p className="text-xs font-black uppercase tracking-widest text-emerald-400 mb-1.5 drop-shadow-sm">Final Settlement Due</p>
+                             {isSchemePatient ? (
+                               <>
+                                 <p className="text-xs font-black uppercase tracking-widest mb-1.5 text-yellow-300 drop-shadow-sm">
+                                   Scheme patient — no balance due
+                                 </p>
+                                 {journey.admission.scheme_name ? (
+                                   <span className="inline-block bg-yellow-400 text-yellow-950 border border-yellow-300 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest mb-2">
+                                     {journey.admission.scheme_name}
+                                   </span>
+                                 ) : null}
+                                 <div className="flex items-start gap-1">
+                                   <span className="text-2xl font-bold mt-1 opacity-70">₹</span>
+                                   <span className="text-[3.5rem] leading-none tracking-tighter font-black text-white">0</span>
+                                 </div>
+                               </>
+                             ) : (
+                               <>
+                             <p className={`text-xs font-black uppercase tracking-widest mb-1.5 drop-shadow-sm ${
+                               Number(billing.refund_due) > 0.009
+                                 ? 'text-sky-300'
+                                 : Number(billing.amount_due ?? billing.outstanding) > 0.009
+                                   ? 'text-emerald-400'
+                                   : 'text-slate-300'
+                             }`}>
+                               {Number(billing.refund_due) > 0.009
+                                 ? 'Credit / refund to patient'
+                                 : Number(billing.amount_due ?? billing.outstanding) > 0.009
+                                   ? 'Final Settlement Due'
+                                   : 'Net balance'}
+                             </p>
                              <div className="flex items-start gap-1">
                                <span className="text-2xl font-bold mt-1 opacity-70">₹</span>
-                               <span className="text-[3.5rem] leading-none tracking-tighter font-black text-white">{Number(billing.outstanding).toLocaleString()}</span>
+                               <span className="text-[3.5rem] leading-none tracking-tighter font-black text-white">
+                                 {Number(
+                                   Number(billing.refund_due) > 0.009
+                                     ? billing.refund_due
+                                     : (billing.amount_due ?? billing.outstanding),
+                                 ).toLocaleString()}
+                               </span>
                              </div>
+                               </>
+                             )}
                           </div>
                           <div className="bg-white/10 backdrop-blur-md px-4 py-2 rounded-xl border border-white/5">
                             <span className="text-[10px] font-black uppercase tracking-widest opacity-80">Room: {journey.admission.room_name || 'N/A'}</span>
@@ -12879,6 +14242,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                        </div>
                     </div>
 
+                    {!isSchemePatient && Number(billing.amount_due ?? billing.outstanding) > 0.009 && (
                     <div className="bg-white p-5 rounded-2xl border border-emerald-200 shadow-sm">
                       <div className="flex items-center justify-between gap-4 mb-4">
                         <div>
@@ -12886,7 +14250,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                           <p className="text-xs text-slate-500 font-medium">Clear the pending amount directly from billing review.</p>
                         </div>
                         <p className="text-sm font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
-                          Due: ₹{Number(billing.outstanding || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          Due: ₹{Number((billing.amount_due ?? billing.outstanding) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                         </p>
                       </div>
 
@@ -12916,14 +14280,65 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
 
                       <div className="mt-4 flex justify-end">
                         <button
+                          type="button"
                           onClick={handleDueSettlement}
-                          disabled={settleSubmitting || Number(billing.outstanding || 0) <= 0}
+                          disabled={settleSubmitting || Number((billing.amount_due ?? billing.outstanding) || 0) <= 0.009}
                           className="px-5 py-2.5 rounded-xl text-sm font-black text-white bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
                         >
                           {settleSubmitting ? 'Settling...' : 'Clear Due & Continue'}
                         </button>
                       </div>
                     </div>
+                    )}
+
+                    {!isSchemePatient && Number(billing.refund_due) > 0.009 && (
+                    <div className="bg-white p-5 rounded-2xl border border-sky-200 shadow-sm">
+                      <div className="flex items-center justify-between gap-4 mb-4">
+                        <div>
+                          <p className="text-sm font-black text-slate-800 tracking-tight">Record Refund to Patient</p>
+                          <p className="text-xs text-slate-500 font-medium">Ledger shows overpayment. Record the payout so the account nets to zero before discharge.</p>
+                        </div>
+                        <p className="text-sm font-bold text-sky-800 bg-sky-50 border border-sky-200 rounded-lg px-3 py-1.5">
+                          Refund: ₹{Number(billing.refund_due || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <select
+                          value={settleMode}
+                          onChange={e => setSettleMode(e.target.value)}
+                          className="w-full bg-white border border-slate-200 rounded-xl p-3 text-sm font-semibold text-slate-700 focus:ring-4 focus:ring-sky-500/10 focus:border-sky-500 outline-none"
+                        >
+                          <option value="cash">Cash</option>
+                          <option value="upi">UPI</option>
+                          <option value="card">Card</option>
+                          <option value="bank_transfer">Bank Transfer</option>
+                          <option value="other">Other</option>
+                        </select>
+                        <input
+                          value={settleRef}
+                          onChange={e => setSettleRef(e.target.value)}
+                          placeholder="Reference (optional)"
+                          className="w-full bg-white border border-slate-200 rounded-xl p-3 text-sm font-medium text-slate-700 focus:ring-4 focus:ring-sky-500/10 focus:border-sky-500 outline-none"
+                        />
+                        <label className="flex items-center gap-2 text-sm font-bold text-slate-700 px-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50">
+                          <input type="checkbox" checked={settlePrint} onChange={e => setSettlePrint(e.target.checked)} />
+                          Print slip
+                        </label>
+                      </div>
+
+                      <div className="mt-4 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={handleRefundSettlement}
+                          disabled={settleSubmitting || Number(billing.refund_due || 0) <= 0.009}
+                          className="px-5 py-2.5 rounded-xl text-sm font-black text-white bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {settleSubmitting ? 'Recording...' : 'Record Refund & Continue'}
+                        </button>
+                      </div>
+                    </div>
+                    )}
 
                     <div className="bg-amber-50/80 p-5 rounded-2xl border border-amber-200/80 flex items-start gap-4">
                       <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shrink-0 shadow-inner">
@@ -12931,7 +14346,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       </div>
                       <div>
                         <p className="text-sm font-black text-amber-900 tracking-tight">Final Confirmation Notice</p>
-                        <p className="text-xs text-amber-800/80 mt-1 font-medium leading-relaxed">Completing this step will permanently finalize the invoice, log the discharge summary, and release bed <strong className="bg-amber-200/50 px-1 py-0.5 rounded">{journey.admission.bed_code}</strong> for cleaning. Ensure all dues are settled or accounted for.</p>
+                        <p className="text-xs text-amber-800/80 mt-1 font-medium leading-relaxed">Completing this step will permanently finalize the invoice, log the discharge summary, and release bed <strong className="bg-amber-200/50 px-1 py-0.5 rounded">{journey.admission.bed_code}</strong> for cleaning. Ensure any amount due is collected, any patient credit is refunded, or adjustments are made so the net balance is zero.</p>
                       </div>
                     </div>
                   </div>
@@ -12941,9 +14356,29 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                   <button onClick={() => setJourney(j => ({ ...j, step: 'form' }))} className="px-6 py-3.5 rounded-2xl text-sm font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 flex items-center gap-2 transition-colors active:scale-95">
                     <ArrowRight size={16} className="rotate-180" /> Back to Clinical
                   </button>
-                  <button onClick={finalizeDischarge} disabled={submitting}
+                  <button
+                    type="button"
+                    onClick={finalizeDischarge}
+                    disabled={
+                      submitting
+                      || (
+                        !isSchemePatient
+                        && Math.abs(
+                          parseAdmissionMoney(
+                            billing?.net_balance ?? ((billing?.total_billed || 0) - (billing?.total_paid || 0)),
+                          ),
+                        ) > 0.009
+                      )
+                    }
                     className={`flex-1 py-4 text-white rounded-2xl font-black text-base transition-all flex items-center justify-center gap-3 border ${
-                      Number(billing?.outstanding || 0) > 0
+                      (
+                        !isSchemePatient
+                        && Math.abs(
+                          parseAdmissionMoney(
+                            billing?.net_balance ?? ((billing?.total_billed || 0) - (billing?.total_paid || 0)),
+                          ),
+                        ) > 0.009
+                      )
                         ? 'bg-slate-400 border-slate-400 cursor-not-allowed'
                         : 'bg-gradient-to-br from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 shadow-[0_8px_30px_rgba(16,185,129,0.3)] hover:shadow-[0_8px_40px_rgba(16,185,129,0.4)] hover:-translate-y-0.5 active:translate-y-0 group border-emerald-400'
                     }`}>
@@ -12983,8 +14418,15 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                 <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest">
                   UHID: {admission.patient_uhid || 'N/A'}
                 </span>
+                {admission.scheme_name ? (
+                  <span className="bg-yellow-400 text-yellow-950 border border-yellow-300 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest shadow-sm">
+                    Scheme: {admission.scheme_name}
+                  </span>
+                ) : null}
               </h3>
-              <p className="text-blue-100 text-xs text-blue-100/90 font-medium">IPD Ledger · {admission.ward_name} · Bed {admission.bed_code} · Adm: {admission.admission_date ? `${format(new Date(admission.admission_date), 'd/M/yyyy')} (${format(new Date(admission.created_at || Date.now()), 'HH:mm')})` : '--'}</p>
+              <p className="text-blue-100 text-xs text-blue-100/90 font-medium">
+                IPD Ledger · Dr. {admission.assigned_doctor_name || '—'} · {admission.ward_name} · Bed {admission.bed_code} · Adm: {admission.admission_date ? formatDateTime(admission.created_at || Date.now(), { paren: true }) : '--'}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -13017,10 +14459,12 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
             <div className="lg:col-span-3 flex flex-col gap-4">
               {/* Summary cards */}
               {(() => {
-                const chargesCount = (ledger.grouped_charges || []).length + (ledger.charges || []).filter(c => c.type === 'room_rent').length
+                const chargesCount = (ledger.grouped_charges || []).length
+                  + (ledger.charges || []).filter(c => c.type === 'room_rent').length
                 const paidEvents = ledger.payments?.length || 0
-                const balance = parseFloat(ledger.balance_due || 0)
-                const isDue = balance > 0
+                const isSchemeLedger = !!(admission?.scheme)
+                const balance = isSchemeLedger ? 0 : parseFloat(ledger.balance_due || 0)
+                const isDue = !isSchemeLedger && balance > 0
                 const cards = [
                   {
                     label: 'Total Charges', val: ledger.total_charges, sub: `${chargesCount} item${chargesCount === 1 ? '' : 's'}`,
@@ -13031,12 +14475,14 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                     Icon: CheckCircle, color: 'text-emerald-700', iconColor: 'text-emerald-500', bg: 'bg-emerald-50', border: 'border-emerald-200',
                   },
                   {
-                    label: 'Balance Due', val: ledger.balance_due, sub: isDue ? 'Outstanding' : 'Settled',
-                    Icon: isDue ? AlertTriangle : CheckCircle,
-                    color: isDue ? 'text-red-600' : 'text-emerald-600',
-                    iconColor: isDue ? 'text-red-500' : 'text-emerald-500',
-                    bg: isDue ? 'bg-red-50' : 'bg-emerald-50',
-                    border: isDue ? 'border-red-200' : 'border-emerald-200',
+                    label: isSchemeLedger ? 'Under Scheme' : 'Balance Due',
+                    val: isSchemeLedger ? 0 : ledger.balance_due,
+                    sub: isSchemeLedger ? (admission.scheme_name || 'Final bill under scheme') : (isDue ? 'Outstanding' : 'Settled'),
+                    Icon: isSchemeLedger ? CheckCircle : (isDue ? AlertTriangle : CheckCircle),
+                    color: isSchemeLedger ? 'text-amber-800' : (isDue ? 'text-red-600' : 'text-emerald-600'),
+                    iconColor: isSchemeLedger ? 'text-amber-600' : (isDue ? 'text-red-500' : 'text-emerald-500'),
+                    bg: isSchemeLedger ? 'bg-amber-50' : (isDue ? 'bg-red-50' : 'bg-emerald-50'),
+                    border: isSchemeLedger ? 'border-amber-200' : (isDue ? 'border-red-200' : 'border-emerald-200'),
                     big: true,
                   },
                 ]
@@ -13154,10 +14600,14 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                           setShowReceiptsModal(false)
                                           setReceipt({
                                             viewOnly: true,
-                                            type: r.receiptKind === 'advance' ? 'advance' : 'charge',
+                                            type: r.receiptKind === 'refund' ? 'refund' : r.receiptKind === 'advance' ? 'advance' : 'charge',
                                             data: {
-                                              description: r.description,
-                                              amount: r.amount,
+                                              ...buildPaymentSlipReceiptLine({
+                                                description: r.description,
+                                                quantity: 1,
+                                                unit_price: Math.abs(r.amount),
+                                                amount: Math.abs(r.amount),
+                                              }),
                                               mode: r.mode,
                                               invoice_no: r.invoice_no,
                                               slip_number: r.slip_number || '',
@@ -13178,10 +14628,14 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                           setShowReceiptsModal(false)
                                           setReceipt({
                                             viewOnly: isVoidReceipt,
-                                            type: r.receiptKind === 'advance' ? 'advance' : 'charge',
+                                            type: r.receiptKind === 'refund' ? 'refund' : r.receiptKind === 'advance' ? 'advance' : 'charge',
                                             data: {
-                                              description: r.description,
-                                              amount: r.amount,
+                                              ...buildPaymentSlipReceiptLine({
+                                                description: r.description,
+                                                quantity: 1,
+                                                unit_price: Math.abs(r.amount),
+                                                amount: Math.abs(r.amount),
+                                              }),
                                               mode: r.mode,
                                               invoice_no: r.invoice_no,
                                               slip_number: r.slip_number || '',
@@ -13252,7 +14706,15 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       </p>
                       <div>
                         <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation reason *</label>
-                        <textarea value={ledgerCancelPaymentReason} onChange={e => setLedgerCancelPaymentReason(e.target.value)} rows={4} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none" placeholder="Enter reason" disabled={ledgerCancellingPayment} />
+                        <textarea
+                          value={ledgerCancelPaymentReason}
+                          onChange={e => setLedgerCancelPaymentReason(e.target.value)}
+                          onKeyDown={e => handleCancelReasonKeyDown(e, submitLedgerCancelPayment, { disabled: ledgerCancellingPayment })}
+                          rows={4}
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none"
+                          placeholder="Enter reason"
+                          disabled={ledgerCancellingPayment}
+                        />
                       </div>
                     </div>
                     <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
@@ -13279,7 +14741,15 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       </p>
                       <div>
                         <label className="block text-xs font-bold text-gray-600 mb-1">Cancellation reason *</label>
-                        <textarea value={ledgerCancelInvoiceReason} onChange={e => setLedgerCancelInvoiceReason(e.target.value)} rows={4} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none" placeholder="Enter reason" disabled={ledgerCancellingInvoice} />
+                        <textarea
+                          value={ledgerCancelInvoiceReason}
+                          onChange={e => setLedgerCancelInvoiceReason(e.target.value)}
+                          onKeyDown={e => handleCancelReasonKeyDown(e, submitLedgerCancelInvoice, { disabled: ledgerCancellingInvoice })}
+                          rows={4}
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none resize-none"
+                          placeholder="Enter reason"
+                          disabled={ledgerCancellingInvoice}
+                        />
                       </div>
                     </div>
                     <div className="p-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50">
@@ -13352,10 +14822,24 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                       <button type="button" onClick={() => !ledgerSavingCharge && setLedgerEditingCharge(null)}><X size={18} /></button>
                     </div>
                     <div className="p-4 space-y-3">
-                      <p className="text-xs text-gray-500 font-medium">{ledgerEditingCharge.description}</p>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 mb-1">Item name</label>
+                        <input
+                          type="text"
+                          maxLength={300}
+                          value={ledgerEditingCharge.description}
+                          onChange={(e) => setLedgerEditingCharge({
+                            ...ledgerEditingCharge,
+                            description: e.target.value,
+                          })}
+                          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-400"
+                          placeholder="e.g. Room Rent, Bed charges, X-Ray"
+                          required
+                        />
+                      </div>
                       {ledgerEditingCharge.invoice_id === 'room_rent' && (
                         <p className="text-[11px] text-blue-800 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 leading-snug">
-                          Edit the <span className="font-bold">bed charge for one day</span>. Total room rent is <span className="font-bold">daily rate × {ledger?.days ?? '—'}</span> day(s). Reset uses the bed&apos;s default daily rate from master data.
+                          Edit the <span className="font-bold">bed charge per day</span> and <span className="font-bold">stay days</span> counted for bed charges. Total room rent is daily rate × stay days. Reset restores the bed&apos;s default rate and auto-calculated days from admission dates.
                           {ledger?.room_rent_computed != null && (
                             <span className="block mt-1 text-blue-900/90">System total (reference): ₹{parseFloat(ledger.room_rent_computed || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                           )}
@@ -13389,9 +14873,21 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                             <input
                               type="number"
                               step="1"
+                              min="1"
                               value={ledgerEditingCharge.quantity}
-                              readOnly
-                              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-gray-50 text-gray-600"
+                              onChange={(e) => {
+                                const raw = e.target.value
+                                const days = Math.max(1, parseInt(String(raw), 10) || 1)
+                                const unit = parseFloat(String(ledgerEditingCharge.unit_price)) || 0
+                                const tot = unit * days
+                                setLedgerEditingCharge({
+                                  ...ledgerEditingCharge,
+                                  quantity: raw === '' ? '' : String(days),
+                                  amount: Number.isFinite(tot) ? String(tot.toFixed(2)) : '',
+                                })
+                              }}
+                              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-400"
+                              required
                             />
                           </div>
                           <div>
@@ -13410,19 +14906,62 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                         </>
                       ) : (
                         <>
-                          <div>
-                            <label className="block text-xs font-bold text-gray-600 mb-1">Line amount (₹)</label>
-                            <input type="number" step="0.01" value={ledgerEditingCharge.amount} onChange={e => setLedgerEditingCharge({ ...ledgerEditingCharge, amount: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" required />
-                          </div>
                           <div className="grid grid-cols-2 gap-3">
                             <div>
                               <label className="block text-xs font-bold text-gray-600 mb-1">Qty</label>
-                              <input type="number" step="0.01" value={ledgerEditingCharge.quantity} onChange={e => setLedgerEditingCharge({ ...ledgerEditingCharge, quantity: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" required />
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0.01"
+                                value={ledgerEditingCharge.quantity}
+                                onChange={(e) => {
+                                  const quantity = e.target.value
+                                  const unitPrice = parseFloat(String(ledgerEditingCharge.unit_price)) || 0
+                                  const total = (parseFloat(quantity) || 0) * unitPrice
+                                  setLedgerEditingCharge({
+                                    ...ledgerEditingCharge,
+                                    quantity,
+                                    amount: Number.isFinite(total) ? String(total.toFixed(2)) : '',
+                                  })
+                                }}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none"
+                                required
+                              />
                             </div>
                             <div>
                               <label className="block text-xs font-bold text-gray-600 mb-1">Unit price (₹)</label>
-                              <input type="number" step="0.01" value={ledgerEditingCharge.unit_price} onChange={e => setLedgerEditingCharge({ ...ledgerEditingCharge, unit_price: e.target.value })} className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none" required />
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0.01"
+                                value={ledgerEditingCharge.unit_price}
+                                onChange={(e) => {
+                                  const unitPrice = e.target.value
+                                  const quantity = parseFloat(String(ledgerEditingCharge.quantity)) || 0
+                                  const total = quantity * (parseFloat(unitPrice) || 0)
+                                  setLedgerEditingCharge({
+                                    ...ledgerEditingCharge,
+                                    unit_price: unitPrice,
+                                    amount: Number.isFinite(total) ? String(total.toFixed(2)) : '',
+                                  })
+                                }}
+                                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none"
+                                required
+                              />
                             </div>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-gray-600 mb-1">Line amount (₹)</label>
+                            <input
+                              type="text"
+                              readOnly
+                              value={(() => {
+                                const quantity = parseFloat(String(ledgerEditingCharge.quantity)) || 0
+                                const unitPrice = parseFloat(String(ledgerEditingCharge.unit_price)) || 0
+                                return (quantity * unitPrice).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                              })()}
+                              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-gray-50 text-gray-800 font-semibold"
+                            />
                           </div>
                         </>
                       )}
@@ -13460,7 +14999,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                         <th className="px-2 py-2.5 w-8"></th>
                         <th className="px-4 py-2.5">Date &amp; time</th>
                         <th className="px-4 py-2.5">Description</th>
-                        <th className="px-4 py-2.5 text-center">Qty</th>
+                        <th className="px-4 py-2.5 text-center">Qty/Days</th>
                         <th className="px-4 py-2.5 text-right">Charges (₹)</th>
                         <th className="px-4 py-2.5 text-right text-emerald-600">Paid (₹)</th>
                       </tr>
@@ -13488,7 +15027,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                     {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                                   </button>
                                 </td>
-                                <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{format(new Date(item.date), 'd/M/yy HH:mm')}</td>
+                                <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap tabular-nums">{formatDateTime(item.date, { dateStyle: 'd/M/yy' })}</td>
                                 <td className="px-4 py-2.5">
                                   <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                                     <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold shrink-0">RENT</span>
@@ -13496,6 +15035,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                     {((ledger?.room_rent_override != null && ledger.room_rent_override !== '') ||
                                       (ledger?.room_rent_daily_charge_override != null && ledger.room_rent_daily_charge_override !== '')) ? (
                                       <span className="text-[9px] font-bold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">Adjusted</span>
+                                    ) : null}
+                                    {amt <= 0 ? (
+                                      <span className="text-[9px] font-bold uppercase tracking-wide text-red-700 bg-red-100 border border-red-200 px-1.5 py-0.5 rounded shrink-0">Cancelled</span>
                                     ) : null}
                                   </div>
                                 </td>
@@ -13533,6 +15075,19 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                           )}
                                         </div>
                                         <div className="inline-flex flex-nowrap items-center gap-1.5 shrink-0 max-w-full overflow-x-auto py-0.5">
+                                          {amt > 0 ? (
+                                            <button
+                                              type="button"
+                                              onClick={cancelRoomRent}
+                                              disabled={ledgerCancellingRoomRent}
+                                              title="Cancel bed charges"
+                                              aria-label="Cancel bed charges"
+                                              className="h-8 w-8 hover:w-[76px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-red-600 hover:text-white bg-red-50 hover:bg-red-600 rounded-lg transition-all duration-150 border border-red-100 shadow-sm hover:shadow-md active:scale-95 group disabled:opacity-50"
+                                            >
+                                              <XCircle size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                              <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[44px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Cancel</span>
+                                            </button>
+                                          ) : null}
                                           <button
                                             type="button"
                                             onClick={() => openLedgerEditRoomRent(item)}
@@ -13598,8 +15153,12 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                     ) : events.map((ev, evIdx) => {
                                       const evInv = String(ev.invoice_status || '').toLowerCase()
                                       const isEvInvoiceCancelled = evInv === 'cancelled'
+                                      const payEvents = Array.isArray(ev.payment_events)
+                                        ? ev.payment_events.filter((payEv) => Number(parseFloat(payEv?.amount)) > 0)
+                                        : []
                                       return (
-                                      <div key={`${row.id}-event-${ev.id}-${evIdx}`} className={`flex items-center justify-between gap-3 border-b border-slate-100 last:border-b-0 pb-2 last:pb-0 ${isEvInvoiceCancelled ? 'opacity-90' : ''}`}>
+                                      <div key={`${row.id}-event-${ev.id}-${evIdx}`} className={`space-y-2 border-b border-slate-100 last:border-b-0 pb-2 last:pb-0 ${isEvInvoiceCancelled ? 'opacity-90' : ''}`}>
+                                        <div className="flex items-center justify-between gap-3">
                                         <div>
                                           <p className="text-xs font-bold text-slate-800">{ev.name || row.description}</p>
                                           <p className="text-[11px] text-slate-500 tabular-nums">
@@ -13616,19 +15175,14 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                           ) : null}
                                         </div>
                                         <div className="inline-flex flex-nowrap items-center gap-1.5 shrink-0 max-w-full overflow-x-auto py-0.5">
+                                          {payEvents.length === 0 ? (
+                                            <>
                                           <button
                                             type="button"
                                             onClick={() => setReceipt({
                                               viewOnly: true,
                                               type: 'charge',
-                                              data: {
-                                                amount: ev.price,
-                                                mode: ev.payment_mode || 'other',
-                                                invoice_no: ev.invoice_no,
-                                                slip_number: ev.slip_number || '',
-                                                description: ev.name || row.description,
-                                                paid_at: ev.date,
-                                              },
+                                              data: buildIpdLedgerReceiptData(ev, row.description),
                                             })}
                                             title="View"
                                             aria-label="View receipt"
@@ -13642,14 +15196,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                             onClick={() => setReceipt({
                                               viewOnly: isEvInvoiceCancelled,
                                               type: 'charge',
-                                              data: {
-                                                amount: ev.price,
-                                                mode: ev.payment_mode || 'other',
-                                                invoice_no: ev.invoice_no,
-                                                slip_number: ev.slip_number || '',
-                                                description: ev.name || row.description,
-                                                paid_at: ev.date,
-                                              },
+                                              data: buildIpdLedgerReceiptData(ev, row.description),
                                             })}
                                             title="Print"
                                             aria-label="Print receipt"
@@ -13658,6 +15205,8 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                             <Printer size={13} className="group-hover:scale-110 transition-transform shrink-0" />
                                             <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[44px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Print</span>
                                           </button>
+                                            </>
+                                          ) : null}
                                           {ev.invoice_id && evInv === 'finalized' ? (
                                             <>
                                               <button
@@ -13689,6 +15238,53 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                             </>
                                           ) : null}
                                         </div>
+                                        </div>
+                                        {payEvents.map((payEv, payIdx) => (
+                                          <div key={`${row.id}-event-${ev.id}-pay-${payEv.id || payIdx}`} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2">
+                                            <div>
+                                              <p className="text-[11px] font-bold text-slate-800">Payment slip {payEv.slip_number || '—'}</p>
+                                              <p className="text-[11px] text-slate-500 tabular-nums">
+                                                {formatReceiptDateTime(payEv.date)}
+                                                {' · Qty '}
+                                                {parseFloat(payEv.quantity || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                                                {' · '}
+                                                ₹{parseFloat(payEv.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                                {' · '}
+                                                {(payEv.payment_mode || 'other').toUpperCase()}
+                                              </p>
+                                            </div>
+                                            <div className="inline-flex flex-nowrap items-center gap-1.5 shrink-0">
+                                              <button
+                                                type="button"
+                                                onClick={() => setReceipt({
+                                                  viewOnly: true,
+                                                  type: 'charge',
+                                                  data: buildIpdLedgerReceiptData({ ...payEv, name: ev.name || row.description }, row.description),
+                                                })}
+                                                title="View payment slip"
+                                                aria-label="View payment slip"
+                                                className="h-8 w-8 hover:w-[72px] shrink-0 flex items-center justify-center gap-1 overflow-hidden text-indigo-600 hover:text-white bg-indigo-50 hover:bg-indigo-600 rounded-lg transition-all duration-150 border border-indigo-100 shadow-sm hover:shadow-md active:scale-95 group"
+                                              >
+                                                <Eye size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[40px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">View</span>
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => setReceipt({
+                                                  viewOnly: isEvInvoiceCancelled,
+                                                  type: 'charge',
+                                                  data: buildIpdLedgerReceiptData({ ...payEv, name: ev.name || row.description }, row.description),
+                                                })}
+                                                title="Print payment slip"
+                                                aria-label="Print payment slip"
+                                                className="h-8 w-8 hover:w-[74px] shrink-0 flex items-center justify-center gap-1 overflow-hidden rounded-lg transition-all duration-150 border shadow-sm hover:shadow-md active:scale-95 group text-sky-600 hover:text-white bg-sky-50 hover:bg-sky-600 border-sky-100"
+                                              >
+                                                <Printer size={13} className="group-hover:scale-110 transition-transform shrink-0" />
+                                                <span className="max-w-0 opacity-0 translate-x-1 group-hover:max-w-[44px] group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150 text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Print</span>
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))}
                                       </div>
                                     )})}
                                   </div>
@@ -13845,9 +15441,9 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                                 >
                                   <p className="text-sm font-semibold text-gray-800 truncate">{opt.description}</p>
                                   <p className="text-[11px] text-gray-500">
-                                    Qty so far: {opt.quantity}
-                                    {getLatestUnitPrice(opt.events)
-                                      ? ` · Last price: ₹${getLatestUnitPrice(opt.events).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                                    {opt.quantity > 0 ? `Qty on this bill: ${opt.quantity}` : 'From previous bills'}
+                                    {getServiceOptionUnitPrice(opt)
+                                      ? ` · Last price: ₹${getServiceOptionUnitPrice(opt).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
                                       : ''}
                                   </p>
                                 </button>
@@ -13860,7 +15456,7 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                           </div>
                         )}
                         <p className="text-[10px] text-gray-400 mt-1 italic">
-                          Click or type to search existing services. You can also enter a new custom service.
+                          Click or type to search services from this bill, previous IPD bills, and payment slip services. You can also enter a new custom service.
                         </p>
                       </div>
 
@@ -13932,9 +15528,19 @@ function AdmissionLedgerModal({ admission, onClose, autoDischarge = false, onDis
                     <form onSubmit={handleAdvance} className="space-y-3">
                       <div>
                         <label className="text-[10px] font-bold text-gray-500 uppercase">Amount (₹) *</label>
-                        <input type="number" step="1" min="0" value={advAmount}
-                          onChange={e => setAdvAmount(e.target.value)} required placeholder="e.g. 5000"
-                          className={`mt-1 ${inp}`} />
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          autoComplete="off"
+                          value={advAmount}
+                          onChange={e => {
+                            const next = e.target.value
+                            if (isAllowedMoneyInput(next)) setAdvAmount(next)
+                          }}
+                          required
+                          placeholder="e.g. 5000.50"
+                          className={`mt-1 ${inp}`}
+                        />
                       </div>
                       <div>
                         <label className="text-[10px] font-bold text-gray-500 uppercase">Payment Mode *</label>
@@ -14026,12 +15632,29 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
   const [printAdmission, setPrintAdmission] = useState(() => ({ ...admission }))
   const [printReady, setPrintReady] = useState(false)
   const slipProfile = getPaymentSlipProfile()
+  const logoUrl = resolvePaymentSlipLogoUrl(slipProfile)
   const hospitalName = (slipProfile.hospital_name || DEFAULT_PAYMENT_SLIP_PROFILE.hospital_name).toUpperCase()
   const address = slipProfile.address || DEFAULT_PAYMENT_SLIP_PROFILE.address
   const pinCode = slipProfile.pin_code || DEFAULT_PAYMENT_SLIP_PROFILE.pin_code
   const phone = slipProfile.phone || DEFAULT_PAYMENT_SLIP_PROFILE.phone
   const email = slipProfile.email || DEFAULT_PAYMENT_SLIP_PROFILE.email
   const website = slipProfile.website || DEFAULT_PAYMENT_SLIP_PROFILE.website
+
+  function triggerLedgerPrint() {
+    receptionistLastPrintKind = 'ipd_ledger'
+    const runPrint = () => window.print()
+    if (!logoUrl) {
+      runPrint()
+      return
+    }
+    const img = document.querySelector('#__ipd_ledger_root .hosp-logo-print')
+    if (!img || img.complete) {
+      runPrint()
+      return
+    }
+    img.onload = runPrint
+    img.onerror = runPrint
+  }
   
   useEffect(() => {
     let cancelled = false
@@ -14080,10 +15703,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
   useEffect(() => {
     if (!printReady) return
     const timer = setTimeout(() => {
-      if (printRef.current) {
-        receptionistLastPrintKind = 'ipd_ledger'
-        window.print()
-      }
+      if (printRef.current) triggerLedgerPrint()
     }, 300)
 
     function handleAfterPrint() {
@@ -14095,35 +15715,37 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
       clearTimeout(timer)
       window.removeEventListener('afterprint', handleAfterPrint)
     }
-  }, [printReady, onClose])
+  }, [printReady, onClose, logoUrl])
 
   const now = formatReceiptDateTime(new Date())
 
-  const billingItems = ledger ? (() => {
-    const raw = (ledger.charges || []).filter(c => {
-      if (c.type === 'payment' || c.type === 'pharmacy_payment') return false
-      return String(c.invoice_status || '').toLowerCase() !== 'cancelled'
-    })
-    const grouped = {}
-    raw.forEach(c => {
-      let desc = (c.description || 'Service').trim()
-      let key = desc
-      const lower = key.toLowerCase()
-      if (lower.includes('room rent') || lower.includes('bed charge') || lower.includes('room charge')) {
-        key = 'Room Rent / Bed Charges'
-        desc = 'Room Rent / Bed Charges'
-      }
-      if (!grouped[key]) {
-        grouped[key] = { description: desc, quantity: 1, total_amount: parseFloat(c.amount || 0) }
-      } else {
-        grouped[key].quantity += 1
-        grouped[key].total_amount += parseFloat(c.amount || 0)
-      }
-    })
-    return Object.values(grouped).sort((a, b) => a.description.localeCompare(b.description))
-  })() : []
+  const billingItems = buildIpdBillLineItems(ledger)
+  const discountLines = buildIpdBillDiscountLines(ledger)
+  const grossAmount = billingItems.reduce((sum, item) => sum + (parseFloat(item.total_amount || 0) || 0), 0)
+  const totalDiscount = discountLines.reduce((sum, line) => sum + (line.amount || 0), 0)
+  const netAmount = parseAdmissionMoney(ledger?.total_charges ?? (grossAmount - totalDiscount))
+  const isSchemePatientPrint = !!(printAdmission?.scheme || admission?.scheme)
+  const schemeBillName = String(printAdmission.scheme_name || admission?.scheme_name || '').trim()
+  const rawBalanceDue = parseAdmissionMoney(ledger?.balance_due ?? 0)
+  const balanceDue = isSchemePatientPrint ? 0 : rawBalanceDue
+  const balanceLabel = isSchemePatientPrint
+    ? 'FINAL AMOUNT (UNDER SCHEME)'
+    : balanceDue > 0
+      ? 'DUE'
+      : balanceDue < 0
+        ? 'REFUND'
+        : 'SETTLED'
+  const balanceAmount = isSchemePatientPrint ? 0 : Math.abs(balanceDue)
+  const balanceClass = isSchemePatientPrint
+    ? 'text-gray-900 font-black'
+    : balanceDue > 0
+      ? 'text-red-600'
+      : balanceDue < 0
+        ? 'text-blue-600'
+        : 'text-gray-700'
   const payments = ledger ? [...(ledger.payments || [])].filter(p => {
-    if (p.type === 'pharmacy_payment') return true
+    if (p.type === 'pharmacy_payment') return false
+    if (String(p.id || '').startsWith('pharmacy-paid-')) return false
     if (String(p.status || '').toLowerCase() === 'cancelled') return false
     if (String(p.invoice_status || 'finalized').toLowerCase() === 'cancelled') return false
     return true
@@ -14134,10 +15756,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
       <div className="absolute top-4 right-4 print:hidden flex gap-3">
         <button
           type="button"
-          onClick={() => {
-            receptionistLastPrintKind = 'ipd_ledger'
-            window.print()
-          }}
+          onClick={triggerLedgerPrint}
           className="bg-emerald-600 text-white px-6 py-2 rounded-xl font-bold shadow-lg shadow-emerald-200"
         >
           Print Bill
@@ -14148,12 +15767,22 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
       <div ref={printRef} className="ipd-ledger-sheet mx-auto w-full max-w-[210mm] text-black bg-white print:shadow-none shadow-2xl">
         <div className="p-4 sm:p-[15mm] print:p-0 flex flex-col relative bg-white">
           {/* Bill Header */}
-          <div className="ipd-ledger-header text-center mb-6">
-            <h1 className="text-4xl font-black tracking-widest text-gray-900 leading-none">{hospitalName}</h1>
-            <p className="text-sm font-medium text-gray-500 mt-1 uppercase tracking-wider">{address}, {pinCode}</p>
-            <div className="mt-6 border-y-2 border-gray-900 py-2">
-              <h2 className="text-2xl font-black uppercase tracking-[0.3em]">Final Bill</h2>
+          <div className="ipd-ledger-header flex justify-between items-start border-b-2 border-gray-900 pb-4 mb-6">
+            <div className="w-16 h-16 rounded-lg flex items-center justify-center overflow-hidden border border-gray-200 bg-white shrink-0">
+              {logoUrl ? (
+                <img src={logoUrl} alt="Hospital logo" className="hosp-logo-print w-full h-full object-contain" />
+              ) : null}
             </div>
+            <div className="text-center flex-1 px-4">
+              <h1 className="text-4xl font-black tracking-widest text-gray-900 leading-none">{hospitalName}</h1>
+              <p className="text-sm font-medium text-gray-500 mt-1 uppercase tracking-wider">{address}, {pinCode}</p>
+              <div className="mt-6 border-y-2 border-gray-900 py-2">
+                <h2 className="text-2xl font-black uppercase tracking-[0.2em]">
+                  {isSchemePatientPrint ? 'Final Bill Under Scheme' : 'Final Bill'}
+                </h2>
+              </div>
+            </div>
+            <div className="w-16 shrink-0" aria-hidden />
           </div>
 
           {/* Bill Info Grid */}
@@ -14164,6 +15793,9 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
               <div className="flex"><span className="w-24 font-bold">Address</span><span className="font-medium">: {printAdmission.address || '—'}</span></div>
               <div className="flex"><span className="w-24 font-bold">Mobile No</span><span className="font-medium">: {printAdmission.mobile_number || '—'}</span></div>
               <div className="flex"><span className="w-24 font-bold">Consultant</span><span className="font-medium">: {printAdmission.assigned_doctor_name || '—'}</span></div>
+              {isSchemePatientPrint ? (
+                <div className="flex"><span className="w-24 font-bold">Scheme</span><span className="font-bold text-amber-900">: {schemeBillName || '—'}</span></div>
+              ) : null}
             </div>
             <div className="space-y-1">
               <div className="flex"><span className="w-28 font-bold">Bill No</span><span className="font-medium">: BILL-{String(printAdmission.ipd_no || printAdmission.id || admission.id).slice(0,6).toUpperCase()}</span></div>
@@ -14182,7 +15814,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
                 <tr className="bg-gray-50">
                   <th className="border border-gray-800 px-3 py-2 text-left w-12">S.No</th>
                   <th className="border border-gray-800 px-3 py-2 text-left">Description</th>
-                  <th className="border border-gray-800 px-3 py-2 text-right w-20">Unit</th>
+                  <th className="border border-gray-800 px-3 py-2 text-right w-20">Qty/Days</th>
                   <th className="border border-gray-800 px-3 py-2 text-right w-24">Rate</th>
                   <th className="border border-gray-800 px-3 py-2 text-right w-32">Amount</th>
                 </tr>
@@ -14192,8 +15824,8 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
                   <tr key={idx}>
                     <td className="border border-gray-800 px-3 py-2">{idx + 1}</td>
                     <td className="border border-gray-800 px-3 py-2 font-bold uppercase break-words">{item.description}</td>
-                    <td className="border border-gray-800 px-3 py-2 text-right">{item.quantity}</td>
-                    <td className="border border-gray-800 px-3 py-2 text-right">{parseFloat(item.total_amount / item.quantity || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                    <td className="border border-gray-800 px-3 py-2 text-right">{parseFloat(item.quantity || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                    <td className="border border-gray-800 px-3 py-2 text-right">{parseFloat(item.unit_price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                     <td className="border border-gray-800 px-3 py-2 text-right font-bold">{parseFloat(item.total_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                   </tr>
                 ))}
@@ -14204,22 +15836,27 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
             </table>
 
             <div className="mt-0 border-x border-b border-gray-800 flex divide-x divide-gray-800 break-inside-avoid">
-               <div className="flex-1 p-3 text-xs">
-                 <p className="font-black underline mb-2">Receipt Details :</p>
+               <div className="flex-1 p-2 text-[11px] leading-snug">
+                 <p className="font-black underline mb-1">Receipt Details :</p>
                  {payments.length > 0 ? (
-                    <div className="space-y-0.5">
+                    <div className="space-y-0">
                       {payments.map((p, i) => (
-                        <p key={i}>R.No: {p.invoice_no || '--'} - Dt. {formatReceiptDateTime(p.date)} - Amt. {parseFloat(p.amount).toLocaleString('en-IN')}</p>
+                        <p key={i} className="leading-tight">R.No: {p.invoice_no || '--'} - Dt. {formatReceiptDateTime(p.date)} - Amt. {parseFloat(p.amount).toLocaleString('en-IN')}</p>
                       ))}
                     </div>
                  ) : <p className="italic opacity-50">No payments recorded</p>}
                </div>
-               <div className="w-80 font-bold text-sm">
-                 <div className="flex justify-between border-b border-gray-200 p-2"><span>GROSS AMOUNT :</span> <span>₹{parseFloat(ledger.total_charges || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-                 <div className="flex justify-between border-b border-gray-200 p-2"><span>ROUND OFF :</span> <span>₹0.00</span></div>
-                 <div className="flex justify-between bg-gray-50 p-2 text-base font-black"><span>NET AMOUNT :</span> <span>₹{parseFloat(ledger.total_charges || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-                 <div className="flex justify-between border-b border-gray-200 p-2"><span>PAYMENT RECD :</span> <span className="text-emerald-700">₹{parseFloat(ledger.total_paid || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
-                 <div className="flex justify-between p-2"><span>REFUND / DUE :</span> <span className={ledger.balance_due > 0 ? 'text-red-600' : 'text-blue-600'}>₹{parseFloat(Math.abs(ledger.balance_due || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
+               <div className="ipd-ledger-totals w-72 shrink-0 font-bold text-xs leading-snug">
+                 <div className="flex justify-between border-b border-gray-200 py-1.5 px-2"><span>GROSS AMOUNT :</span> <span className="tabular-nums">₹{grossAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
+                 {discountLines.map((line, idx) => (
+                   <div key={`${line.description}-${idx}`} className="flex justify-between gap-2 border-b border-gray-200 py-1 px-2 text-amber-800 font-semibold">
+                     <span className="uppercase truncate" title={line.description}>{line.description}</span>
+                     <span className="shrink-0 tabular-nums">- ₹{line.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                   </div>
+                 ))}
+                 <div className={`ipd-ledger-net-row flex justify-between py-1.5 px-2 border-b border-gray-200 ${isSchemePatientPrint ? 'font-semibold text-xs' : 'bg-gray-50 text-sm font-black'}`}><span>NET AMOUNT :</span> <span className="tabular-nums">₹{netAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
+                 <div className="flex justify-between border-b border-gray-200 py-1.5 px-2"><span>PAYMENT RECD :</span> <span className="text-emerald-700 tabular-nums">₹{parseFloat(ledger.total_paid || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
+                 <div className={`ipd-ledger-final-row flex justify-between py-1.5 px-2 ${isSchemePatientPrint ? 'bg-gray-50 text-sm font-black' : ''}`}><span>{balanceLabel} :</span> <span className={`tabular-nums ${balanceClass}`}>₹{balanceAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
                </div>
             </div>
           </div>
@@ -14258,6 +15895,9 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
           #__ipd_ledger_root .ipd-ledger-info { margin-bottom: 8px !important; gap: 4px 18px !important; font-size: 12px !important; }
           #__ipd_ledger_root .ipd-ledger-table th,
           #__ipd_ledger_root .ipd-ledger-table td { padding-top: 4px !important; padding-bottom: 4px !important; }
+          #__ipd_ledger_root .ipd-ledger-totals > * { padding-top: 3px !important; padding-bottom: 3px !important; font-size: 11px !important; }
+          #__ipd_ledger_root .ipd-ledger-totals .ipd-ledger-final-row { font-size: 12px !important; }
+          #__ipd_ledger_root .ipd-ledger-totals .ipd-ledger-net-row { font-size: 11px !important; }
           #__ipd_ledger_root .ipd-ledger-body { flex: 0 0 auto !important; }
           #__ipd_ledger_root .ipd-ledger-sign { margin-top: 8px !important; padding-top: 6px !important; }
           #__ipd_ledger_root .ipd-ledger-sign p { margin-top: 4px !important; }
@@ -14270,6 +15910,7 @@ function PrintIpdLedger({ admission, ledger, onClose }) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 export default function ReceptionistPortal() {
+  useTimeDisplayMode()
   const [section, setSection] = useState('opd')
   const [ipdAdmissionDraft, setIpdAdmissionDraft] = useState(null)
   const nav = useNavigate()
@@ -14279,6 +15920,15 @@ export default function ReceptionistPortal() {
   const [alerts, setAlerts] = useState([])
   const [bellOpen, setBellOpen] = useState(false)
   const bellRef = useRef(null)
+  const [receptionDailyReportEnabled, setReceptionDailyReportEnabled] = useState(true)
+
+  const navGroups = useMemo(
+    () =>
+      receptionDailyReportEnabled
+        ? NAV_GROUPS
+        : NAV_GROUPS.filter((g) => g.label !== 'Reports'),
+    [receptionDailyReportEnabled],
+  )
 
   function logout() {
     clearAuthStorage()
@@ -14286,8 +15936,20 @@ export default function ReceptionistPortal() {
   }
 
   useEffect(() => {
-    loadReceptionPortalSettings()
+    async function refreshPortalSettings() {
+      await loadReceptionPortalSettings()
+      setReceptionDailyReportEnabled(getReceptionOpdSettings().reception_daily_report_enabled !== false)
+    }
+    refreshPortalSettings()
+    const t = setInterval(refreshPortalSettings, 15000)
+    return () => clearInterval(t)
   }, [])
+
+  useEffect(() => {
+    if (!receptionDailyReportEnabled && section === 'reports') {
+      setSection('opd')
+    }
+  }, [receptionDailyReportEnabled, section])
 
   useEffect(() => { saveRoomsConfig(rooms) }, [rooms])
 
@@ -14339,7 +16001,7 @@ export default function ReceptionistPortal() {
 
   const todayAlerts = alerts.filter(a => a.is_today)
   const tomorrowAlerts = alerts.filter(a => a.is_tomorrow)
-  const sectionTitle = NAV_GROUPS.flatMap(g => g.items).find(i => i.id === section)?.label || 'Receptionist'
+  const sectionTitle = navGroups.flatMap(g => g.items).find(i => i.id === section)?.label || 'Receptionist'
 
   function handleMoveOpdToIpd(visitDraft) {
     setIpdAdmissionDraft(visitDraft || null)
@@ -14361,6 +16023,7 @@ export default function ReceptionistPortal() {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs bg-white/20 px-3 py-1 rounded-full font-medium">{sectionTitle}</span>
+          <NetSpeedBadge />
 
           {/* Follow-up Bell */}
           <div className="relative" ref={bellRef}>
@@ -14458,7 +16121,7 @@ export default function ReceptionistPortal() {
 
       {/* Body: sidebar + content */}
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar activeSection={section} onSelect={setSection} />
+        <Sidebar activeSection={section} onSelect={setSection} navGroups={navGroups} />
         <main className={`flex-1 flex flex-col min-h-0 ${section === 'opd' ? 'overflow-hidden p-0' : section === 'payment_slip' ? 'overflow-hidden p-4' : section === 'settings' ? 'overflow-hidden p-5' : 'overflow-auto p-5'}`}>
           {section === 'opd' && <OPDSection rooms={rooms} />}
             {section === 'ipd' && <IPDSection mode="ipd" initialAdmissionDraft={ipdAdmissionDraft} />}
@@ -14469,8 +16132,9 @@ export default function ReceptionistPortal() {
             {section === 'register' && <RegisterPatientSection />}
             {section === 'payment_slip' && <PaymentSlipSection />}
             {section === 'payment_slip_list' && <PaymentSlipsListSection />}
+            {receptionDailyReportEnabled && section === 'reports' && <ReportsSection />}
             {section === 'discharge' && <DischargeSection />}
-            {section === 'attendance' && <StaffAttendanceSection />}
+            {section === 'attenance' && <StaffAttendanceSection />}
             {section === 'settings' && (
               <ReceptionSettingsSection
                 rooms={rooms}

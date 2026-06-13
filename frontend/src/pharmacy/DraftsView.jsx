@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import api from '../api'
 import toast from 'react-hot-toast'
+import { formatWithPattern, formatTime, withTimeTokens } from '../utils/dateTimeFormat'
 import { format, isToday, isYesterday } from 'date-fns'
 
 // ── Delete Confirmation Modal ─────────────────────────────────────────────────
@@ -46,7 +47,7 @@ function DeleteConfirmModal({ draft, onCancel, onConfirm, deleting }) {
               <FileText size={12} className="text-slate-400 shrink-0" />
               <span className="text-[11px] font-mono text-slate-500">#{draft.invoice_no}</span>
               {draft.created_at && (
-                <span className="text-[10px] text-slate-400 ml-auto">{format(new Date(draft.created_at), 'dd MMM · HH:mm')}</span>
+                <span className="text-[10px] text-slate-400 ml-auto">{formatWithPattern(new Date(draft.created_at), 'dd MMM · HH:mm')}</span>
               )}
             </div>
           </div>
@@ -69,7 +70,7 @@ function dateLabel(dateStr) {
   if (!dateStr) return '—'
   try {
     const d = new Date(dateStr)
-    if (isToday(d)) return format(d, 'HH:mm')
+    if (isToday(d)) return formatTime(d)
     if (isYesterday(d)) return 'Yesterday'
     return format(d, 'dd MMM')
   } catch { return '—' }
@@ -101,7 +102,7 @@ function buildDraftPrintHtml(draft) {
   const patientName = draft.patient_details?.first_name
     ? `${draft.patient_details.first_name} ${draft.patient_details.last_name || ''}`.trim()
     : draft.patient_name || 'Walk-in Patient'
-  const createdAt = draft.created_at ? format(new Date(draft.created_at), 'dd MMM yyyy, hh:mm a') : '—'
+  const createdAt = draft.created_at ? formatWithPattern(draft.created_at, 'dd MMM yyyy, HH:mm') : '—'
   const { prescriptionLines, notesLines } = extractDraftTextParts(draft.remarks)
   const fallbackItems = Array.isArray(draft.items) ? draft.items : []
   const rxLines = prescriptionLines.length
@@ -169,12 +170,13 @@ async function printDraftPrescription(draft) {
 }
 
 // ── Completed Invoice Card ────────────────────────────────────────────────────
-function CompletedCard({ invoice, onView }) {
+function CompletedCard({ invoice, onViewOriginal, onViewPrinted }) {
   const patientName = invoice.patient_details?.first_name
     ? `${invoice.patient_details.first_name} ${invoice.patient_details.last_name || ''}`.trim()
     : 'Patient'
   const itemCount = Array.isArray(invoice.items) ? invoice.items.length : (invoice.items_count || '—')
   const grandTotal = Number(invoice.grand_total || 0).toFixed(2)
+  const hasPrintCopy = !!(invoice.has_print_copy || (invoice.print_html && String(invoice.print_html).trim()))
 
   return (
     <div className="bg-white border border-emerald-200 rounded-xl p-3 flex flex-col gap-2.5 relative overflow-hidden hover:shadow-md transition-all">
@@ -209,14 +211,24 @@ function CompletedCard({ invoice, onView }) {
         <span className="text-[13px] font-bold text-emerald-700 tabular-nums">₹{grandTotal}</span>
       </div>
 
-      {/* View button */}
-      <button
-        onClick={() => onView(invoice)}
-        className="ml-2 mt-auto flex items-center justify-center gap-1.5 w-full py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
-      >
-        <Receipt size={12} />
-        View Invoice
-      </button>
+      <div className={`ml-2 mt-auto grid gap-1.5 w-full ${hasPrintCopy ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        <button
+          onClick={() => onViewOriginal(invoice)}
+          className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+        >
+          <Receipt size={11} />
+          Original
+        </button>
+        {hasPrintCopy ? (
+          <button
+            onClick={() => onViewPrinted(invoice)}
+            className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-violet-600 text-white hover:bg-violet-700 transition-colors"
+          >
+            <Printer size={11} />
+            Printed
+          </button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -309,7 +321,12 @@ function SectionHeader({ icon: Icon, title, count, countColor = 'bg-slate-100 te
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
-export default function DraftsView({ onLoadDraft, completedInvoices = [], onViewInvoice }) {
+export default function DraftsView({
+  onLoadDraft,
+  completedInvoices = [],
+  onViewInvoiceOriginal,
+  onViewInvoicePrinted,
+}) {
   const [drafts, setDrafts] = useState([])
   const [loading, setLoading] = useState(true)
   const [confirmTarget, setConfirmTarget] = useState(null)
@@ -468,7 +485,8 @@ export default function DraftsView({ onLoadDraft, completedInvoices = [], onView
                   <CompletedCard
                     key={inv.id}
                     invoice={inv}
-                    onView={onViewInvoice}
+                    onViewOriginal={onViewInvoiceOriginal}
+                    onViewPrinted={onViewInvoicePrinted}
                   />
                 ))}
               </div>

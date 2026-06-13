@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import DischargeInvestigation, DischargeMedication, DischargeSummary, DischargeSurgery
+from .models import (
+    DischargeInvestigation,
+    DischargeMedication,
+    DischargeSummary,
+    DischargeSummaryTemplate,
+    DischargeSurgery,
+)
 
 
 @admin.register(DischargeSummary)
@@ -22,3 +28,9 @@ class DischargeMedicationAdmin(admin.ModelAdmin):
 @admin.register(DischargeInvestigation)
 class DischargeInvestigationAdmin(admin.ModelAdmin):
     list_display = ("id", "summary", "category", "test_name", "value", "sort_order")
+
+
+@admin.register(DischargeSummaryTemplate)
+class DischargeSummaryTemplateAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "hospital", "is_active", "updated_at")
+    list_filter = ("hospital", "is_active")

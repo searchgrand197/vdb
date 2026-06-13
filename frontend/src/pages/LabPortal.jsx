@@ -26,6 +26,7 @@ import {
 } from '@mui/icons-material'
 import api from '../api'
 import toast from 'react-hot-toast'
+import { formatDateTime, useTimeDisplayMode } from '../utils/dateTimeFormat'
 import { format } from 'date-fns'
 import { useAuthStore } from '../stores/authStore'
 
@@ -66,6 +67,7 @@ const STATUS_COLORS = {
 }
 
 export default function LabPortal() {
+  useTimeDisplayMode()
   const [activeTab, setActiveTab] = useState('queue')
   const [reports, setReports] = useState([])
   const [tests, setTests] = useState([])
@@ -644,7 +646,7 @@ function FinalReportsJournal({ reports, setPrintingReport }) {
                          <p className="text-slate-900 font-bold">{r.patient_details?.first_name} {r.patient_details?.last_name}</p>
                          <p className="text-[10px] text-slate-400">{r.patient_details?.uhid}</p>
                       </td>
-                      <td className="px-8 py-5 text-center text-slate-400 font-sans not-italic">{r.reported_at ? format(new Date(r.reported_at), 'dd-MM-yyyy HH:mm') : 'N/A'}</td>
+                      <td className="px-8 py-5 text-center text-slate-400 font-sans not-italic">{r.reported_at ? formatDateTime(r.reported_at, { dateStyle: 'dd-MM-yyyy' }) : 'N/A'}</td>
                       <td className="px-8 py-5 text-right">
                          <button onClick={() => setPrintingReport(r)} className="p-2 text-slate-300 hover:text-indigo-600 transition-colors">
                             <Printer size={18} />
@@ -702,11 +704,11 @@ function ProfessionalReportPrint({ report, onClose }) {
            <div className="space-y-4">
               <p className="flex justify-between border-b border-slate-50 pb-2"><span className="not-italic text-[9px] text-slate-300">Patient:</span> <span>{report.patient_details?.first_name} {report.patient_details?.last_name}</span></p>
               <p className="flex justify-between border-b border-slate-50 pb-2"><span className="not-italic text-[9px] text-slate-300">Lab ID:</span> <span>#{report.lab_no}</span></p>
-              <p className="flex justify-between"><span className="not-italic text-[9px] text-slate-300">Collected:</span> <span>{report.collected_at ? format(new Date(report.collected_at), 'dd-MM-yyyy HH:mm') : '--'}</span></p>
+              <p className="flex justify-between"><span className="not-italic text-[9px] text-slate-300">Collected:</span> <span>{report.collected_at ? formatDateTime(report.collected_at, { dateStyle: 'dd-MM-yyyy' }) : '--'}</span></p>
            </div>
            <div className="space-y-4">
               <p className="flex justify-between border-b border-slate-50 pb-2"><span className="not-italic text-[9px] text-slate-300">Age/Sex:</span> <span>{report.patient_details?.age || '--'} Y / {report.patient_details?.gender}</span></p>
-              <p className="flex justify-between border-b border-slate-50 pb-2"><span className="not-italic text-[9px] text-slate-300">Reported:</span> <span>{report.reported_at ? format(new Date(report.reported_at), 'dd-MM-yyyy HH:mm') : '--'}</span></p>
+              <p className="flex justify-between border-b border-slate-50 pb-2"><span className="not-italic text-[9px] text-slate-300">Reported:</span> <span>{report.reported_at ? formatDateTime(report.reported_at, { dateStyle: 'dd-MM-yyyy' }) : '--'}</span></p>
               <p className="flex justify-between text-indigo-600"><span className="not-italic text-[9px] text-slate-300 tracking-widest">MD:</span> <span>{report.doctor_details?.name || 'SELF REFERRAL'}</span></p>
            </div>
         </div>

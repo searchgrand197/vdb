@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -10,7 +9,6 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
-from apps.doctors.models import DoctorProfile
 from apps.opd.models import OPDVisit, OPDVisitStatusHistory
 from apps.opd.serializers import OPDVisitCreateUpdateSerializer, OPDVisitSerializer
 from apps.opd.services import resolve_opd_doctor_name
@@ -20,20 +18,17 @@ from apps.auditlogs.services import create_audit_log
 from apps.settings_management.models import ReceptionPortalSettings
 from apps.shared.response import success_response
 
-# Reusable prefetch for DoctorProfile — eliminates N+1 on list endpoints.
-_DOCTOR_PROFILE_PREFETCH = Prefetch(
-    'doctor_user__doctor_profiles',
-    queryset=DoctorProfile.objects.filter(
-        is_deleted=False, is_active=True,
-    ).only('user_id', 'hospital_id', 'name'),
-    to_attr='_active_doctor_profiles',
-)
-
 
 class OPDVisitViewSet(viewsets.ModelViewSet):
     queryset = OPDVisit.objects.all()
     filter_backends = (DjangoFilterBackend, SearchFilter, OrderingFilter)
-    filterset_fields = ("visit_date", "status", "doctor_user", "patient")
+    filterset_fields = {
+        "visit_date": ["exact", "gte", "lte"],
+        "status": ["exact"],
+        "doctor_user": ["exact"],
+        "patient": ["exact"],
+        "department": ["exact", "icontains"],
+    }
     search_fields = (
         "patient__uhid",
         "patient__phone",
@@ -70,7 +65,7 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset().select_related(
             'patient', 'patient__address', 'patient__guardian', 'doctor_user', 'created_by', 'cancelled_by'
-        ).prefetch_related(_DOCTOR_PROFILE_PREFETCH)
+        )
         user = self.request.user
         if not user.hospital_id:
             return qs.none()
@@ -226,9 +221,7 @@ def follow_up_alerts(request):
         follow_up_date__in=[today, tomorrow],
         follow_up_completed=False,
         deleted_at__isnull=True,
-    ).select_related('patient', 'doctor_user').prefetch_related(
-        _DOCTOR_PROFILE_PREFETCH
-    ).order_by('follow_up_date')
+    ).select_related('patient', 'doctor_user').order_by('follow_up_date')
 
     results = []
     for v in visits:
@@ -236,21 +229,6 @@ def follow_up_alerts(request):
         name = f"{patient.first_name} {patient.last_name}".strip() or patient.uhid
         is_today = v.follow_up_date == today
         is_tomorrow = v.follow_up_date == tomorrow
-
-        # Resolve doctor name from prefetched profiles (no extra DB query per row).
-        doctor_name = ""
-        if v.doctor_user:
-            profiles = getattr(v.doctor_user, '_active_doctor_profiles', None)
-            if profiles is not None:
-                for p in profiles:
-                    if str(p.hospital_id) == str(v.hospital_id):
-                        doctor_name = p.name.strip()
-                        break
-            else:
-                doctor_name = resolve_opd_doctor_name(
-                    doctor_user=v.doctor_user, hospital_id=v.hospital_id,
-                )
-
         results.append({
             'id': str(v.id),
             'patient_name': name,
@@ -262,7 +240,10 @@ def follow_up_alerts(request):
             'is_tomorrow': is_tomorrow,
             'visit_reason': v.visit_reason,
             'revisit_advice': v.revisit_advice,
-            'doctor_name': doctor_name,
+            'doctor_name': resolve_opd_doctor_name(
+                doctor_user=v.doctor_user,
+                hospital_id=v.hospital_id,
+            ),
         })
 
     return Response(results)

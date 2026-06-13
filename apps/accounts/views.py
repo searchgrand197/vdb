@@ -12,9 +12,15 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from apps.accounts.serializers import (
     PasswordChangeSerializer,
+    PublicPasswordChangeSerializer,
     UserProfileSerializer,
     UserProfileUpdateSerializer,
 )
+from apps.roles_permissions.effective_permissions import (
+    auth_session_payload_for_user,
+    user_may_access_pharmacy,
+)
+from apps.roles_permissions.portal_registry import ALL_PORTAL_CODES
 from apps.shared.response import success_response
 
 User = get_user_model()
@@ -31,24 +37,93 @@ class TokenObtainPairWithResponse(TokenObtainPairView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, *args, **kwargs):
+        intended_portal = (request.data.get("intended_portal") or request.data.get("portal") or "").strip().lower()
+        if intended_portal and intended_portal not in ALL_PORTAL_CODES:
+            return Response(
+                {
+                    "success": False,
+                    "errors": {
+                        "detail": ["Unknown portal selection."],
+                        "allowed_portals": [],
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         response = super().post(request, *args, **kwargs)
         if response.status_code < 400:
             data = dict(response.data)
-            # Enrich with user profile so the frontend can store hospital_id
             try:
                 from rest_framework_simplejwt.tokens import AccessToken
-                token = AccessToken(data['access'])
-                user_id = token['user_id']
-                user = User.objects.select_related('hospital').get(pk=user_id)
-                data['hospital_id'] = str(user.hospital_id) if user.hospital_id else None
-                data['email'] = user.email
-                data['first_name'] = user.first_name
-                data['last_name'] = user.last_name
-                data['is_superuser'] = user.is_superuser
+
+                token = AccessToken(data["access"])
+                user_id = token["user_id"]
+                user = User.objects.select_related("hospital").get(pk=user_id)
+                data["hospital_id"] = str(user.hospital_id) if user.hospital_id else None
+                data["email"] = user.email
+                data["first_name"] = user.first_name
+                data["last_name"] = user.last_name
+                data["is_superuser"] = user.is_superuser
+                data.update(auth_session_payload_for_user(user))
+                if intended_portal and intended_portal not in data.get("allowed_portals", []):
+                    return Response(
+                        {
+                            "success": False,
+                            "errors": {
+                                "detail": [
+                                    "Your account is not allowed to access this portal. "
+                                    "Contact your administrator."
+                                ],
+                                "allowed_portals": data.get("allowed_portals", []),
+                            },
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                pharmacy_branch_id = (
+                    request.data.get("pharmacy_branch_id")
+                    or request.data.get("pharmacy_branch")
+                    or ""
+                )
+                pharmacy_branch_id = str(pharmacy_branch_id).strip()
+                if intended_portal == "pharmacy" and pharmacy_branch_id:
+                    if not user_may_access_pharmacy(user, pharmacy_branch_id):
+                        return Response(
+                            {
+                                "success": False,
+                                "errors": {
+                                    "detail": [
+                                        "Your account is not allowed to access this pharmacy branch. "
+                                        "Contact your administrator."
+                                    ],
+                                    "allowed_pharmacy_ids": data.get("allowed_pharmacy_ids", []),
+                                },
+                            },
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
             except Exception:
                 pass
             return success_response(data=data)
         return response
+
+
+class AuthMeView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        payload = {
+            "id": str(user.id),
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "is_active": user.is_active,
+            "is_staff": user.is_staff,
+            "is_superuser": user.is_superuser,
+            "hospital_id": str(user.hospital_id) if user.hospital_id else None,
+            "hospital_name": user.hospital.name if getattr(user, "hospital", None) else None,
+        }
+        payload.update(auth_session_payload_for_user(user))
+        return success_response(data=payload)
 
 
 class LogoutView(APIView):
@@ -90,6 +165,24 @@ class PasswordChangeView(APIView):
         request.user.set_password(serializer.validated_data["new_password"])
         request.user.save(update_fields=["password"])
         return success_response(message="Password changed successfully.")
+
+
+class PublicPasswordChangeView(APIView):
+    """
+    POST /api/v1/auth/change-password/
+
+    For users who know their email and current password (e.g. after receiving an initial password).
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        serializer = PublicPasswordChangeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return success_response(
+            message="Your password was updated successfully. You can sign in with your new password."
+        )
 
 
 class PasswordResetRequestView(APIView):
@@ -174,29 +267,30 @@ class PharmacyBranchListView(APIView):
     """
     GET /api/v1/auth/pharmacies/
 
-    Public endpoint — returns all active Hospital rows flagged as
-    pharmacy branches (is_pharmacy=True, is_active=True).
-
-    Used by the login page to populate the pharmacy branch selector
-    before the user authenticates.
+    Returns active pharmacy branches. Unauthenticated callers see all branches
+    (login page). Authenticated non-superusers are limited to their allowed list
+    when configured on staff profile(s).
     """
 
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, *args, **kwargs):
         from apps.pharmacy.models import Pharmacy
+        from apps.roles_permissions.effective_permissions import allowed_pharmacies_for_user
 
-        branches = (
-            Pharmacy.objects.filter(is_active=True)
-            .order_by("hospital__name", "display_name", "name")
-            .values("id", "name", "display_name", "hospital__name")
-        )
+        qs = Pharmacy.objects.filter(is_active=True)
+        user = getattr(request, "user", None)
+        if user and user.is_authenticated and not user.is_superuser:
+            allowed_ids = allowed_pharmacies_for_user(user)
+            if allowed_ids:
+                qs = qs.filter(id__in=allowed_ids)
+
+        branches = qs.order_by("display_name", "name").values("id", "name", "display_name")
         data = [
             {
                 "id": str(b["id"]),
-                "label": b["display_name"].strip() or b["name"],
+                "label": (b["display_name"] or "").strip() or b["name"],
                 "name": b["name"],
-                "hospital_name": b.get("hospital__name") or "",
             }
             for b in branches
         ]

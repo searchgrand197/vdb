@@ -12,7 +12,7 @@ export function useSpecialtiesQuery(params = {}) {
   return useQuery({
     queryKey: [...specialtiesQueryKey, params],
     queryFn: () => fetchSpecialties(params),
-    refetchInterval: 60000,
+    refetchInterval: 10000,
   });
 }
 

@@ -60,14 +60,21 @@ class PatientViewSet(viewsets.ModelViewSet):
         self.required_permission = self.get_required_permission()
         return super().get_permissions()
 
-    def _get_hospital_for_request(self):
+    def _resolve_hospital_id(self):
+        """Hospital from body/query, else the authenticated user's hospital."""
         user = self.request.user
-        if user.is_superuser:
-            hospital_id = self.request.data.get("hospital_id") or self.request.query_params.get("hospital_id")
-            if not hospital_id:
-                raise ValueError("hospital_id is required for superuser requests.")
-            return user.hospital_id if user.hospital_id else hospital_id
-        return user.hospital_id
+        hospital_id = (
+            self.request.data.get("hospital_id")
+            or self.request.query_params.get("hospital_id")
+            or user.hospital_id
+        )
+        return hospital_id
+
+    def _get_hospital_for_request(self):
+        hospital_id = self._resolve_hospital_id()
+        if not hospital_id:
+            raise ValueError("hospital_id is required.")
+        return hospital_id
 
     def get_queryset(self):
         qs = super().get_queryset().select_related("address")
@@ -215,17 +222,17 @@ class PatientViewSet(viewsets.ModelViewSet):
         return success_response(data=data)
 
     def create(self, request, *args, **kwargs):
-        if not request.user.is_superuser and not request.user.hospital_id:
-            return Response(
-                {"success": False, "errors": {"hospital": ["User is not assigned to any hospital."]}},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        hospital_id = request.user.hospital_id if not request.user.is_superuser else request.data.get("hospital_id")
-
+        hospital_id = self._resolve_hospital_id()
         if not hospital_id:
+            if request.user.is_superuser:
+                detail = "hospital_id is required. Pass hospital_id in the request or assign a hospital to your user."
+            elif not request.user.hospital_id:
+                detail = "User is not assigned to any hospital."
+            else:
+                detail = "hospital_id is required."
+            field = "hospital" if "not assigned" in detail.lower() else "hospital_id"
             return Response(
-                {"success": False, "errors": {"hospital_id": ["hospital_id is required."]}},
+                {"success": False, "errors": {field: [detail]}},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

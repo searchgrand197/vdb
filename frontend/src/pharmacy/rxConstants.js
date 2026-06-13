@@ -37,3 +37,13 @@ export function calculateRxQty(pattern, days, dosagePatternOptions = DEFAULT_DOS
 export function timingLabel(timing, timingOptions = DEFAULT_TIMING_OPTIONS) {
   return timingOptions.find((t) => t.v === timing)?.l || timing || ''
 }
+
+/** Prefer Saroj / Saroj Pharma over other branches when picking a default. */
+export function pickDefaultPharmacyBranchId(branches) {
+  if (!Array.isArray(branches) || !branches.length) return ''
+  const saroj = branches.find((b) => {
+    const text = `${b.label || ''} ${b.name || ''} ${b.display_name || ''}`.toLowerCase()
+    return text.includes('saroj')
+  })
+  return String((saroj || branches[0]).id)
+}

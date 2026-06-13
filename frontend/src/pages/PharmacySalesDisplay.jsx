@@ -107,7 +107,7 @@ export default function PharmacySalesDisplay() {
                 <td className="py-4 pr-4 text-slate-400 text-base">{i + 1}</td>
                 <td className="py-4 font-semibold text-slate-900">{line.name}</td>
                 <td className="py-4 text-right px-5 tabular-nums text-slate-600">
-                  {line.qty}
+                  {line.qtyLabel || line.qty}
                 </td>
                 <td className="py-4 text-right px-5 tabular-nums text-slate-500">
                   {line.mrp ? fmt(line.mrp) : '—'}

@@ -90,10 +90,14 @@ def process_purchase_challan(
     total_extra_tablets = Decimal("0")
     total_base_sum = Decimal("0")
 
-    default_row = PharmacyOutletSettings.objects.filter(hospital_id=hospital.id).values_list(
-        "default_gst_percent", flat=True
-    ).first()
-    default_gst = Decimal(str(default_row)) if default_row is not None else Decimal("5")
+    default_gst = Decimal("5")
+    pharmacy = getattr(request, "pharmacy", None)
+    if pharmacy is not None:
+        default_row = PharmacyOutletSettings.objects.filter(pharmacy_id=pharmacy.id).values_list(
+            "b2c_default_gst_percent", flat=True
+        ).first()
+        if default_row is not None:
+            default_gst = Decimal(str(default_row))
 
     for raw in lines:
         try:

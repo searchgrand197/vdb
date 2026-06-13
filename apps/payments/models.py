@@ -3,9 +3,9 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models, transaction
 from django.utils import timezone
-from django.utils.crypto import get_random_string
 
-from apps.billing.models import BillingInvoice
+from apps.billing.models import BillingInvoice, CollectionAttribution
+from apps.settings_management.document_number_service import render_document_number
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
 
 
@@ -44,7 +44,6 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
     transaction_reference = models.CharField(max_length=120, blank=True, default="")
     receipt_no = models.CharField(max_length=60, blank=True, default="")
     slip_number = models.CharField(max_length=80, unique=True, db_index=True, blank=True, default="")
-    public_slip_code = models.CharField(max_length=12, unique=True, db_index=True, blank=True, default="")
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUCCESS, db_index=True)
     paid_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -55,11 +54,23 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
         related_name="collected_payments",
     )
 
+    attribution_type = models.CharField(
+        max_length=20,
+        choices=CollectionAttribution.choices,
+        default=CollectionAttribution.HOSPITAL_SELF,
+        db_index=True,
+    )
+    attributed_doctor_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attributed_payments",
+    )
+
     @staticmethod
     def _build_slip_number(hospital, year: int, seq: int) -> str:
-        slug = (getattr(hospital, "slug", "") or getattr(hospital, "name", "HOSP") or "HOSP")
-        slug_part = "".join(ch for ch in str(slug).upper() if ch.isalnum())[:5] or "HOSP"
-        return f"PSL-{slug_part}-{year}-{seq:06d}"
+        return render_document_number(hospital, "payment_slip", year, seq)
 
     def _generate_slip_number(self) -> str:
         if not self.hospital_id:
@@ -76,19 +87,9 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
             hospital = getattr(self, "hospital", None) or Hospital.objects.only("id", "slug", "name").get(id=self.hospital_id)
             return self._build_slip_number(hospital, year, seq_obj.last_seq)
 
-    def _generate_public_slip_code(self) -> str:
-        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        for _ in range(32):
-            code = get_random_string(8, allowed_chars=alphabet)
-            if not PaymentTransaction.objects.filter(public_slip_code=code).exists():
-                return code
-        return get_random_string(12, allowed_chars=alphabet)
-
     def save(self, *args, **kwargs):
         if not self.slip_number:
             self.slip_number = self._generate_slip_number()
-        if not self.public_slip_code:
-            self.public_slip_code = self._generate_public_slip_code()
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:

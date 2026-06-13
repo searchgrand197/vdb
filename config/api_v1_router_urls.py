@@ -33,10 +33,12 @@ from apps.inventory.views import (
     StockLedgerViewSet,
     UnitViewSet,
 )
+from apps.ipd.scheme_views import SchemeViewSet
 from apps.ipd.views import IPDAdmissionViewSet
 from apps.opd.views import OPDVisitViewSet, follow_up_alerts
 from apps.patients.views import PatientViewSet
 from apps.payments.views import PaymentTransactionViewSet, payment_quick_services
+from apps.roles_permissions.designation_permission_views import DesignationPermissionProfileViewSet
 from apps.roles_permissions.user_permission_views import UserPermissionProfileViewSet
 from apps.shared.routers import PublicApiRootRouter
 from apps.staff.views import (
@@ -103,6 +105,7 @@ router.register(r"emergency/cases", EmergencyCaseViewSet, basename="emergency-ca
 router.register(r"follow-ups", FollowUpViewSet, basename="follow-ups")
 router.register(r"invoices", BillingInvoiceViewSet, basename="invoices")
 router.register(r"ipd-admissions", IPDAdmissionViewSet, basename="ipd-admissions")
+router.register(r"schemes", SchemeViewSet, basename="schemes")
 router.register(r"medicines", MedicineViewSet, basename="medicines")
 router.register(r"medicine-categories", MedicineCategoryViewSet, basename="medicine-categories")
 router.register(r"opd-visits", OPDVisitViewSet, basename="opd-visits")
@@ -124,6 +127,11 @@ router.register(
 router.register(r"stock-ledgers", StockLedgerViewSet, basename="stock-ledgers")
 router.register(r"tokens", TokenViewSet, basename="tokens")
 router.register(r"units", UnitViewSet, basename="units")
+router.register(
+    r"designation-permission-profiles",
+    DesignationPermissionProfileViewSet,
+    basename="designation-permission-profiles",
+)
 router.register(
     r"user-permission-profiles",
     UserPermissionProfileViewSet,

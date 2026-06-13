@@ -3,6 +3,7 @@ import { X, Search, Plus, Trash2, Store, CheckCircle, Loader2, Pill, ArrowRight 
 import api from '../api'
 import toast from 'react-hot-toast'
 import { useDebouncedValue } from '../pharmacy/useDebouncedValue'
+import { pickDefaultPharmacyBranchId } from '../pharmacy/rxConstants'
 
 export default function DraftPrescriptionModal({ patient, admissionId, onClose, onSave }) {
   const [branches, setBranches] = useState([])
@@ -23,7 +24,7 @@ export default function DraftPrescriptionModal({ patient, admissionId, onClose, 
       .then(res => {
         const list = res.data?.data || res.data?.results || []
         setBranches(list)
-        if (list.length > 0) setBranchId(String(list[0].id))
+        if (list.length > 0) setBranchId(pickDefaultPharmacyBranchId(list))
       })
       .catch(() => toast.error('Failed to load pharmacy branches'))
       .finally(() => setLoading(false))

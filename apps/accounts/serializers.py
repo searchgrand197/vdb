@@ -52,3 +52,49 @@ class PasswordChangeSerializer(serializers.Serializer):
         password_validation.validate_password(new_password, user=user)
         return attrs
 
+
+class PublicPasswordChangeSerializer(serializers.Serializer):
+    """
+    Change password using login identifier (email) + current password — no JWT required.
+    """
+
+    email = serializers.EmailField()
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        try:
+            self._target_user = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(_("No account found for this email address."))
+        if not self._target_user.is_active:
+            raise serializers.ValidationError(_("This account is disabled."))
+        return email
+
+    def validate(self, attrs):
+        user: User = getattr(self, "_target_user", None)
+        if user is None:
+            raise serializers.ValidationError({"email": _("Invalid email.")})
+
+        if not check_password(attrs["current_password"], user.password):
+            raise serializers.ValidationError({"current_password": _("Current password is incorrect.")})
+
+        if attrs["new_password"] != attrs["confirm_password"]:
+            raise serializers.ValidationError({"confirm_password": _("Passwords do not match.")})
+
+        if attrs["current_password"] == attrs["new_password"]:
+            raise serializers.ValidationError(
+                {"new_password": _("New password must be different from your current password.")}
+            )
+
+        password_validation.validate_password(attrs["new_password"], user=user)
+        return attrs
+
+    def save(self, **kwargs):
+        user: User = self._target_user
+        user.set_password(self.validated_data["new_password"])
+        user.save(update_fields=["password"])
+        return user
+

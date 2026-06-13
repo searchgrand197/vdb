@@ -107,3 +107,19 @@ class ReceptionPortalSettingsView(generics.RetrieveUpdateAPIView):
             defaults={"default_city": "Jind", "default_state": "Haryana"},
         )
         return obj
+
+    def retrieve(self, request, *args, **kwargs):
+        serializer = self.get_serializer(self.get_object())
+        return success_response(data=serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return success_response(data=serializer.data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)

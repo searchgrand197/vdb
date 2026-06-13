@@ -85,13 +85,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         return name or self.email
 
     def has_permission(self, permission_code: str) -> bool:
-        """
-        Roles/permissions app has been removed; keep simple superuser-only behavior.
-        """
         return bool(self.is_superuser)
 
     def has_module_permission(self, module_code: str) -> bool:
-        """
-        Roles/permissions app has been removed; keep simple superuser-only behavior.
-        """
         return bool(self.is_superuser)

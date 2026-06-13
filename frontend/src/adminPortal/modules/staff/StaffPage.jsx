@@ -5,6 +5,7 @@ import { Alert, Box, CircularProgress, IconButton, MenuItem, Typography } from '
 import AddIcon from '@mui/icons-material/Add';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined';
+import { useAuth } from '@admin/context/AuthContext';
 import { useStaffQuery, useStaffMutations } from '@/hooks/useStaffQuery';
 import { useDepartmentsQuery } from '@/hooks/useDepartmentsQuery';
 import { useDesignationsQuery } from '@/hooks/useDesignationsQuery';
@@ -24,6 +25,7 @@ function staffRowMeta(raw) {
   const email = raw?.email || raw?.user_email || '—';
   const phone = raw?.phone || raw?.phone_number || raw?.mobile || '—';
   const address = raw?.address || raw?.current_address || raw?.full_address || '—';
+  const employeeCode = (raw?.employee_code || '').trim() || '—';
   const departmentName = raw?.department_name || String(raw?.department || '');
   const designationName = raw?.designation_name || String(raw?.designation || '');
 
@@ -33,6 +35,7 @@ function staffRowMeta(raw) {
     email,
     phone,
     address,
+    employeeCode,
     departmentName,
     designationName,
     raw,
@@ -44,6 +47,9 @@ function optionId(item) {
 }
 
 export function StaffPage() {
+  const { user } = useAuth();
+  const canManage = user?.is_superuser === true;
+
   const [search, setSearch] = useState('');
   const [formOpen, setFormOpen] = useState(false);
   const [formError, setFormError] = useState('');
@@ -97,10 +103,15 @@ export function StaffPage() {
     return list.filter((item) => {
       const name = String(item?.name ?? '').toLowerCase();
       const email = String(item?.email ?? '').toLowerCase();
+      const employeeCode = String(item?.employeeCode ?? '').toLowerCase();
       const dept = String(item?.departmentName ?? '').toLowerCase();
       const desig = String(item?.designationName ?? '').toLowerCase();
       return (
-        name.includes(q) || email.includes(q) || dept.includes(q) || desig.includes(q)
+        name.includes(q) ||
+        email.includes(q) ||
+        employeeCode.includes(q) ||
+        dept.includes(q) ||
+        desig.includes(q)
       );
     });
   }, [data?.data, search]);
@@ -117,10 +128,6 @@ export function StaffPage() {
       name: d?.name ?? '—',
     }))
     .filter((d) => d.id != null);
-
-  if (isError) {
-    showToast({ type: 'error', message: error?.message || 'Failed to load staff' });
-  }
 
   const defaultValues = {
     first_name: '',
@@ -236,25 +243,33 @@ export function StaffPage() {
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
       <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
         <Typography variant="h5">Staff</Typography>
-        <AppButton variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
-          Add staff
-        </AppButton>
+        {canManage ? (
+          <AppButton variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
+            Add staff
+          </AppButton>
+        ) : null}
       </Box>
 
       <Box sx={{ maxWidth: { md: '50%', lg: '33.33%' } }}>
         <AppTextField
           label="Search"
-          placeholder="Name, email, department, designation"
+          placeholder="Name, email, employee code, department, designation"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
       </Box>
 
+      {!canManage ? (
+        <Box>
+          <Alert severity="info">
+            Only superusers can create, edit, or delete staff profiles. You can view the list below.
+          </Alert>
+        </Box>
+      ) : null}
+
       {isError ? (
         <Box>
-          <Alert severity="error">
-            {error?.message || 'Failed to load staff. Please try again later.'}
-          </Alert>
+          <Alert severity="error">{getApiErrorMessage(error)}</Alert>
         </Box>
       ) : null}
 
@@ -270,6 +285,11 @@ export function StaffPage() {
                 id: 'name',
                 header: 'Name',
                 renderCell: (row) => row.name,
+              },
+              {
+                id: 'employee_code',
+                header: 'Employee code',
+                renderCell: (row) => row.employeeCode,
               },
               {
                 id: 'email',
@@ -300,23 +320,27 @@ export function StaffPage() {
             data={rows}
             emptyMessage="No staff found"
             getRowId={(row) => row.id}
-            renderActions={(row) => (
-              <>
-                <IconButton size="small" aria-label="Edit staff" onClick={() => openEdit(row)}>
-                  <EditOutlinedIcon fontSize="small" />
-                </IconButton>
-                <IconButton
-                  size="small"
-                  aria-label="Delete staff"
-                  onClick={() => {
-                    setDeleteError('');
-                    setDeleteTarget({ id: row.id, name: row.name });
-                  }}
-                >
-                  <DeleteOutlinedIcon fontSize="small" />
-                </IconButton>
-              </>
-            )}
+            renderActions={(row) =>
+              canManage ? (
+                <>
+                  <IconButton size="small" aria-label="Edit staff" onClick={() => openEdit(row)}>
+                    <EditOutlinedIcon fontSize="small" />
+                  </IconButton>
+                  <IconButton
+                    size="small"
+                    aria-label="Delete staff"
+                    onClick={() => {
+                      setDeleteError('');
+                      setDeleteTarget({ id: row.id, name: row.name });
+                    }}
+                  >
+                    <DeleteOutlinedIcon fontSize="small" />
+                  </IconButton>
+                </>
+              ) : (
+                '—'
+              )
+            }
           />
         )}
       </Box>

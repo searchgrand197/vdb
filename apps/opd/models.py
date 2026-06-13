@@ -3,6 +3,7 @@ from django.db import models, transaction
 from django.utils import timezone
 
 from apps.patients.models import Patient
+from apps.settings_management.document_number_service import render_document_number
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
 
 class OPDVisitSequence(TimeStampedModel):
@@ -44,6 +45,8 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         blank=True,
         related_name="opd_visits_as_doctor",
     )
+
+    department = models.CharField(max_length=120, blank=True, default="")
 
     visit_reason = models.TextField(blank=True, default="")
     symptoms = models.TextField(blank=True, default="")
@@ -104,9 +107,7 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
             seq_obj.last_seq += 1
             seq_obj.save(update_fields=["last_seq", "updated_at"])
             
-            slug = (getattr(self.hospital, "slug", "") or getattr(self.hospital, "name", "HOSP") or "HOSP")
-            slug_part = "".join(ch for ch in str(slug).upper() if ch.isalnum())[:4] or "HOSP"
-            return f"OPD-{slug_part}-{year}-{seq_obj.last_seq:05d}"
+            return render_document_number(self.hospital, "opd", year, seq_obj.last_seq)
 
     def save(self, *args, **kwargs):
         if not self.opd_no:

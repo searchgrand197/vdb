@@ -90,6 +90,45 @@ class DoctorProfileCreateUpdateSerializer(serializers.ModelSerializer):
             "is_active",
         ]
 
+    def validate_doctor_code(self, value):
+        code = (value or "").strip()
+        if not code:
+            raise serializers.ValidationError("Doctor code is required.")
+        return code
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        request = self.context.get("request")
+        hospital_id = (
+            getattr(request.user, "hospital_id", None)
+            if request and getattr(request, "user", None) and request.user.is_authenticated
+            else None
+        )
+
+        code = attrs.get("doctor_code")
+        if code is None and self.instance is not None:
+            code = self.instance.doctor_code
+        code = (code or "").strip()
+        if not code:
+            raise serializers.ValidationError({"doctor_code": "Doctor code is required."})
+        attrs["doctor_code"] = code
+
+        if hospital_id is None:
+            return attrs
+
+        qs = DoctorProfile.objects.filter(
+            hospital_id=hospital_id,
+            is_deleted=False,
+            doctor_code__iexact=code,
+        )
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                {"doctor_code": "A doctor with this code already exists at your hospital."}
+            )
+        return attrs
+
 
 class DoctorWeeklyScheduleSerializer(serializers.ModelSerializer):
     hospital_id = serializers.UUIDField(read_only=True)

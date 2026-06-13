@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import re
+from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Max, Sum
+from django.db.models import Max, Q, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.filters import OrderingFilter, SearchFilter
+from django_filters import rest_framework as django_filters
+from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 
 from apps.auditlogs.services import create_audit_log
 from apps.billing.models import BillingInvoice
+from apps.billing.collection_attribution import apply_attribution_to_payment
 from apps.opd.models import OPDVisit
 from apps.payments.models import CashHandover, PaymentQuickCategory, PaymentQuickService, PaymentTransaction
+from apps.settings_management.models import ReceptionPortalSettings
 from apps.payments.serializers import PaymentTransactionCreateSerializer, PaymentTransactionSerializer
+from apps.roles_permissions.effective_permissions import allowed_portals_for_user
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.shared.response import success_response
 
@@ -32,12 +39,59 @@ def _invoice_amount_paid_success(invoice: BillingInvoice):
     return total
 
 
+class PaymentTransactionFilter(django_filters.FilterSet):
+    paid_at__date__gte = django_filters.DateFilter(field_name="paid_at", lookup_expr="date__gte")
+    paid_at__date__lte = django_filters.DateFilter(field_name="paid_at", lookup_expr="date__lte")
+    payment_mode = django_filters.CharFilter()
+    status = django_filters.CharFilter()
+    invoice__encounter_type = django_filters.CharFilter()
+    collected_by = django_filters.UUIDFilter()
+    attribution_type = django_filters.CharFilter()
+    attributed_doctor_user = django_filters.UUIDFilter()
+    advance_only = django_filters.BooleanFilter(method="filter_advance_only")
+    refund_only = django_filters.BooleanFilter(method="filter_refund_only")
+
+    class Meta:
+        model = PaymentTransaction
+        fields = []
+
+    def filter_advance_only(self, queryset, name, value):
+        if value in (True, "true", "1", 1):
+            return queryset.filter(invoice__invoice_no__startswith="IPDADV-")
+        return queryset
+
+    def filter_refund_only(self, queryset, name, value):
+        if value in (True, "true", "1", 1):
+            return queryset.filter(
+                Q(invoice__invoice_no__icontains="IPDREF") | Q(amount__lt=0)
+            )
+        return queryset
+
+
+_PAYMENT_SEARCH_LOOKUPS = (
+    "invoice__invoice_no",
+    "invoice__patient__uhid",
+    "invoice__patient__first_name",
+    "invoice__patient__last_name",
+    "invoice__patient__phone",
+    "transaction_reference",
+    "receipt_no",
+    "slip_number",
+)
+
+
 class PaymentTransactionViewSet(viewsets.ModelViewSet):
-    queryset = PaymentTransaction.objects.all().select_related("invoice", "invoice__patient", "collected_by").prefetch_related(
+    queryset = PaymentTransaction.objects.all().select_related(
+        "invoice",
+        "invoice__patient",
+        "invoice__patient__guardian",
+        "collected_by",
+        "attributed_doctor_user",
+    ).prefetch_related(
         "invoice__items"
     )
-    filter_backends = (SearchFilter, OrderingFilter)
-    search_fields = ("invoice__invoice_no", "invoice__patient__uhid", "transaction_reference", "receipt_no", "slip_number")
+    filter_backends = (django_filters.DjangoFilterBackend, OrderingFilter)
+    filterset_class = PaymentTransactionFilter
     ordering_fields = ("paid_at", "created_at", "amount")
     ordering = ("-paid_at", "-created_at")
 
@@ -70,6 +124,27 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             return qs.none()
         return qs.filter(hospital_id=self.request.user.hospital_id)
 
+    def filter_queryset(self, queryset):
+        qs = super().filter_queryset(queryset)
+        search = (self.request.query_params.get("search") or "").strip()
+        if not search:
+            return qs
+
+        terms = [part for part in re.split(r"\s+", search) if part]
+        if not terms:
+            return qs
+
+        filters = Q()
+        for term in terms:
+            term_q = Q()
+            for lookup in _PAYMENT_SEARCH_LOOKUPS:
+                term_q |= Q(**{f"{lookup}__icontains": term})
+            digits = re.sub(r"\D", "", term)
+            if len(digits) >= 4:
+                term_q |= Q(invoice__patient__phone__icontains=digits)
+            filters &= term_q
+        return qs.filter(filters).distinct()
+
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         serializer = PaymentTransactionCreateSerializer(data=request.data)
@@ -97,7 +172,9 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
         payload["hospital_id"] = invoice.hospital_id
         payload["collected_by_id"] = request.user.id
 
-        payment = PaymentTransaction.objects.create(**payload)
+        payment = PaymentTransaction(**payload)
+        apply_attribution_to_payment(payment, invoice)
+        payment.save()
 
         total_paid = _invoice_amount_paid_success(invoice)
         invoice.amount_paid = total_paid
@@ -208,31 +285,94 @@ def _last_handover_reset_at(user) -> timezone.datetime | None:
     )
 
 
-def _build_collection_snapshot(user):
-    since = _last_handover_reset_at(user)
+def _user_can_view_hospital_collection(user) -> bool:
+    if getattr(user, "is_superuser", False):
+        return True
+    return "admin" in allowed_portals_for_user(user)
 
+
+def _reception_collection_enabled(hospital_id) -> bool:
+    if not hospital_id:
+        return True
+    try:
+        return ReceptionPortalSettings.objects.get(hospital_id=hospital_id).reception_collection_enabled
+    except ReceptionPortalSettings.DoesNotExist:
+        return True
+
+
+def _reception_collection_disabled_response():
+    return Response(
+        {
+            "success": False,
+            "errors": {
+                "detail": ["Reception shift collection is disabled for this hospital."],
+            },
+        },
+        status=status.HTTP_403_FORBIDDEN,
+    )
+
+
+def _default_hospital_collection_dates() -> tuple[date, date]:
+    today = timezone.localdate()
+    return today.replace(day=1), today
+
+
+def _parse_collection_date_param(raw, default: date) -> date:
+    if raw is None or str(raw).strip() == "":
+        return default
+    parsed = parse_date(str(raw).strip())
+    return parsed or default
+
+
+def _collection_payment_queryset(hospital_id, *, user_id=None, since=None, date_from=None, date_to=None):
     payment_qs = PaymentTransaction.objects.filter(
-        hospital_id=user.hospital_id,
-        collected_by_id=user.id,
+        hospital_id=hospital_id,
         status=PaymentTransaction.Status.SUCCESS,
         is_deleted=False,
     )
+    if user_id:
+        payment_qs = payment_qs.filter(collected_by_id=user_id)
+    if since:
+        payment_qs = payment_qs.filter(paid_at__gt=since)
+    if date_from:
+        payment_qs = payment_qs.filter(paid_at__date__gte=date_from)
+    if date_to:
+        payment_qs = payment_qs.filter(paid_at__date__lte=date_to)
+    return payment_qs
+
+
+def _collection_opd_queryset(hospital_id, *, user_id=None, since=None, date_from=None, date_to=None):
     opd_qs = OPDVisit.objects.filter(
-        hospital_id=user.hospital_id,
-        created_by_id=user.id,
+        hospital_id=hospital_id,
         is_deleted=False,
         status__in=[OPDVisit.Status.WAITING, OPDVisit.Status.IN_PROGRESS, OPDVisit.Status.COMPLETED],
     )
-    incoming_qs = CashHandover.objects.filter(
-        hospital_id=user.hospital_id,
-        to_user_id=user.id,
-        status=CashHandover.Status.ACCEPTED,
-    )
-
+    if user_id:
+        opd_qs = opd_qs.filter(created_by_id=user_id)
     if since:
-        payment_qs = payment_qs.filter(paid_at__gt=since)
         opd_qs = opd_qs.filter(created_at__gt=since)
-        incoming_qs = incoming_qs.filter(accepted_at__gt=since)
+    if date_from:
+        opd_qs = opd_qs.filter(created_at__date__gte=date_from)
+    if date_to:
+        opd_qs = opd_qs.filter(created_at__date__lte=date_to)
+    return opd_qs
+
+
+def _build_collection_snapshot_for_scope(
+    hospital_id,
+    *,
+    user_id=None,
+    date_from=None,
+    date_to=None,
+    shift_reset_user=None,
+    include_opening_cash=False,
+):
+    since = _last_handover_reset_at(shift_reset_user) if shift_reset_user else None
+
+    payment_qs = _collection_payment_queryset(
+        hospital_id, user_id=user_id, since=since, date_from=date_from, date_to=date_to
+    )
+    opd_qs = _collection_opd_queryset(hospital_id, user_id=user_id, since=since, date_from=date_from, date_to=date_to)
 
     payment_cash = (
         payment_qs.filter(payment_mode=PaymentTransaction.PaymentMode.CASH).aggregate(t=Sum("amount"))["t"] or _cash_zero()
@@ -251,42 +391,52 @@ def _build_collection_snapshot(user):
     opd_upi = opd_qs.filter(payment_mode=OPDVisit.PaymentMode.UPI).aggregate(t=Sum("amount"))["t"] or _cash_zero()
     opd_other = opd_qs.filter(payment_mode=OPDVisit.PaymentMode.OTHER).aggregate(t=Sum("amount"))["t"] or _cash_zero()
 
-    opening_cash = incoming_qs.aggregate(t=Sum("declared_cash_amount"))["t"] or _cash_zero()
+    opening_cash = _cash_zero()
+    if include_opening_cash and shift_reset_user:
+        incoming_qs = CashHandover.objects.filter(
+            hospital_id=hospital_id,
+            to_user_id=shift_reset_user.id,
+            status=CashHandover.Status.ACCEPTED,
+        )
+        if since:
+            incoming_qs = incoming_qs.filter(accepted_at__gt=since)
+        opening_cash = incoming_qs.aggregate(t=Sum("declared_cash_amount"))["t"] or _cash_zero()
 
     cash_total = _decimal_2(opening_cash + payment_cash + opd_cash)
     upi_total = _decimal_2(payment_upi + opd_upi)
     other_total = _decimal_2(payment_other + opd_other)
     grand_total = _decimal_2(cash_total + upi_total + other_total)
 
-    return {
-        "since": since.isoformat() if since else None,
+    payload = {
+        "date_from": date_from.isoformat() if date_from else None,
+        "date_to": date_to.isoformat() if date_to else None,
         "opening_cash_in_hand": _format_money(opening_cash),
         "cash_total": _format_money(cash_total),
         "upi_total": _format_money(upi_total),
         "other_total": _format_money(other_total),
         "grand_total": _format_money(grand_total),
     }
+    if shift_reset_user is not None:
+        payload["since"] = since.isoformat() if since else None
+    return payload
 
 
-def _build_collection_entries(user):
-    since = _last_handover_reset_at(user)
+def _build_collection_entries_for_scope(
+    hospital_id,
+    *,
+    user_id=None,
+    date_from=None,
+    date_to=None,
+    shift_reset_user=None,
+):
+    since = _last_handover_reset_at(shift_reset_user) if shift_reset_user else None
 
-    payment_qs = PaymentTransaction.objects.filter(
-        hospital_id=user.hospital_id,
-        collected_by_id=user.id,
-        status=PaymentTransaction.Status.SUCCESS,
-        is_deleted=False,
+    payment_qs = _collection_payment_queryset(
+        hospital_id, user_id=user_id, since=since, date_from=date_from, date_to=date_to
     ).select_related("invoice__patient", "collected_by")
-    opd_qs = OPDVisit.objects.filter(
-        hospital_id=user.hospital_id,
-        created_by_id=user.id,
-        is_deleted=False,
-        status__in=[OPDVisit.Status.WAITING, OPDVisit.Status.IN_PROGRESS, OPDVisit.Status.COMPLETED],
+    opd_qs = _collection_opd_queryset(
+        hospital_id, user_id=user_id, since=since, date_from=date_from, date_to=date_to
     ).select_related("patient", "created_by")
-
-    if since:
-        payment_qs = payment_qs.filter(paid_at__gt=since)
-        opd_qs = opd_qs.filter(created_at__gt=since)
 
     rows = []
     for p in payment_qs:
@@ -294,6 +444,10 @@ def _build_collection_entries(user):
         patient_name = ""
         if patient:
             patient_name = f"{patient.first_name} {patient.last_name}".strip() or patient.uhid
+        invoice = getattr(p, "invoice", None)
+        entry_ref = p.receipt_no or p.transaction_reference or ""
+        if invoice:
+            entry_ref = entry_ref or invoice.invoice_no
         rows.append(
             {
                 "id": str(p.id),
@@ -305,7 +459,7 @@ def _build_collection_entries(user):
                 "payment_mode": p.payment_mode or "cash",
                 "created_by_name": p.collected_by.full_name if p.collected_by_id else "",
                 "entry_time": p.paid_at.isoformat() if p.paid_at else p.created_at.isoformat(),
-                "entry_ref": p.receipt_no or p.transaction_reference or p.invoice.invoice_no,
+                "entry_ref": entry_ref,
             }
         )
 
@@ -329,11 +483,29 @@ def _build_collection_entries(user):
     return rows
 
 
+def _build_collection_snapshot(user):
+    return _build_collection_snapshot_for_scope(
+        user.hospital_id,
+        user_id=user.id,
+        shift_reset_user=user,
+        include_opening_cash=True,
+    )
+
+
+def _build_collection_entries(user):
+    return _build_collection_entries_for_scope(
+        user.hospital_id,
+        user_id=user.id,
+        shift_reset_user=user,
+    )
+
+
 def _serialize_handover(row: CashHandover):
     return {
         "id": str(row.id),
         "from_user_id": str(row.from_user_id),
         "from_user_name": row.from_user.full_name,
+        "from_user_email": getattr(row.from_user, "email", "") or "",
         "to_user_id": str(row.to_user_id),
         "to_user_name": row.to_user.full_name,
         "system_cash_amount": _format_money(row.system_cash_amount),
@@ -347,11 +519,63 @@ def _serialize_handover(row: CashHandover):
     }
 
 
+def _handover_event_datetime(row: CashHandover):
+    if row.status == CashHandover.Status.ACCEPTED and row.accepted_at:
+        return row.accepted_at
+    return row.created_at
+
+
+def _build_handover_collection_entries(hospital_id, date_from=None, date_to=None):
+    """Shift handover rows for admin collection list (by handover event date)."""
+    rows = []
+    handovers = CashHandover.objects.filter(hospital_id=hospital_id).select_related("from_user", "to_user")
+    for h in handovers:
+        if h.status == CashHandover.Status.REJECTED:
+            continue
+        event_dt = _handover_event_datetime(h)
+        event_date = timezone.localtime(event_dt).date()
+        if date_from and event_date < date_from:
+            continue
+        if date_to and event_date > date_to:
+            continue
+
+        status_label = h.status
+        verified_at = h.accepted_at if h.status == CashHandover.Status.ACCEPTED else None
+        rows.append(
+            {
+                "id": f"handover-{h.id}",
+                "entry_type": "handover",
+                "token_number": None,
+                "queue_number": None,
+                "patient_name": "Shift handover",
+                "amount": _format_money(h.declared_cash_amount),
+                "payment_mode": "handover",
+                "created_by_name": h.from_user.full_name or "",
+                "entry_time": timezone.localtime(verified_at or h.created_at).isoformat(),
+                "entry_ref": status_label,
+                "handover_status": status_label,
+                "handover_from_name": h.from_user.full_name or "",
+                "handover_to_name": h.to_user.full_name or "",
+                "handover_declared_cash": _format_money(h.declared_cash_amount),
+                "handover_verified_at": timezone.localtime(verified_at).isoformat() if verified_at else None,
+                "handover_requested_at": timezone.localtime(h.created_at).isoformat(),
+                "handover_system_cash": _format_money(h.system_cash_amount),
+                "handover_system_upi": _format_money(h.system_upi_amount),
+                "handover_system_other": _format_money(h.system_other_amount),
+            }
+        )
+
+    return rows
+
+
 @api_view(["GET"])
 @permission_classes([permissions.IsAuthenticated])
 def handover_balance(request):
     if not request.user.hospital_id:
         return Response({"success": False, "errors": {"hospital": ["User is not linked to a hospital."]}}, status=400)
+
+    if not _reception_collection_enabled(request.user.hospital_id):
+        return _reception_collection_disabled_response()
 
     snapshot = _build_collection_snapshot(request.user)
     users = (
@@ -374,11 +598,79 @@ def handover_balance(request):
     return success_response(data=data)
 
 
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def hospital_collection(request):
+    if not request.user.hospital_id:
+        return Response({"success": False, "errors": {"hospital": ["User is not linked to a hospital."]}}, status=400)
+
+    if not _user_can_view_hospital_collection(request.user):
+        return Response(
+            {"success": False, "errors": {"detail": ["Only hospital admins can view hospital-wide collection."]}},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    default_from, default_to = _default_hospital_collection_dates()
+    date_from = _parse_collection_date_param(request.query_params.get("date_from"), default_from)
+    date_to = _parse_collection_date_param(request.query_params.get("date_to"), default_to)
+    if date_from > date_to:
+        return Response(
+            {"success": False, "errors": {"date_from": ["date_from cannot be after date_to."]}},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    hospital_id = request.user.hospital_id
+    reception_collection_enabled = _reception_collection_enabled(hospital_id)
+    payment_entries = _build_collection_entries_for_scope(
+        hospital_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    if reception_collection_enabled:
+        pending_received = CashHandover.objects.filter(
+            hospital_id=hospital_id,
+            to_user_id=request.user.id,
+            status=CashHandover.Status.PENDING,
+        ).select_related("from_user", "to_user")
+        collection_entries = _merge_collection_entries_sorted(
+            payment_entries,
+            _build_handover_collection_entries(hospital_id, date_from=date_from, date_to=date_to),
+        )
+        pending_payload = [_serialize_handover(h) for h in pending_received]
+    else:
+        collection_entries = payment_entries
+        pending_payload = []
+
+    data = {
+        "reception_collection_enabled": reception_collection_enabled,
+        "collection": _build_collection_snapshot_for_scope(
+            hospital_id,
+            date_from=date_from,
+            date_to=date_to,
+            include_opening_cash=False,
+        ),
+        "collection_entries": collection_entries,
+        "pending_received": pending_payload,
+    }
+    return success_response(data=data)
+
+
+def _merge_collection_entries_sorted(*entry_lists):
+    rows = []
+    for chunk in entry_lists:
+        rows.extend(chunk)
+    rows.sort(key=lambda x: x.get("entry_time") or "", reverse=True)
+    return rows
+
+
 @api_view(["POST"])
 @permission_classes([permissions.IsAuthenticated])
 def initiate_handover(request):
     if not request.user.hospital_id:
         return Response({"success": False, "errors": {"hospital": ["User is not linked to a hospital."]}}, status=400)
+
+    if not _reception_collection_enabled(request.user.hospital_id):
+        return _reception_collection_disabled_response()
 
     to_user_id = request.data.get("to_user_id")
     declared_cash_amount = _decimal_2(request.data.get("declared_cash_amount"))
@@ -438,6 +730,12 @@ def pending_handovers(request):
 @permission_classes([permissions.IsAuthenticated])
 @transaction.atomic
 def verify_handover(request):
+    if not request.user.hospital_id:
+        return Response({"success": False, "errors": {"hospital": ["User is not linked to a hospital."]}}, status=400)
+
+    if not _reception_collection_enabled(request.user.hospital_id):
+        return _reception_collection_disabled_response()
+
     handover_id = request.data.get("handover_id")
     action = (request.data.get("action") or "").strip().lower()
     notes = str(request.data.get("notes") or "").strip()

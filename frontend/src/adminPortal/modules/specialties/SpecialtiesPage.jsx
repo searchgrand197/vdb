@@ -16,7 +16,9 @@ import { AppTable } from '@/components/AppTable';
 import { AppDialog } from '@/components/AppDialog';
 import { useToast } from '@admin/context/ToastContext';
 import { specialtyFormSchema } from '@admin/modules/specialties/specialtySchema';
+import { SpecialtyDeleteConflict } from '@admin/modules/specialties/SpecialtyDeleteConflict';
 import { parseSpecialtyFieldErrors } from '@/utils/specialtyFormErrors';
+import { parseSpecialtyDeleteError } from '@/utils/specialtyDeleteError';
 import { getApiErrorMessage } from '@/utils/apiError';
 
 function specialtyRowMeta(raw, departmentLookup) {
@@ -57,6 +59,7 @@ export function SpecialtiesPage() {
   const [formMode, setFormMode] = useState('create');
   const [editingId, setEditingId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteConflict, setDeleteConflict] = useState(null);
   const [formError, setFormError] = useState('');
   const [deleteError, setDeleteError] = useState('');
   const { showToast } = useToast();
@@ -172,17 +175,27 @@ export function SpecialtiesPage() {
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleteError('');
+    setDeleteConflict(null);
     try {
       await remove.mutateAsync(deleteTarget.id);
       setDeleteTarget(null);
+      setDeleteConflict(null);
       showToast({ type: 'success', message: 'Specialty deleted' });
     } catch (e) {
-      setDeleteError(getApiErrorMessage(e));
+      const parsed = parseSpecialtyDeleteError(e);
+      if (parsed) {
+        setDeleteConflict(parsed);
+        setDeleteError('');
+      } else {
+        setDeleteConflict(null);
+        setDeleteError(getApiErrorMessage(e));
+      }
     }
   };
 
   const closeDeleteDialog = () => {
     setDeleteTarget(null);
+    setDeleteConflict(null);
     setDeleteError('');
   };
 
@@ -294,6 +307,7 @@ export function SpecialtiesPage() {
                     aria-label="Delete specialty"
                     onClick={() => {
                       setDeleteError('');
+                      setDeleteConflict(null);
                       const m = specialtyRowMeta(raw, departmentLookup);
                       setDeleteTarget({ id: m.id, name: m.name });
                     }}
@@ -394,32 +408,44 @@ export function SpecialtiesPage() {
       <AppDialog
         open={Boolean(deleteTarget)}
         onClose={remove.isPending ? () => {} : closeDeleteDialog}
-        title="Delete specialty"
-        maxWidth="sm"
+        title={deleteConflict ? 'Cannot delete specialty' : 'Delete specialty'}
+        maxWidth={deleteConflict ? 'md' : 'sm'}
         actions={
-          <>
-            <AppButton onClick={closeDeleteDialog} disabled={remove.isPending}>
-              Cancel
+          deleteConflict ? (
+            <AppButton variant="contained" onClick={closeDeleteDialog}>
+              Close
             </AppButton>
-            <AppButton
-              variant="contained"
-              color="error"
-              onClick={confirmDelete}
-              disabled={remove.isPending}
-            >
-              {remove.isPending ? 'Deleting…' : 'Delete'}
-            </AppButton>
-          </>
+          ) : (
+            <>
+              <AppButton onClick={closeDeleteDialog} disabled={remove.isPending}>
+                Cancel
+              </AppButton>
+              <AppButton
+                variant="contained"
+                color="error"
+                onClick={confirmDelete}
+                disabled={remove.isPending}
+              >
+                {remove.isPending ? 'Deleting…' : 'Delete'}
+              </AppButton>
+            </>
+          )
         }
       >
-        {deleteError ? (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDeleteError('')}>
-            {deleteError}
-          </Alert>
-        ) : null}
-        <Typography variant="body2">
-          Delete <strong>{deleteTarget?.name}</strong>? This cannot be undone.
-        </Typography>
+        {deleteConflict ? (
+          <SpecialtyDeleteConflict conflict={deleteConflict} />
+        ) : (
+          <>
+            {deleteError ? (
+              <Alert severity="error" sx={{ mb: 2 }} onClose={() => setDeleteError('')}>
+                {deleteError}
+              </Alert>
+            ) : null}
+            <Typography variant="body2">
+              Delete <strong>{deleteTarget?.name}</strong>? This cannot be undone.
+            </Typography>
+          </>
+        )}
       </AppDialog>
     </Box>
   );

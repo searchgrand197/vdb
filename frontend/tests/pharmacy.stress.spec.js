@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { mockPharmacyOutletSettings } from './pharmacySettingsMock.js'
 
 function unwrap(data) {
   return data?.data ?? data?.results ?? data?.entity ?? data ?? []
@@ -80,7 +81,7 @@ test('pharmacy UI stress: 100 user interaction loops', async ({ page }) => {
       })
 
     if (path.endsWith('/pharmacy/invoice/next-number/')) return ok({ data: { invoice_no: 'INV-2026-1' } })
-    if (path.endsWith('/pharmacy/settings/')) return ok({ business_name: 'Default Hospital' })
+    if (path.endsWith('/pharmacy/settings/')) return ok(mockPharmacyOutletSettings())
     if (path.endsWith('/medicines/search/')) return ok({ data: searchRows })
     if (path.endsWith('/medicines/') && method === 'GET') return ok({ data: medicines })
     if (path.endsWith('/batches/') && method === 'GET') return ok({ data: batches })
@@ -196,7 +197,7 @@ test('pharmacy UI stress: 100 user interaction loops', async ({ page }) => {
       })
 
     if (path.endsWith('/pharmacy/invoice/next-number/')) return ok({ data: { invoice_no: 'INV-2026-1' } })
-    if (path.endsWith('/pharmacy/settings/')) return ok({ business_name: 'Default Hospital' })
+    if (path.endsWith('/pharmacy/settings/')) return ok(mockPharmacyOutletSettings())
     if (path.endsWith('/medicines/search/')) return ok({ data: searchRows })
     if (path.endsWith('/medicines/') && method === 'GET') return ok({ data: medicines })
     if (path.endsWith('/batches/') && method === 'GET') return ok({ data: batches })
@@ -349,7 +350,7 @@ test('pharmacy UI stress: 100 user interaction loops', async ({ page }) => {
     if (path.includes('/auth/login')) {
       return ok({ data: { access: 'test-access', refresh: 'test-refresh', hospital_id: 'hosp-test' } })
     }
-    if (path.endsWith('/pharmacy/settings/')) return ok({ business_name: 'Default Hospital' })
+    if (path.endsWith('/pharmacy/settings/')) return ok(mockPharmacyOutletSettings())
     if (path.endsWith('/medicines/search/')) return ok({ data: searchRows })
     if (path.endsWith('/medicines/') && method === 'GET') return ok({ data: medicines })
     if (path.endsWith('/batches/') && method === 'GET') return ok({ data: batches })

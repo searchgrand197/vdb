@@ -10,8 +10,14 @@ import { DoctorsPage } from '@admin/modules/doctors/DoctorsPage';
 import { AppointmentsPage } from '@admin/modules/appointments/AppointmentsPage';
 import { DepartmentsPage } from '@admin/modules/departments/DepartmentsPage';
 import { DesignationsPage } from '@admin/modules/designations/DesignationsPage';
+import { DesignationPermissionsPage } from '@admin/modules/permissions/DesignationPermissionsPage';
 import { SpecialtiesPage } from '@admin/modules/specialties/SpecialtiesPage';
+import { StaffPage } from '@admin/modules/staff/StaffPage';
 import { EarnedLeavePlannerPage } from '@admin/modules/attendance/EarnedLeavePlannerPage';
+import { BedsPage } from '@admin/modules/beds/BedsPage';
+import { SchemesPage } from '@admin/modules/schemes/SchemesPage';
+import { CashCollectionPage } from '@admin/modules/collections/CashCollectionPage';
+import { DailyReportPage } from '@admin/modules/reports/DailyReportPage';
 import { ApiModulePage } from '@admin/modules/common/ApiModulePage';
 import { ProtectedRoute } from '@admin/routes/ProtectedRoute';
 import { RoleRoute } from '@admin/routes/RoleRoute';
@@ -77,6 +83,15 @@ export function AppRoutes() {
           />
 
           <Route
+            path="permissions"
+            element={
+              <RoleRoute allowedRoles={ALL_ROLES}>
+                <DesignationPermissionsPage />
+              </RoleRoute>
+            }
+          />
+
+          <Route
             path="specialties"
             element={
               <RoleRoute allowedRoles={ALL_ROLES}>
@@ -86,10 +101,55 @@ export function AppRoutes() {
           />
 
           <Route
+            path="staff"
+            element={
+              <RoleRoute allowedRoles={ALL_ROLES}>
+                <StaffPage />
+              </RoleRoute>
+            }
+          />
+
+          <Route
             path="attendance-earned-leave-allocations"
             element={
               <RoleRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN]}>
                 <EarnedLeavePlannerPage />
+              </RoleRoute>
+            }
+          />
+
+          <Route
+            path="beds"
+            element={
+              <RoleRoute allowedRoles={ALL_ROLES}>
+                <BedsPage />
+              </RoleRoute>
+            }
+          />
+
+          <Route
+            path="schemes"
+            element={
+              <RoleRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN]}>
+                <SchemesPage />
+              </RoleRoute>
+            }
+          />
+
+          <Route
+            path="cash-collection"
+            element={
+              <RoleRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN]}>
+                <CashCollectionPage />
+              </RoleRoute>
+            }
+          />
+
+          <Route
+            path="daily-report"
+            element={
+              <RoleRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.HOSPITAL_ADMIN]}>
+                <DailyReportPage />
               </RoleRoute>
             }
           />

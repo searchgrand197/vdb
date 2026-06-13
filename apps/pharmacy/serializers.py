@@ -3,52 +3,40 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.pharmacy.calculations import normalize_gst_type
+from apps.pharmacy.calculations import medicine_pack_size, normalize_gst_type
 from apps.pharmacy.models import PharmacyInvoice, PharmacyInvoiceItem, PharmacyOutletSettings, PharmacySupplier
 from apps.patients.serializers import PatientSerializer
 from apps.doctors.serializers import DoctorProfileSerializer
 
 
-class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
-    signature_url = serializers.SerializerMethodField()
-
-    class Meta:
-        model = PharmacyOutletSettings
-        fields = (
-            "id",
-            "business_name",
-            "address",
-            "mobile",
-            "gst_number",
-            "dl_number",
-            "email",
-            "website",
-            "invoice_prefix",
-            "invoice_next_number",
-            "default_gst_percent",
-            "default_sale_discount_percent",
-            "b2b_enabled",
-            "low_stock_threshold",
-            "bank_name",
-            "bank_branch",
-            "bank_account_no",
-            "bank_ifsc",
-            "invoice_terms",
-            "signature",
-            "signature_url",
-            "created_at",
-            "updated_at",
-        )
-        read_only_fields = ("signature_url",)
-
-    def get_signature_url(self, obj):
-        if not obj.signature:
-            return ""
-        request = self.context.get("request")
-        url = obj.signature.url
-        if request is not None:
-            return request.build_absolute_uri(url)
-        return url
+class PharmacyOutletChannelProfileSerializer(serializers.Serializer):
+    address = serializers.CharField(required=False, allow_blank=True, default="")
+    mobile = serializers.CharField(required=False, allow_blank=True, max_length=40, default="")
+    gst_number = serializers.CharField(required=False, allow_blank=True, max_length=40, default="")
+    dl_number = serializers.CharField(required=False, allow_blank=True, max_length=40, default="")
+    email = serializers.CharField(required=False, allow_blank=True, max_length=120, default="")
+    website = serializers.CharField(required=False, allow_blank=True, max_length=200, default="")
+    invoice_prefix = serializers.CharField(required=False, allow_blank=True, max_length=20, default="INV")
+    invoice_next_number = serializers.IntegerField(required=False, min_value=1, default=1)
+    default_gst_percent = serializers.DecimalField(
+        required=False, max_digits=5, decimal_places=2, min_value=Decimal("0"), default=Decimal("5")
+    )
+    default_sale_gst_enabled = serializers.BooleanField(required=False, default=False)
+    sale_bill_qty_display = serializers.ChoiceField(
+        required=False,
+        choices=PharmacyOutletSettings.SaleBillQtyDisplay.choices,
+        default=PharmacyOutletSettings.SaleBillQtyDisplay.BASE_UNITS,
+    )
+    default_sale_discount_percent = serializers.DecimalField(
+        required=False, max_digits=5, decimal_places=2, min_value=Decimal("0"), default=Decimal("0")
+    )
+    low_stock_threshold = serializers.IntegerField(required=False, min_value=0, default=10)
+    bank_name = serializers.CharField(required=False, allow_blank=True, max_length=120, default="")
+    bank_branch = serializers.CharField(required=False, allow_blank=True, max_length=120, default="")
+    bank_account_no = serializers.CharField(required=False, allow_blank=True, max_length=40, default="")
+    bank_ifsc = serializers.CharField(required=False, allow_blank=True, max_length=20, default="")
+    invoice_terms = serializers.CharField(required=False, allow_blank=True, default="")
+    signature_url = serializers.CharField(read_only=True, default="")
 
     def validate_invoice_prefix(self, value):
         normalized = str(value or "").strip()
@@ -58,16 +46,45 @@ class PharmacyOutletSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Invoice prefix cannot exceed 20 characters.")
         return normalized
 
-    def validate_invoice_next_number(self, value):
-        if value is None:
-            return 1
-        if int(value) < 1:
-            raise serializers.ValidationError("Next invoice number must be at least 1.")
-        return int(value)
+
+class PharmacyOutletSettingsPatchSerializer(serializers.Serializer):
+    business_name = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    b2b_enabled = serializers.BooleanField(required=False)
+    mode = serializers.ChoiceField(choices=("b2c", "b2b"), required=False)
+    apply_to_both = serializers.BooleanField(required=False, default=False)
+    b2c = PharmacyOutletChannelProfileSerializer(required=False)
+    b2b = PharmacyOutletChannelProfileSerializer(required=False)
 
 
 class PharmacyInvoiceItemSerializer(serializers.ModelSerializer):
-    medicine_name = serializers.ReadOnlyField(source="medicine.name")
+    medicine_name = serializers.SerializerMethodField()
+    pack_size = serializers.SerializerMethodField()
+    medicine_print = serializers.SerializerMethodField()
+
+    def get_medicine_name(self, obj):
+        med = getattr(obj, "medicine", None)
+        if med is None:
+            return ""
+        bill = (getattr(med, "name_on_bill", None) or "").strip()
+        return bill or med.name
+
+    def get_pack_size(self, obj):
+        med = getattr(obj, "medicine", None)
+        if med is None:
+            return 1
+        return medicine_pack_size(med)
+
+    def get_medicine_print(self, obj):
+        med = getattr(obj, "medicine", None)
+        if med is None:
+            return None
+        return {
+            "pack_info": med.pack_info or "",
+            "unit_conversions": med.unit_conversions or {},
+            "form": med.form or "",
+            "unit_name": med.unit.name if getattr(med, "unit_id", None) else "",
+        }
+
     batch_no = serializers.SerializerMethodField()
     expiry_date = serializers.SerializerMethodField()
 
@@ -78,12 +95,15 @@ class PharmacyInvoiceItemSerializer(serializers.ModelSerializer):
             "invoice",
             "medicine",
             "medicine_name",
+            "medicine_print",
+            "pack_size",
             "batch",
             "batch_no",
             "expiry_date",
             "snapshot_batch_no",
             "snapshot_expiry_date",
             "qty",
+            "free_qty",
             "mrp",
             "rate",
             "cgst_rate",
@@ -138,6 +158,7 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
     patient_details = PatientSerializer(source="patient", read_only=True)
     doctor_details = DoctorProfileSerializer(source="referred_by", read_only=True)
     due_amount = serializers.SerializerMethodField()
+    has_print_copy = serializers.SerializerMethodField()
     party_name = serializers.CharField(source="party.name", read_only=True, default="")
     party_details = serializers.SerializerMethodField()
 
@@ -179,6 +200,11 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
     def get_due_amount(self, obj):
         return str(max(Decimal("0"), (obj.grand_total or Decimal("0")) - (obj.paid_amount or Decimal("0"))))
 
+    def get_has_print_copy(self, obj):
+        if hasattr(obj, "has_print_copy_flag"):
+            return bool(obj.has_print_copy_flag)
+        return bool(obj.print_html and str(obj.print_html).strip())
+
     def get_party_details(self, obj):
         party = getattr(obj, "party", None)
         if party is None:
@@ -204,6 +230,8 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "party_name_snapshot",
             "referred_by",
             "doctor_details",
+            "billing_doctor_name",
+            "billing_hospital_name",
             "invoice_no",
             "date",
             "status",
@@ -219,8 +247,12 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "ipd_admission",
             "remarks",
             "items",
+            "has_print_copy",
+            "print_html",
+            "print_html_updated_at",
             "created_at",
         )
+        read_only_fields = ("has_print_copy", "print_html", "print_html_updated_at")
         extra_kwargs = {
             # Generated in PharmacyInvoiceViewSet.perform_create if omitted.
             "invoice_no": {"required": False, "allow_blank": True},

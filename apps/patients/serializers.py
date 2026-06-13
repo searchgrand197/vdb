@@ -3,6 +3,12 @@ from datetime import date
 from django.core.exceptions import ObjectDoesNotExist
 from rest_framework import serializers
 
+from apps.patients.age_utils import (
+    AGE_UNIT_YEARS,
+    age_parts_to_dob,
+    dob_to_age_parts,
+    dob_to_age_years,
+)
 from apps.patients.models import Patient, PatientAddress, PatientGuardian
 
 
@@ -15,6 +21,8 @@ class PatientSerializer(serializers.ModelSerializer):
     guardian_name = serializers.SerializerMethodField()
     guardian_relationship = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
+    age_value = serializers.SerializerMethodField()
+    age_unit = serializers.SerializerMethodField()
 
     class Meta:
         model = Patient
@@ -30,10 +38,13 @@ class PatientSerializer(serializers.ModelSerializer):
             "dob",
             "preferred_salutation",
             "age",
+            "age_value",
+            "age_unit",
             "phone",
             "email",
             "blood_group",
             "registration_note",
+            "opd_custom_fields",
             "emergency_tags",
             "family_group_id",
             "hospital_id",
@@ -77,13 +88,15 @@ class PatientSerializer(serializers.ModelSerializer):
             return ""
 
     def get_age(self, obj):
-        if not obj.dob:
-            return None
-        today = date.today()
-        y = today.year - obj.dob.year
-        if (today.month, today.day) < (obj.dob.month, obj.dob.day):
-            y -= 1
-        return y
+        return dob_to_age_years(obj.dob)
+
+    def get_age_value(self, obj):
+        value, _unit = dob_to_age_parts(obj.dob)
+        return value
+
+    def get_age_unit(self, obj):
+        _value, unit = dob_to_age_parts(obj.dob)
+        return unit or AGE_UNIT_YEARS
 
 
 class PatientCreateUpdateSerializer(serializers.ModelSerializer):
@@ -95,7 +108,14 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
     guardian_name = serializers.CharField(write_only=True, required=False, allow_blank=True, default="")
     guardian_relationship = serializers.CharField(write_only=True, required=False, allow_blank=True)
     preferred_salutation = serializers.CharField(required=False, allow_blank=True, default="")
+    opd_custom_fields = serializers.JSONField(required=False)
     age           = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    age_unit      = serializers.ChoiceField(
+        choices=["years", "months", "days"],
+        default=AGE_UNIT_YEARS,
+        write_only=True,
+        required=False,
+    )
     # last_name is optional — single-name patients are valid
     last_name = serializers.CharField(required=False, allow_blank=True, default="")
     # When true on create: link this patient with others sharing the same mobile (patient.phone or guardian.phone).
@@ -116,10 +136,12 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
             "dob",
             "preferred_salutation",
             "age",
+            "age_unit",
             "phone",
             "email",
             "blood_group",
             "registration_note",
+            "opd_custom_fields",
             "emergency_tags",
             "family_group_id",
             "hospital_id",
@@ -142,29 +164,41 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"uhid": ["UHID already exists for this hospital."]})
         return attrs
 
+    def validate_opd_custom_fields(self, value):
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Custom fields must be an object.")
+        out = {}
+        for key, val in value.items():
+            name = str(key or "").strip()
+            if not name:
+                continue
+            out[name] = "" if val is None else str(val)
+        return out
+
     def _pop_write_only_extras(self, validated_data: dict):
-        """Remove non-Patient keys; return (age, address parts, guardian) for side effects."""
+        """Remove non-Patient keys; return (age, unit, address parts, guardian) for side effects."""
         age = validated_data.pop("age", None)
+        age_unit = validated_data.pop("age_unit", AGE_UNIT_YEARS)
         address_line1 = validated_data.pop("address_line1", None)
         city = validated_data.pop("city", None)
         state = validated_data.pop("state", None)
         guardian_name = validated_data.pop("guardian_name", None)
         guardian_relationship = validated_data.pop("guardian_relationship", None)
-        return age, address_line1, city, state, guardian_name, guardian_relationship
+        return age, age_unit, address_line1, city, state, guardian_name, guardian_relationship
 
     def create(self, validated_data):
-        age, al, ct, st, gn, gr = self._pop_write_only_extras(validated_data)
+        age, age_unit, al, ct, st, gn, gr = self._pop_write_only_extras(validated_data)
         link = validated_data.pop("link_with_existing_phone_patients", False)
         patient = super().create(validated_data)
 
         # Handle writing extras if provided during create
         if age is not None:
-            from datetime import date
-            try:
-                patient.dob = date(date.today().year - int(age), 1, 1)
+            dob = age_parts_to_dob(age, age_unit)
+            if dob is not None:
+                patient.dob = dob
                 patient.save(update_fields=["dob"])
-            except (ValueError, TypeError):
-                pass
 
         if any(v is not None for v in (al, ct, st)):
             PatientAddress.objects.create(
@@ -191,12 +225,11 @@ class PatientCreateUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         validated_data.pop("link_with_existing_phone_patients", None)
-        age, al, ct, st, gn, gr = self._pop_write_only_extras(validated_data)
+        age, age_unit, al, ct, st, gn, gr = self._pop_write_only_extras(validated_data)
         if age is not None:
-            try:
-                validated_data["dob"] = date(date.today().year - int(age), 1, 1)
-            except (ValueError, TypeError):
-                pass
+            dob = age_parts_to_dob(age, age_unit)
+            if dob is not None:
+                validated_data["dob"] = dob
         inst = super().update(instance, validated_data)
         if any(v is not None for v in (al, ct, st)):
             addr, _ = PatientAddress.objects.get_or_create(

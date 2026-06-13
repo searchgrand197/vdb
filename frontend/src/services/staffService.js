@@ -22,3 +22,10 @@ export async function patchStaff(id, payload) {
 export async function deleteStaff(id) {
   await api.delete(`${BASE}${id}/`);
 }
+
+export async function patchStaffPharmacyAccess(id, pharmacyIds) {
+  const { data } = await api.patch(`${BASE}${id}/`, {
+    allowed_pharmacies: pharmacyIds,
+  });
+  return { data: unwrapOnePayload(data) };
+}

@@ -47,3 +47,23 @@ export function mergeCategoryNames(medicines, customCategories) {
     .filter(Boolean)
   return uniqCategories([...fromApi, ...fromMedicines, ...DEFAULT_CATEGORIES])
 }
+
+/** Category breadcrumb for sales search / inventory (e.g. a>b>c). */
+export function categoryPathFromId(leafId, categoryRows, separator = '>') {
+  if (!leafId || !Array.isArray(categoryRows) || !categoryRows.length) return ''
+  const idToRow = new Map()
+  categoryRows.forEach((r) => {
+    if (r?.id) idToRow.set(String(r.id), r)
+  })
+  const names = []
+  let cur = idToRow.get(String(leafId))
+  const seen = new Set()
+  while (cur && !seen.has(String(cur.id))) {
+    seen.add(String(cur.id))
+    names.unshift(String(cur.name || '').trim())
+    const parentKey = cur.parent != null && cur.parent !== '' ? String(cur.parent) : ''
+    if (!parentKey) break
+    cur = idToRow.get(parentKey)
+  }
+  return names.filter(Boolean).join(separator)
+}

@@ -14,6 +14,7 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
     address = serializers.SerializerMethodField()
     mobile_number = serializers.SerializerMethodField()
     hospital_id = serializers.UUIDField(read_only=True)
+    scheme_name = serializers.SerializerMethodField()
 
     class Meta:
         model = IPDAdmission
@@ -44,8 +45,11 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
             "status",
             "discharged_at",
             "discharge_notes",
+            "scheme",
+            "scheme_name",
             "room_rent_override",
             "room_rent_daily_charge_override",
+            "room_rent_days_override",
             "created_at",
             "updated_at",
         ]
@@ -56,6 +60,10 @@ class IPDAdmissionSerializer(serializers.ModelSerializer):
             name = " ".join(filter(None, parts)).strip()
             return name or obj.patient.uhid
         return ""
+
+    def get_scheme_name(self, obj):
+        scheme = getattr(obj, "scheme", None)
+        return (getattr(scheme, "name", "") or "").strip() or None
 
     def get_assigned_doctor_name(self, obj):
         return resolve_ipd_doctor_name(
@@ -107,6 +115,7 @@ class IPDAdmissionCreateUpdateSerializer(serializers.ModelSerializer):
             "bed_code",
             "admission_diagnosis",
             "admission_notes",
+            "scheme",
             "status",
             "discharge_notes",
             "discharged_at",
@@ -119,6 +128,19 @@ class IPDAdmissionCreateUpdateSerializer(serializers.ModelSerializer):
             return attrs
 
         patient = attrs.get("patient")
+        scheme = attrs.get("scheme")
+        if scheme is not None:
+            hospital_id_for_scheme = (
+                getattr(patient, "hospital_id", None)
+                or getattr(attrs.get("opd_visit"), "hospital_id", None)
+                or getattr(getattr(self, "instance", None), "hospital_id", None)
+            )
+            request = self.context.get("request")
+            if not hospital_id_for_scheme and request is not None:
+                hospital_id_for_scheme = getattr(request.user, "hospital_id", None)
+            if hospital_id_for_scheme and scheme.hospital_id != hospital_id_for_scheme:
+                raise serializers.ValidationError({"scheme": ["Scheme does not belong to this hospital."]})
+
         if not patient:
             return attrs
 

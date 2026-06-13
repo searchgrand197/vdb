@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rest_framework import permissions, viewsets
+from rest_framework import permissions, status, viewsets
 from rest_framework.filters import SearchFilter
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -25,6 +25,7 @@ from apps.doctors.serializers import (
     SpecialtySerializer,
 )
 from apps.roles_permissions.permissions import HasRequiredPermission
+from apps.shared.master_delete import build_linked_doctors, operational_doctors_for_specialty
 from apps.shared.response import success_response
 
 
@@ -38,7 +39,7 @@ class HospitalScopedMixin:
 
 
 class SpecialtyViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
-    queryset = Specialty.objects.all().select_related("department")
+    queryset = Specialty.objects.filter(is_deleted=False).select_related("department")
     filter_backends = (SearchFilter,)
     search_fields = ("code", "name")
 
@@ -85,6 +86,42 @@ class SpecialtyViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
             action="update_specialty",
             obj=specialty,
             after={"code": specialty.code, "name": specialty.name},
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Archive when no operational doctor links remain; otherwise return linked doctors.
+        """
+        specialty = self.get_object()
+
+        doctors_qs = operational_doctors_for_specialty(specialty)
+        linked_doctors, doctors_count = build_linked_doctors(doctors_qs)
+
+        if doctors_count == 0:
+            pk = specialty.pk
+            specialty.delete()
+            return success_response(
+                data={"id": str(pk), "message": "Specialty deleted successfully."},
+            )
+
+        return Response(
+            {
+                "success": False,
+                "errors": {
+                    "detail": (
+                        "Cannot delete this specialty while it is linked to doctor profiles. "
+                        "Reassign or remove those doctor records first."
+                    ),
+                    "linked_doctors": linked_doctors,
+                    "linked_counts": {
+                        "doctors": doctors_count,
+                    },
+                    "truncated": {
+                        "doctors": doctors_count > len(linked_doctors),
+                    },
+                },
+            },
+            status=status.HTTP_409_CONFLICT,
         )
 
 

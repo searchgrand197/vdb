@@ -7,8 +7,12 @@ import toast from 'react-hot-toast'
 import { useAuthStore } from '../stores/authStore'
 import DraftPrescriptionModal from '../components/DraftPrescriptionModal'
 import DischargePrescriptionPanel from '../components/DischargePrescriptionPanel'
+import DischargeClinicalForm from '../components/discharge/DischargeClinicalForm'
+import { useDischargeFieldCatalog } from '../components/discharge/useDischargeFieldCatalog'
 import { rxItemsToMedicationRows, medicationRowsToRxItems } from '../pharmacy/rxMedicationMapping'
 import { useDebouncedValue } from '../pharmacy/useDebouncedValue'
+import { pickDefaultPharmacyBranchId } from '../pharmacy/rxConstants'
+import { formatTime, useTimeDisplayMode } from '../utils/dateTimeFormat'
 import { format, addDays } from 'date-fns'
 import {
   Groups as GroupsIcon,
@@ -671,7 +675,7 @@ function PatientHistoryTimeline({ events = [], filter = 'all', onFilterChange, m
                     <ul className="pl-4 space-y-0.5">
                       {sortedCategoryEntries.map((item) => (
                         <li key={item.id} className="list-disc text-[11px] leading-4 text-slate-700">
-                          <span className="text-slate-500 mr-1">{format(new Date(item.ts), 'HH:mm')}</span>
+                          <span className="text-slate-500 mr-1">{formatTime(item.ts)}</span>
                           {item.text}
                         </li>
                       ))}
@@ -725,7 +729,7 @@ function TreatmentAuditTimeline({ events = [], onSelectEvent, maxHeightClass = '
                           <span className={`text-[10px] font-bold shrink-0 ${statusMeta.color}`}>{statusMeta.icon}</span>
                           <div className="min-w-0">
                             <p className="text-[11px] text-slate-700 leading-4">
-                              <span className="text-slate-500 mr-1">{format(new Date(event.timestamp), 'HH:mm')}</span>
+                              <span className="text-slate-500 mr-1">{formatTime(event.timestamp)}</span>
                               <span className="font-semibold">{event.title}</span>
                             </p>
                             {event.description ? (
@@ -935,7 +939,7 @@ function InlineRxPanel({
     api.get('/auth/pharmacies/').then(r => {
       const list = r.data?.data || r.data?.results || []
       setBranches(list)
-      if (list.length) setBranchId(String(list[0].id))
+      if (list.length) setBranchId(pickDefaultPharmacyBranchId(list))
     }).catch(() => {})
   }, [open])
 
@@ -2281,7 +2285,7 @@ function TPBuilder({ preSelectedAdmission, patientChip, onBack }) {
   }
 
   function addToDay(template, dayIdx) {
-    const nowTime = format(new Date(), 'HH:mm')
+    const nowTime = formatTime(new Date())
     const times = (template.frequency && FREQ_MAP[template.frequency]) || [template.time_of_day || nowTime]
     const newItems = times.map((t, idx) => ({ ...template, _id: mkId(), time_of_day: idx === 0 ? nowTime : t }))
     setDays(d => ({ ...d, [dayIdx]: [...d[dayIdx], ...newItems] }))
@@ -3265,6 +3269,7 @@ function DischargeSummaryTab() {
   const [search, setSearch] = useState('')
   const dischargeScrollRootRef = useRef(null)
   const [activeDischargeSection, setActiveDischargeSection] = useState('')
+  const { getSuggestions } = useDischargeFieldCatalog(Boolean(selectedId))
 
   const dischargeSectionNavItems = useMemo(() => {
     const items = [
@@ -3370,14 +3375,9 @@ function DischargeSummaryTab() {
         surgery_rows: Array.isArray(summary.surgery_rows) ? summary.surgery_rows : [],
       }
       let saved
-      if (existingSummaryId) {
-        const res = await api.patch(`/summaries/${existingSummaryId}/`, payload)
-        saved = res.data?.data || res.data
-      } else {
-        const res = await api.post('/summaries/', payload)
-        saved = res.data?.data || res.data
-        setExistingSummaryId(saved?.id || null)
-      }
+      const res = await api.post('/summaries/', payload)
+      saved = res.data?.data || res.data
+      setExistingSummaryId(saved?.id || existingSummaryId || null)
       setSummaryMap((prev) => ({ ...prev, [String(selectedId)]: saved }))
       toast.success(isDraft ? 'Saved as draft' : 'Discharge summary finalised')
     } catch (err) {
@@ -3495,209 +3495,44 @@ function DischargeSummaryTab() {
                 </div>
               </div>
 
-              {/* Metadata */}
-              <details id="dds-metadata" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Discharge metadata &amp; identifiers</summary>
-                <div className="px-4 sm:px-5 py-4 space-y-4 bg-slate-50/70 border-t border-slate-200">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div><span className={dsLbl}>Discharge type</span>
-                      <select value={summary.discharge_type} onChange={e => setSummary(s => ({ ...s, discharge_type: e.target.value }))} className={dsInp}>
-                        {[['routine','Routine'],['lama','LAMA'],['dama','DAMA'],['referred','Referred'],['transferred','Transferred'],['death','Death'],['absconded','Absconded']].map(([v,l]) => <option key={v} value={v}>{l}</option>)}
-                      </select></div>
-                    <div><span className={dsLbl}>Condition / status</span>
-                      <select value={summary.discharge_status} onChange={e => setSummary(s => ({ ...s, discharge_status: e.target.value }))} className={dsInp}>
-                        {[['cured','Cured'],['improved','Improved'],['unchanged','Unchanged'],['worsened','Worsened'],['deceased','Deceased']].map(([v,l]) => <option key={v} value={v}>{l}</option>)}
-                      </select></div>
-                    <div><span className={dsLbl}>Mode of admission</span>
-                      <select value={summary.mode_of_admission} onChange={e => setSummary(s => ({ ...s, mode_of_admission: e.target.value }))} className={dsInp}>
-                        <option value="emergency">Emergency</option><option value="opd">OPD</option><option value="referral">Referral</option>
-                      </select></div>
-                    <div><span className={dsLbl}>Condition at discharge (text)</span>
-                      <input value={summary.condition_at_discharge} onChange={e => setSummary(s => ({ ...s, condition_at_discharge: e.target.value }))} className={dsInp} placeholder="e.g. Stable, afebrile" /></div>
+              <DischargeClinicalForm
+                sectionIdPrefix="dds"
+                summary={summary}
+                setSummary={setSummary}
+                surgeryDraft={surgeryDraft}
+                updateSurgeryDraftField={updateSurgeryField}
+                saveSurgeryRow={saveSurgeryRow}
+                resetSurgeryDraft={resetSurgeryDraft}
+                editingSurgeryIndex={editingSurgeryIndex}
+                editSurgeryRow={editSurgeryRow}
+                removeSurgeryRow={removeSurgeryRow}
+                dischargeRxItems={dischargeRxItems}
+                setDischargeRxItems={setDischargeRxItems}
+                setVital={setVital}
+                addInvRow={addInvRow}
+                updateInvRow={updateInvRow}
+                removeInvRow={removeInvRow}
+                getSuggestions={getSuggestions}
+                dsInp={dsInp}
+                dsLbl={dsLbl}
+                dosagePatternOptions={DEFAULT_DOSAGE_PATTERNS}
+                timingOptions={DEFAULT_TIMING_OPTIONS}
+                footer={
+                  <div className="pt-3 mt-1 border-t border-slate-200/60 flex justify-end gap-3">
+                    <button type="button" onClick={() => handleSave(true)} disabled={saving}
+                      className="flex items-center gap-2 border border-amber-300 bg-amber-50 text-amber-800 px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-amber-100 disabled:opacity-50 transition-all active:scale-95">
+                      {saving ? <Loader2 size={15} className="animate-spin" /> : null}
+                      Save as Draft
+                    </button>
+                    <button type="button" onClick={() => handleSave(false)} disabled={saving}
+                      className="flex items-center gap-2 bg-emerald-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-800 disabled:opacity-50 transition-all active:scale-95 focus:ring-4 focus:ring-emerald-300">
+                      {saving ? <Loader2 size={15} className="animate-spin" /> : null}
+                      Save as Final
+                    </button>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div><span className={dsLbl}>Discharge date</span><input type="date" value={summary.discharge_date || ''} onChange={e => setSummary(s => ({ ...s, discharge_date: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Discharge time</span><input type="time" value={summary.discharge_time || ''} onChange={e => setSummary(s => ({ ...s, discharge_time: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Next follow-up</span><input type="date" value={summary.next_follow_up_date || ''} onChange={e => setSummary(s => ({ ...s, next_follow_up_date: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Stitch removal</span><input type="date" value={summary.stitch_removal_date || ''} onChange={e => setSummary(s => ({ ...s, stitch_removal_date: e.target.value }))} className={dsInp} /></div>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div><span className={dsLbl}>Treating consultant</span><input value={summary.treating_consultant} onChange={e => setSummary(s => ({ ...s, treating_consultant: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Consultant reg. no.</span><input value={summary.consultant_registration_no} onChange={e => setSummary(s => ({ ...s, consultant_registration_no: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>RMO / Signatory name</span><input value={summary.rmo_signed_by} onChange={e => setSummary(s => ({ ...s, rmo_signed_by: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Follow-up doctor</span><input value={summary.follow_up_doctor} onChange={e => setSummary(s => ({ ...s, follow_up_doctor: e.target.value }))} className={dsInp} placeholder="Doctor name" /></div>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div><span className={dsLbl}>Follow-up department</span><input value={summary.follow_up_department} onChange={e => setSummary(s => ({ ...s, follow_up_department: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Referred to facility</span><input value={summary.referred_to_facility} onChange={e => setSummary(s => ({ ...s, referred_to_facility: e.target.value }))} className={dsInp} /></div>
-                    <div className="sm:col-span-2"><span className={dsLbl}>Referral reason</span><input value={summary.referral_reason} onChange={e => setSummary(s => ({ ...s, referral_reason: e.target.value }))} className={dsInp} /></div>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-200">
-                    <div className="sm:col-span-2"><span className={dsLbl}>ABHA ID</span><input value={summary.abha_id} onChange={e => setSummary(s => ({ ...s, abha_id: e.target.value }))} className={dsInp} /></div>
-                    <div className="sm:col-span-2"><span className={dsLbl}>Insurance provider</span><input value={summary.insurance_provider} onChange={e => setSummary(s => ({ ...s, insurance_provider: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>TPA</span><input value={summary.tpa_name} onChange={e => setSummary(s => ({ ...s, tpa_name: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Policy no.</span><input value={summary.policy_number} onChange={e => setSummary(s => ({ ...s, policy_number: e.target.value }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Claim no.</span><input value={summary.claim_number} onChange={e => setSummary(s => ({ ...s, claim_number: e.target.value }))} className={dsInp} /></div>
-                    <div className="flex items-center gap-2.5 pt-5">
-                      <input type="checkbox" id="dds_edu" checked={summary.patient_education_given} onChange={e => setSummary(s => ({ ...s, patient_education_given: e.target.checked }))} className="w-4 h-4 rounded border-slate-300 text-emerald-600 cursor-pointer" />
-                      <label htmlFor="dds_edu" className="text-xs font-semibold text-slate-600 uppercase tracking-wide cursor-pointer select-none">Patient education given</label>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div className="col-span-2"><span className={dsLbl}>Attendant counselled by</span><input value={summary.attendant_counselled_by} onChange={e => setSummary(s => ({ ...s, attendant_counselled_by: e.target.value }))} className={dsInp} /></div>
-                  </div>
-                </div>
-              </details>
+                }
+              />
 
-              {/* Vitals */}
-              <details id="dds-vitals" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Vitals at discharge</summary>
-                <div className="px-4 sm:px-5 py-4 grid grid-cols-3 sm:grid-cols-6 gap-4 bg-slate-50/70 border-t border-slate-200">
-                  {['bp','pulse','spo2','temp','weight','rbs'].map(k => (
-                    <div key={k}><span className={dsLbl}>{k === 'bp' ? 'BP' : k.toUpperCase()}</span>
-                      <input value={(summary.vitals_at_discharge || {})[k] || ''} onChange={e => setVital(k, e.target.value)} className={dsInp} /></div>
-                  ))}
-                </div>
-              </details>
-
-              {/* Death summary (conditional) */}
-              {summary.discharge_type === 'death' && (
-                <details id="dds-death" open className="scroll-mt-3 bg-red-50 rounded-xl border border-red-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-red-800 bg-red-100">Death summary</summary>
-                  <div className="px-5 py-5 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-red-50/60 border-t border-red-200">
-                    <div className="sm:col-span-2"><span className={dsLbl}>Cause of death</span><textarea rows={2} value={summary.cause_of_death} onChange={e => setSummary(s => ({ ...s, cause_of_death: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    <div><span className={dsLbl}>Time of death</span><input type="datetime-local" value={summary.time_of_death ? String(summary.time_of_death).slice(0,16) : ''} onChange={e => setSummary(s => ({ ...s, time_of_death: e.target.value ? `${e.target.value}:00` : '' }))} className={dsInp} /></div>
-                    <div><span className={dsLbl}>Notified to</span><input value={summary.notified_to} onChange={e => setSummary(s => ({ ...s, notified_to: e.target.value }))} className={dsInp} /></div>
-                    <label className="flex items-center gap-2 text-sm text-slate-800 pt-5"><input type="checkbox" checked={summary.autopsy_required} onChange={e => setSummary(s => ({ ...s, autopsy_required: e.target.checked }))} /> Autopsy required</label>
-                  </div>
-                </details>
-              )}
-
-              {/* Clinical narrative */}
-              <details id="dds-narrative" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Clinical narrative</summary>
-                <div className="px-5 py-5 space-y-5 bg-slate-50/70 border-t border-slate-200">
-                  <div><span className={dsLbl}>Discharge summary / overview</span><textarea rows={2} value={summary.summary_notes} onChange={e => setSummary(s => ({ ...s, summary_notes: e.target.value }))} className={`${dsInp} min-h-[52px]`} placeholder="Brief overview..." /></div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {[['chief_complaints','Chief complaints'],['reason_for_admission','Reason for admission'],['diagnosis','Diagnosis'],['co_morbidities','Co-morbidities'],['medical_history','Medical history'],['family_history','Family history'],['personal_history','Personal history'],['physical_examination','Physical examination'],['allergies','Allergies'],['treatment_given','Treatment given']].map(([k,l]) => (
-                      <div key={k}><span className={dsLbl}>{l}</span><textarea rows={2} value={summary[k]} onChange={e => setSummary(s => ({ ...s, [k]: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                    ))}
-                  </div>
-                </div>
-              </details>
-
-              {/* Operative */}
-              <details id="dds-operative" className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Operative / procedure</summary>
-                <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
-                  <div><span className={dsLbl}>Surgery date</span><input type="date" value={surgeryDraft.surgery_date || ''} onChange={e => updateSurgeryField('surgery_date', e.target.value)} className={dsInp} /></div>
-                  <div><span className={dsLbl}>Procedure (short)</span><textarea rows={2} value={surgeryDraft.procedure_name} onChange={e => updateSurgeryField('procedure_name', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
-                  <div><span className={dsLbl}>Surgeon</span><input value={surgeryDraft.surgeon_name} onChange={e => updateSurgeryField('surgeon_name', e.target.value)} className={dsInp} /></div>
-                  <div><span className={dsLbl}>Assistant</span><input value={surgeryDraft.assistant_name} onChange={e => updateSurgeryField('assistant_name', e.target.value)} className={dsInp} /></div>
-                  <div><span className={dsLbl}>Anaesthetist</span><input value={surgeryDraft.anaesthetist_name} onChange={e => updateSurgeryField('anaesthetist_name', e.target.value)} className={dsInp} /></div>
-                  <div><span className={dsLbl}>Anaesthesia</span><input value={surgeryDraft.anaesthesia_type} onChange={e => updateSurgeryField('anaesthesia_type', e.target.value)} className={dsInp} /></div>
-                  <div className="md:col-span-2"><span className={dsLbl}>Operative findings</span><textarea rows={2} value={surgeryDraft.operative_findings} onChange={e => updateSurgeryField('operative_findings', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
-                  <div className="md:col-span-2"><span className={dsLbl}>Intra-op complications</span><textarea rows={2} value={surgeryDraft.intra_op_complications} onChange={e => updateSurgeryField('intra_op_complications', e.target.value)} className={`${dsInp} min-h-[52px]`} /></div>
-                  <div className="md:col-span-2 flex items-center gap-2 pt-1">
-                    <button type="button" onClick={saveSurgeryRow} className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700">{editingSurgeryIndex >= 0 ? 'Update Surgery' : 'Save Surgery'}</button>
-                    {editingSurgeryIndex >= 0 && <button type="button" onClick={resetSurgeryDraft} className="px-3 py-2 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200">Cancel Edit</button>}
-                  </div>
-                  <div className="md:col-span-2">
-                    <span className={dsLbl}>Saved surgeries</span>
-                    <div className="rounded-lg border border-slate-200 overflow-x-auto bg-white">
-                      <table className="w-full text-xs">
-                        <thead><tr className="bg-slate-50 text-left"><th className="p-2">Date</th><th className="p-2">Procedure</th><th className="p-2">Surgeon</th><th className="p-2">Anaesthesia</th><th className="p-2 w-24">Action</th></tr></thead>
-                        <tbody>
-                          {(summary.surgery_rows || []).length === 0
-                            ? <tr><td colSpan={5} className="p-3 text-slate-400">No surgery rows saved yet.</td></tr>
-                            : (summary.surgery_rows || []).map((row, idx) => (
-                              <tr key={idx} className="border-t border-slate-100">
-                                <td className="p-2">{row.surgery_date || '—'}</td>
-                                <td className="p-2">{row.procedure_name || '—'}</td>
-                                <td className="p-2">{row.surgeon_name || '—'}</td>
-                                <td className="p-2">{row.anaesthesia_type || '—'}</td>
-                                <td className="p-2"><div className="flex items-center gap-2"><button type="button" onClick={() => editSurgeryRow(idx)} className="text-blue-600 font-bold">Edit</button><button type="button" onClick={() => removeSurgeryRow(idx)} className="text-red-600 font-bold">Delete</button></div></td>
-                              </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              </details>
-
-              {/* Investigations */}
-              <details id="dds-investigations" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Investigations (structured)</summary>
-                <div className="px-5 py-5 bg-slate-50/70 border-t border-slate-200 space-y-3">
-                  <div className="overflow-x-auto rounded-lg border border-slate-200">
-                    <table className="w-full text-xs">
-                      <thead><tr className="bg-slate-50 text-left"><th className="px-2.5 py-2">Type</th><th className="px-2.5 py-2">Test</th><th className="px-2.5 py-2">Value</th><th className="px-2.5 py-2">Ref</th><th className="px-2.5 py-2">Date</th><th className="px-2 py-2 w-8" /></tr></thead>
-                      <tbody>
-                        {(summary.investigation_rows || []).map((row, idx) => (
-                          <tr key={idx} className="border-t border-slate-100">
-                            <td className="px-2.5 py-1.5"><select value={row.category || 'lab'} onChange={e => updateInvRow(idx, 'category', e.target.value)} className={dsInp}><option value="lab">Lab</option><option value="imaging">Imaging</option></select></td>
-                            <td className="px-2.5 py-1.5"><input value={row.test_name} onChange={e => updateInvRow(idx, 'test_name', e.target.value)} className={dsInp} placeholder="Test name" /></td>
-                            <td className="px-2.5 py-1.5"><input value={row.value} onChange={e => updateInvRow(idx, 'value', e.target.value)} className={dsInp} /></td>
-                            <td className="px-2.5 py-1.5"><input value={row.reference_range} onChange={e => updateInvRow(idx, 'reference_range', e.target.value)} className={dsInp} /></td>
-                            <td className="px-2.5 py-1.5"><input type="date" value={row.test_date || ''} onChange={e => updateInvRow(idx, 'test_date', e.target.value)} className={dsInp} /></td>
-                            <td className="px-2 py-1.5"><button type="button" onClick={() => removeInvRow(idx)} className="text-red-600 font-bold px-1">×</button></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <button type="button" onClick={addInvRow} className="text-xs font-bold text-emerald-700 hover:underline">+ Add investigation row</button>
-                  <div><span className={dsLbl}>Investigations — free text (extra notes)</span><textarea rows={2} value={summary.investigations} onChange={e => setSummary(s => ({ ...s, investigations: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                </div>
-              </details>
-
-              {/* Hospital course */}
-              <details id="dds-course" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Hospital course &amp; complications</summary>
-                <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
-                  <div className="md:col-span-2"><span className={dsLbl}>Course in hospital</span><textarea rows={2} value={summary.course_in_hospital} onChange={e => setSummary(s => ({ ...s, course_in_hospital: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                  {[['complications_during_stay','Complications'],['blood_transfusion_details','Blood transfusion'],['implants_used','Implants'],['indwelling_devices_on_discharge','Indwelling devices'],['vaccination_given','Vaccination']].map(([k,l]) => (
-                    <div key={k}><span className={dsLbl}>{l}</span><textarea rows={2} value={summary[k]} onChange={e => setSummary(s => ({ ...s, [k]: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                  ))}
-                </div>
-              </details>
-
-              {/* Prescriptions */}
-              <div id="dds-prescriptions" className="scroll-mt-3 space-y-2">
-                <DischargePrescriptionPanel items={dischargeRxItems} onChange={setDischargeRxItems} dosagePatternOptions={DEFAULT_DOSAGE_PATTERNS} timingOptions={DEFAULT_TIMING_OPTIONS} />
-                <details className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                  <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-50 hover:bg-slate-100">Extra medication notes (optional)</summary>
-                  <div className="px-5 py-5 bg-slate-50/70 border-t border-slate-200">
-                    <textarea rows={2} value={summary.medications_on_discharge} onChange={e => setSummary(s => ({ ...s, medications_on_discharge: e.target.value }))} className={`${dsInp} min-h-[52px] font-mono w-full`} placeholder="Additional instructions not covered above..." />
-                  </div>
-                </details>
-              </div>
-
-              {/* Advice */}
-              <details id="dds-advice" open className="scroll-mt-3 bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-                <summary className="px-3 py-2 cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600 bg-slate-100 hover:bg-slate-200/80">Advice on discharge</summary>
-                <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/70 border-t border-slate-200">
-                  {[['diet_advice','Diet'],['activity_advice','Activity'],['wound_care_instructions','Wound care'],['follow_up_advice','Follow-up advice']].map(([k,l]) => (
-                    <div key={k}><span className={dsLbl}>{l}</span><textarea rows={2} value={summary[k]} onChange={e => setSummary(s => ({ ...s, [k]: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                  ))}
-                  <div className="md:col-span-2"><span className={dsLbl}>Warning signs</span><textarea rows={2} value={summary.warning_signs} onChange={e => setSummary(s => ({ ...s, warning_signs: e.target.value }))} className={`${dsInp} min-h-[52px]`} /></div>
-                </div>
-              </details>
-
-              {/* Footer actions */}
-              <div className="pt-3 mt-1 border-t border-slate-200/60 flex justify-end gap-3">
-                <button type="button" onClick={() => handleSave(true)} disabled={saving}
-                  className="flex items-center gap-2 border border-amber-300 bg-amber-50 text-amber-800 px-5 py-2.5 rounded-xl text-sm font-bold hover:bg-amber-100 disabled:opacity-50 transition-all active:scale-95">
-                  {saving ? <Loader2 size={15} className="animate-spin" /> : null}
-                  Save as Draft
-                </button>
-                <button type="button" onClick={() => handleSave(false)} disabled={saving}
-                  className="flex items-center gap-2 bg-emerald-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-emerald-800 disabled:opacity-50 transition-all active:scale-95 focus:ring-4 focus:ring-emerald-300">
-                  {saving ? <Loader2 size={15} className="animate-spin" /> : null}
-                  Save as Final
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -3709,6 +3544,7 @@ function DischargeSummaryTab() {
 // ─── End Discharge Summary Tab ─────────────────────────────────────────────────
 
 export default function DoctorPortal() {
+  useTimeDisplayMode()
   const [tab, setTab] = useState('opd')
   const [aiMode, setAiMode] = useState(false)
   const [showAiTransition, setShowAiTransition] = useState(false)

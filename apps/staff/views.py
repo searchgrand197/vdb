@@ -15,6 +15,15 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.response import Response
 
 from apps.roles_permissions.permissions import HasRequiredPermission
+from apps.shared.master_delete import (
+    build_linked_doctors,
+    build_linked_specialties,
+    build_linked_staff,
+    operational_doctors_for_department,
+    operational_specialties_for_department,
+    operational_staff_for_department,
+    operational_staff_for_designation,
+)
 from apps.shared.response import success_response
 from apps.staff.models import (
     Department,
@@ -43,6 +52,22 @@ from apps.staff.serializers import (
 )
 
 
+def _initial_password_for_staff_user(*, email: str, first_name: str) -> str:
+    """
+    Human-readable default login password for auto-created staff users:
+    lowercase first name + '1234', e.g. first name 'Test' -> 'test1234'.
+    Falls back to the email local-part, then 'staff', if the name yields no letters/digits.
+    """
+    raw = (first_name or "").strip().lower()
+    base = "".join(ch for ch in raw if ch.isalnum())
+    if not base:
+        local = (email or "").split("@", 1)[0].strip().lower()
+        base = "".join(ch for ch in local if ch.isalnum())
+    if not base:
+        base = "staff"
+    return f"{base}1234"
+
+
 class HospitalScopedMixin:
     def get_queryset(self):
         qs = super().get_queryset()
@@ -57,7 +82,7 @@ class HospitalScopedMixin:
 
 
 class DepartmentViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
-    queryset = Department.objects.all()
+    queryset = Department.objects.filter(is_deleted=False)
     filter_backends = (DjangoFilterBackend, SearchFilter, OrderingFilter)
     filterset_fields = ("hospital_id", "id")
     search_fields = ("code", "name", "description")
@@ -127,49 +152,24 @@ class DepartmentViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """
-        Block delete when the department is still referenced (same DB rule as PROTECT),
-        and return who is linked — including for superusers (no bypass).
+        Archive when no operational links remain; otherwise return who is still linked.
         """
         department = self.get_object()
 
-        staff_count = department.staff.count()
-        doctors_count = department.doctors.count()
-        specialties_count = department.specialties.count()
+        staff_qs = operational_staff_for_department(department)
+        doctors_qs = operational_doctors_for_department(department)
+        specialties_qs = operational_specialties_for_department(department)
+
+        linked_staff, staff_count = build_linked_staff(staff_qs)
+        linked_doctors, doctors_count = build_linked_doctors(doctors_qs)
+        linked_specialties, specialties_count = build_linked_specialties(specialties_qs)
 
         if not staff_count and not doctors_count and not specialties_count:
-            return super().destroy(request, *args, **kwargs)
-
-        staff_rows = list(
-            department.staff.select_related("user").order_by("employee_code", "first_name")[:100]
-        )
-        linked_staff = []
-        for s in staff_rows:
-            parts = f"{(s.first_name or '').strip()} {(s.last_name or '').strip()}".strip()
-            if s.user_id and getattr(s.user, "email", None):
-                parts = parts or str(s.user.email)
-            display = parts or (s.employee_code or "").strip() or str(s.id)
-            linked_staff.append(
-                {
-                    "id": str(s.id),
-                    "name": display,
-                    "employee_code": (s.employee_code or "").strip() or None,
-                }
+            pk = department.pk
+            department.delete()
+            return success_response(
+                data={"id": str(pk), "message": "Department deleted successfully."},
             )
-
-        doctor_rows = list(department.doctors.order_by("name")[:100])
-        linked_doctors = [
-            {
-                "id": str(d.id),
-                "name": d.name,
-                "doctor_code": (d.doctor_code or "").strip() or None,
-            }
-            for d in doctor_rows
-        ]
-
-        spec_rows = list(department.specialties.order_by("name")[:100])
-        linked_specialties = [
-            {"id": str(sp.id), "name": sp.name, "code": sp.code} for sp in spec_rows
-        ]
 
         return Response(
             {
@@ -199,7 +199,7 @@ class DepartmentViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
 
 class DesignationViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
-    queryset = Designation.objects.all()
+    queryset = Designation.objects.filter(is_deleted=False).prefetch_related("allowed_pharmacies")
     filter_backends = (SearchFilter,)
     search_fields = ("code", "name")
 
@@ -231,30 +231,18 @@ class DesignationViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """
-        Block delete when the designation is still referenced by any staff profile.
-        Returns a clear message and a sample of attached staff.
+        Archive when no operational staff links remain; otherwise return linked staff.
         """
         designation = self.get_object()
 
-        staff_qs = designation.staff.select_related("user").order_by("employee_code", "first_name")
-        staff_count = staff_qs.count()
+        staff_qs = operational_staff_for_designation(designation)
+        linked_staff, staff_count = build_linked_staff(staff_qs)
 
         if staff_count == 0:
-            return super().destroy(request, *args, **kwargs)
-
-        staff_rows = list(staff_qs[:100])
-        linked_staff = []
-        for s in staff_rows:
-            parts = f"{(s.first_name or '').strip()} {(s.last_name or '').strip()}".strip()
-            if s.user_id and getattr(s.user, "email", None):
-                parts = parts or str(s.user.email)
-            display = parts or (s.employee_code or "").strip() or str(s.id)
-            linked_staff.append(
-                {
-                    "id": str(s.id),
-                    "name": display,
-                    "employee_code": (s.employee_code or "").strip() or None,
-                }
+            pk = designation.pk
+            designation.delete()
+            return success_response(
+                data={"id": str(pk), "message": "Designation deleted successfully."},
             )
 
         return Response(
@@ -311,7 +299,9 @@ class ShiftViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
 
 
 class StaffProfileViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
-    queryset = StaffProfile.objects.all().select_related("department", "designation", "user")
+    queryset = StaffProfile.objects.filter(is_deleted=False).select_related(
+        "department", "designation", "user"
+    ).prefetch_related("allowed_pharmacies")
     filter_backends = (SearchFilter,)
     search_fields = ("employee_code", "first_name", "last_name")
 
@@ -353,8 +343,10 @@ class StaffProfileViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
             if not email:
                 raise ValidationError({"email": ["This field is required when user is not provided."]})
             UserModel = get_user_model()
-            # Random strong password for auto-created staff users.
-            password = UserModel.objects.make_random_password()
+            password = _initial_password_for_staff_user(
+                email=email,
+                first_name=vd.get("first_name", "") or "",
+            )
             try:
                 user = UserModel.objects.create_user(
                     email=email,
@@ -446,7 +438,7 @@ class StaffProfileViewSet(HospitalScopedMixin, viewsets.ModelViewSet):
             vd["employee_code"] = f"EMP-{next_number:04d}"
 
         vd.pop("email", None)
-        serializer.save(hospital_id=hospital_id)
+        serializer.save(hospital_id=hospital_id, user=vd.get("user"))
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

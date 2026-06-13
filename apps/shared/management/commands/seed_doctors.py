@@ -149,7 +149,7 @@ class Command(BaseCommand):
         created_count = 0
         skipped_count = 0
 
-        for doc in DOCTORS:
+        for idx, doc in enumerate(DOCTORS, start=1):
             # Get or create Department
             dept = Department.objects.filter(hospital=hospital, code=doc["dept_code"]).first()
             if not dept:
@@ -192,6 +192,7 @@ class Command(BaseCommand):
                 user=user,
                 defaults={
                     "name": doc["name"],
+                    "doctor_code": f"SEED-{idx:03d}",
                     "specialty": specialty,
                     "doctor_type": doc["doctor_type"],
                     "consultation_fee": doc["fee"],

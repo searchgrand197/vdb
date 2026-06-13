@@ -120,7 +120,6 @@ if POSTGRES_DB:
             "PASSWORD": env("POSTGRES_PASSWORD", default="postgres"),
             "HOST": env("POSTGRES_HOST", default="localhost"),
             "PORT": env("POSTGRES_PORT", default="5432"),
-            "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=60),
         }
     }
 else:
@@ -130,15 +129,6 @@ else:
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
-
-# In-process cache — no extra dependencies, ideal for single-server deployments.
-# All cached keys are scoped per-process and cleared on restart.
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "curevice-default",
-    }
-}
 
 
 # Password validation
@@ -268,10 +258,4 @@ LOGGING = {
 WEBPUSH_PUBLIC_KEY = env.str("WEBPUSH_PUBLIC_KEY", default="")
 WEBPUSH_PRIVATE_KEY = env.str("WEBPUSH_PRIVATE_KEY", default="")
 WEBPUSH_SUB_EMAIL = env.str("WEBPUSH_SUB_EMAIL", default="")
-
-
-# Twilio SMS (OPD scheduling notifications)
-TWILIO_ACCOUNT_SID = env.str("TWILIO_ACCOUNT_SID", default="")
-TWILIO_AUTH_TOKEN = env.str("TWILIO_AUTH_TOKEN", default="")
-TWILIO_FROM_NUMBER = env.str("TWILIO_FROM_NUMBER", default="")
 

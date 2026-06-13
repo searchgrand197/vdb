@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import api from '../api'
+import { getBedDisplayLabel } from '../utils/bedDisplay'
 import {
   ChevronUp, ChevronDown, Wind, Fan, Bed, X, CheckCircle,
   AlertTriangle, Wrench, Clock, Sparkles, Shield, Home, Users,
@@ -227,9 +228,10 @@ const BED_STATUS_META = {
 }
 
 // ─── BedSelector Modal ────────────────────────────────────────────────────────
-export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' }) {
+export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50', labelMode: labelModeProp }) {
   const [floors, setFloors] = useState([])
   const [loading, setLoading] = useState(true)
+  const [labelMode, setLabelMode] = useState(labelModeProp || 'bed_code')
   const [floorIdx, setFloorIdx] = useState(0)
   const [selectedRoom, setSelectedRoom] = useState(null)
   const [selectedBed, setSelectedBed] = useState(null)
@@ -241,6 +243,19 @@ export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' })
   const [fastStaffId, setFastStaffId] = useState('')
   const [fastNotes, setFastNotes] = useState('')
   const [fastSaving, setFastSaving] = useState(false)
+
+  useEffect(() => {
+    if (labelModeProp) {
+      setLabelMode(labelModeProp === 'bed_number' ? 'bed_number' : 'bed_code')
+      return
+    }
+    api.get('/settings/reception-portal/')
+      .then(({ data }) => {
+        const row = data?.data || data || {}
+        setLabelMode(row.admission_bed_label_mode === 'bed_number' ? 'bed_number' : 'bed_code')
+      })
+      .catch(() => {})
+  }, [labelModeProp])
 
   useEffect(() => {
     api.get('/beds/beds/by-floor/')
@@ -448,8 +463,9 @@ export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' })
                           const bm = BED_STATUS_META[bed.status] || BED_STATUS_META.available
                           const isSelected = selectedBed?.id === bed.id
                           const canPick = bed.status === 'available'
+                          const bedLabel = getBedDisplayLabel(bed, labelMode)
                           const tooltipLines = [
-                            bed.bed_code,
+                            bedLabel,
                             bm.label,
                             `${room.name} · ${meta.label}`,
                             room.room_number ? `#${room.room_number}` : null,
@@ -480,7 +496,7 @@ export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' })
                               <span className={`text-[10px] font-bold leading-none ${
                                 isSelected ? 'text-blue-700' : canPick ? 'text-emerald-700' : bm.text
                               }`}>
-                                {bed.bed_code}
+                                {bedLabel}
                               </span>
                               <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold leading-none ${
                                 isSelected ? 'bg-blue-600 text-white' : `${bm.bg} ${bm.text}`
@@ -517,7 +533,7 @@ export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' })
             }}
           >
             <div className="bg-gray-900 text-white text-[11px] rounded-xl px-3 py-2.5 shadow-2xl border border-gray-700 whitespace-nowrap min-w-max">
-              <p className="font-bold text-[12px] text-white mb-1">{tooltip.bed.bed_code}</p>
+              <p className="font-bold text-[12px] text-white mb-1">{getBedDisplayLabel(tooltip.bed, labelMode)}</p>
               <p className="text-gray-300">{tooltip.room.name} · {tooltip.meta.label}</p>
               {tooltip.room.room_number && <p className="text-gray-400 text-[10px]">Room #{tooltip.room.room_number}</p>}
               <div className="flex items-center gap-2 mt-1.5 pt-1.5 border-t border-gray-700">
@@ -545,7 +561,7 @@ export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' })
               </div>
               <div className="min-w-0">
                 <p className="text-sm font-bold text-gray-800 leading-none">
-                  {selectedBed.bed_code} · {selectedRoom.name}
+                  {getBedDisplayLabel(selectedBed, labelMode)} · {selectedRoom.name}
                   {selectedRoom.is_ac && <span className="ml-1.5 text-[10px] bg-cyan-100 text-cyan-700 px-1.5 py-0.5 rounded-full font-semibold"><Wind size={8} className="inline" /> AC</span>}
                 </p>
                 <p className="text-[11px] text-gray-500 mt-0.5">
@@ -582,7 +598,7 @@ export default function BedSelector({ onSelect, onClose, zIndexClass = 'z-50' })
                 <select value={fastCleanBedId} onChange={e => setFastCleanBedId(e.target.value)} className="mt-1 w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
                   <option value="">Select cleaning bed...</option>
                   {cleaningBeds.map(b => (
-                    <option key={b.id} value={b.id}>{b.bed_code} · {b.room_name} · {b.floor_name}</option>
+                    <option key={b.id} value={b.id}>{getBedDisplayLabel(b, labelMode)} · {b.room_name} · {b.floor_name}</option>
                   ))}
                 </select>
               </div>

@@ -26,7 +26,12 @@ def _invoice_seq_from_number(inv_no: str, prefix: str, legacy_prefix_upper: str)
     return None
 
 
-def next_pharmacy_invoice_number(pharmacy_id, year: int | None = None, reserve: bool = False) -> str:
+def next_pharmacy_invoice_number(
+    pharmacy_id,
+    year: int | None = None,
+    reserve: bool = False,
+    channel: str = "b2c",
+) -> str:
     """
     Build invoice number as prefix + sequence (e.g. A/111, b-333).
     Legacy invoices INV-2026-42 still count toward the sequence for the same prefix token.
@@ -40,9 +45,12 @@ def next_pharmacy_invoice_number(pharmacy_id, year: int | None = None, reserve: 
             pharmacy_id=pharmacy_id,
             defaults={"business_name": ""},
         )
-        prefix = (settings_obj.invoice_prefix or "INV").strip() or "INV"
+        ch = "b2b" if str(channel or "").lower() == "b2b" else "b2c"
+        prefix_attr = f"{ch}_invoice_prefix"
+        next_attr = f"{ch}_invoice_next_number"
+        prefix = (getattr(settings_obj, prefix_attr, None) or "INV").strip() or "INV"
         legacy_prefix_upper = prefix.upper()
-        max_seq = max(int(settings_obj.invoice_next_number or 1) - 1, 0)
+        max_seq = max(int(getattr(settings_obj, next_attr, 1) or 1) - 1, 0)
         qs = PharmacyInvoice.objects.filter(pharmacy_id=pharmacy_id).values_list("invoice_no", flat=True)
         for inv_no in qs:
             seq = _invoice_seq_from_number(inv_no, prefix, legacy_prefix_upper)
@@ -50,6 +58,6 @@ def next_pharmacy_invoice_number(pharmacy_id, year: int | None = None, reserve: 
                 max_seq = max(max_seq, seq)
         next_seq = max_seq + 1
         if reserve:
-            settings_obj.invoice_next_number = next_seq + 1
-            settings_obj.save(update_fields=["invoice_next_number"])
+            setattr(settings_obj, next_attr, next_seq + 1)
+            settings_obj.save(update_fields=[next_attr])
         return f"{prefix}{next_seq}"

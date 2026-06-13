@@ -40,18 +40,20 @@ export const SALUTATION_CHOICE_OPTIONS = [
  * Honorific for slips from form + Patient.preferred_salutation.
  * '' | unset → {@link formatPatientSalutation}; 'none' → no prefix; else explicit title.
  */
-export function resolveSalutationForSlip(choice, gender, age) {
+export function resolveSalutationForSlip(choice, gender, age, ageUnit = 'years') {
   const c = String(choice ?? '').trim()
   if (c === 'none') return ''
-  if (!c || c === 'auto') return formatPatientSalutation(gender, age)
+  if (!c || c === 'auto') return formatPatientSalutation(gender, age, ageUnit)
   return c
 }
 
-export function formatPatientSalutation(gender, age) {
+export function formatPatientSalutation(gender, age, ageUnit = 'years') {
   const g = String(gender || '').trim().toLowerCase()
   const a = age === null || age === undefined || age === '' ? null : Number(age)
   const ageNum = Number.isFinite(a) ? a : null
-  if (ageNum !== null && ageNum < 18) {
+  const unit = String(ageUnit || 'years').trim().toLowerCase()
+  const isChild = unit === 'months' || unit === 'days' || (ageNum !== null && ageNum < 18)
+  if (isChild) {
     if (g === 'male') return 'Master'
     if (g === 'female') return 'Miss'
     return ''
@@ -70,11 +72,11 @@ export function formatGuardianPrefix(relCode) {
 /**
  * Full patient line for slip: "Mr First Last"
  */
-export function formatPatientLineForSlip(patientName, gender, age, salutationOverride) {
+export function formatPatientLineForSlip(patientName, gender, age, salutationOverride, ageUnit = 'years') {
   const name = String(patientName || '').trim()
   const sal = salutationOverride !== undefined && salutationOverride !== null
     ? String(salutationOverride).trim()
-    : formatPatientSalutation(gender, age)
+    : formatPatientSalutation(gender, age, ageUnit)
   if (!name) return ''
   return sal ? `${sal} ${name}` : name
 }

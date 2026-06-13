@@ -115,17 +115,24 @@ class Command(BaseCommand):
             inv_item_n = max(8, _allocate(budgets["invoice_items"], share))
             patient_n = max(12, _allocate(total, 0.08 * share))
 
+            outlet_defaults = {
+                "business_name": f"{BRANCH_LABELS[idx][1]} Pharmacy",
+                "b2c_address": f"{BRANCH_LABELS[idx][1]} Market, Default City",
+                "b2c_mobile": f"98{idx + 11}0000{idx + 3}{idx + 7}",
+                "b2c_gst_number": f"27{(idx+1)}ABCDE{(idx+2)}F{idx+1}Z{idx+1}",
+                "b2c_dl_number": f"DL-{tag}-{1000 + idx}",
+                "b2c_email": f"{tag.lower()}@pharmacy.demo",
+                "b2c_website": f"https://{tag.lower()}.demo.local",
+                "b2b_address": f"{BRANCH_LABELS[idx][1]} Market, Default City",
+                "b2b_mobile": f"98{idx + 11}0000{idx + 3}{idx + 7}",
+                "b2b_gst_number": f"27{(idx+1)}ABCDE{(idx+2)}F{idx+1}Z{idx+1}",
+                "b2b_dl_number": f"DL-{tag}-{1000 + idx}",
+                "b2b_email": f"{tag.lower()}@pharmacy.demo",
+                "b2b_website": f"https://{tag.lower()}.demo.local",
+            }
             settings, created = PharmacyOutletSettings.objects.get_or_create(
                 pharmacy=pharmacy,
-                defaults={
-                    "business_name": f"{BRANCH_LABELS[idx][1]} Pharmacy",
-                    "address": f"{BRANCH_LABELS[idx][1]} Market, Default City",
-                    "mobile": f"98{idx + 11}0000{idx + 3}{idx + 7}",
-                    "gst_number": f"27{(idx+1)}ABCDE{(idx+2)}F{idx+1}Z{idx+1}",
-                    "dl_number": f"DL-{tag}-{1000 + idx}",
-                    "email": f"{tag.lower()}@pharmacy.demo",
-                    "website": f"https://{tag.lower()}.demo.local",
-                },
+                defaults=outlet_defaults,
             )
             if created:
                 summary["settings"] += 1

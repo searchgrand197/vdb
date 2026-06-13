@@ -1,7 +1,19 @@
+import json
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+import re
 
 from apps.settings_management.models import LeaveApprover, ReceptionPortalSettings
+from apps.settings_management.document_number_service import (
+    normalize_document_number_formats,
+    validate_document_number_formats,
+)
+from apps.settings_management.opd_field_catalog import (
+    OPD_CORE_FIELD_KEYS,
+    normalize_opd_field_config,
+)
+
+OPD_FORM_VISIBLE_FIELD_KEYS = frozenset(OPD_CORE_FIELD_KEYS)
 
 
 class LeaveApproverSerializer(serializers.ModelSerializer):
@@ -38,6 +50,8 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     opd_fee_slots = serializers.ListField(required=False)
+    opd_visible_fields = serializers.ListField(child=serializers.CharField(), required=False)
+    opd_field_config = serializers.JSONField(required=False)
     current_opd_slot_fee = serializers.SerializerMethodField()
     current_opd_slot = serializers.SerializerMethodField()
     hospital_logo_url = serializers.SerializerMethodField()
@@ -57,9 +71,19 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
             "website",
             "hospital_logo",
             "hospital_logo_url",
+            "uhid_prefix",
+            "invoice_prefix",
+            "invoice_next_number",
+            "document_number_formats",
             "print_with_background",
             "opd_fee_mode",
             "opd_fee_slots",
+            "opd_visible_fields",
+            "opd_field_config",
+            "admission_bed_label_mode",
+            "time_display_mode",
+            "reception_collection_enabled",
+            "reception_daily_report_enabled",
             "current_opd_slot_fee",
             "current_opd_slot",
             "created_at",
@@ -80,6 +104,80 @@ class ReceptionPortalSettingsSerializer(serializers.ModelSerializer):
         if request is not None:
             return request.build_absolute_uri(obj.hospital_logo.url)
         return obj.hospital_logo.url
+
+    def validate_uhid_prefix(self, value):
+        if value in (None, ""):
+            return "DEF"
+        cleaned = str(value).strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,8}", cleaned):
+            raise serializers.ValidationError("Use 2-8 letters or numbers.")
+        return cleaned
+
+    def validate_invoice_prefix(self, value):
+        if value in (None, ""):
+            return "INV"
+        cleaned = str(value).strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,20}", cleaned):
+            raise serializers.ValidationError("Use 2-20 letters or numbers.")
+        return cleaned
+
+    def validate_invoice_next_number(self, value):
+        try:
+            num = int(value)
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("Must be a positive integer.")
+        if num < 1:
+            raise serializers.ValidationError("Must be at least 1.")
+        return num
+
+    def validate_document_number_formats(self, value):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise serializers.ValidationError("Invalid JSON for document number formats.") from exc
+        if value in (None, ""):
+            return normalize_document_number_formats({})
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Document number formats must be an object.")
+        try:
+            return validate_document_number_formats(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate_admission_bed_label_mode(self, value):
+        allowed = {"bed_code", "bed_number"}
+        mode = str(value or "bed_code").strip()
+        if mode not in allowed:
+            raise serializers.ValidationError("Must be bed_code or bed_number.")
+        return mode
+
+    def validate_time_display_mode(self, value):
+        allowed = {"12h", "24h"}
+        mode = str(value or "24h").strip()
+        if mode not in allowed:
+            raise serializers.ValidationError("Must be 12h or 24h.")
+        return mode
+
+    def validate_opd_visible_fields(self, value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Field visibility must be a list.")
+        cleaned = []
+        for item in value:
+            key = str(item or "").strip()
+            if not key or key not in OPD_FORM_VISIBLE_FIELD_KEYS or key in cleaned:
+                continue
+            cleaned.append(key)
+        return cleaned
+
+    def validate_opd_field_config(self, value):
+        if value in (None, ""):
+            return normalize_opd_field_config({})
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Field config must be an object.")
+        return normalize_opd_field_config(value)
 
     def validate_opd_fee_slots(self, value):
         if value in (None, ""):

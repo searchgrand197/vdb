@@ -2,7 +2,7 @@ from django.db import IntegrityError, transaction
 from decimal import Decimal
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from django.db.models import F, Q
+from django.db.models import BooleanField, Case, F, Prefetch, Q, Value, When
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, permissions, serializers, status, viewsets
 from rest_framework.decorators import action
@@ -17,10 +17,11 @@ from apps.pharmacy.models import Pharmacy, PharmacyInvoice, PharmacyInvoiceItem,
 from apps.patients.models import PatientAddress, PatientGuardian
 from apps.pharmacy.purchase_challan import process_purchase_challan
 from apps.pharmacy.purchase_history import detail_purchase_history, list_purchase_history
+from apps.pharmacy.outlet_settings_channels import apply_nested_settings_patch, nested_settings_response
 from apps.pharmacy.serializers import (
     PharmacyInvoiceItemSerializer,
     PharmacyInvoiceSerializer,
-    PharmacyOutletSettingsSerializer,
+    PharmacyOutletSettingsPatchSerializer,
     PharmacySupplierSerializer,
     PurchaseChallanSerializer,
 )
@@ -39,13 +40,20 @@ def _require_pharmacy_branch(request):
     pharmacy = _get_pharmacy_branch(request)
     if pharmacy is None:
         raise serializers.ValidationError({"detail": ["Pharmacy branch context required."]})
+    user = getattr(request, "user", None)
+    if user is not None and user.is_authenticated and not user.is_superuser:
+        from apps.roles_permissions.effective_permissions import user_may_access_pharmacy
+
+        if not user_may_access_pharmacy(user, pharmacy.id):
+            raise serializers.ValidationError(
+                {"detail": ["Your account is not allowed to access this pharmacy branch."]}
+            )
     return pharmacy
 
 
 class PharmacyOutletSettingsView(generics.RetrieveUpdateAPIView):
-    """GET/PATCH /api/v1/pharmacy/settings/ — letterhead & compliance fields for print."""
+    """GET/PATCH /api/v1/pharmacy/settings/ — nested B2C / B2B outlet profiles."""
 
-    serializer_class = PharmacyOutletSettingsSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
@@ -55,6 +63,38 @@ class PharmacyOutletSettingsView(generics.RetrieveUpdateAPIView):
             defaults={"business_name": pharmacy.name or ""},
         )
         return obj
+
+    def retrieve(self, request, *args, **kwargs):
+        obj = self.get_object()
+        return success_response(nested_settings_response(obj, request))
+
+    def update(self, request, *args, **kwargs):
+        import json
+
+        obj = self.get_object()
+        raw = request.data
+        if hasattr(raw, "dict"):
+            data = raw.dict()
+        elif isinstance(raw, dict):
+            data = dict(raw)
+        else:
+            data = dict(raw)
+        for key in ("b2c", "b2b"):
+            if key in data and isinstance(data.get(key), str):
+                try:
+                    data[key] = json.loads(data[key])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        for bool_key in ("apply_to_both", "b2b_enabled"):
+            if bool_key in data and isinstance(data.get(bool_key), str):
+                data[bool_key] = str(data[bool_key]).lower() in ("true", "1", "yes")
+        ser = PharmacyOutletSettingsPatchSerializer(data=data)
+        if not ser.is_valid():
+            return Response({"success": False, "errors": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
+        updated = apply_nested_settings_patch(obj, ser.validated_data, request)
+        if updated:
+            obj.save(update_fields=updated + ["updated_at"])
+        return success_response(nested_settings_response(obj, request))
 
 
 class PharmacyPurchaseChallanView(APIView):
@@ -104,7 +144,10 @@ class PharmacyNextInvoiceNumberView(APIView):
 
     def get(self, request, *args, **kwargs):
         pharmacy = _require_pharmacy_branch(request)
-        return success_response({"invoice_no": next_pharmacy_invoice_number(pharmacy.id)})
+        channel = (request.query_params.get("channel") or "b2c").strip().lower()
+        if channel not in ("b2b", "b2c"):
+            channel = "b2c"
+        return success_response({"invoice_no": next_pharmacy_invoice_number(pharmacy.id, channel=channel)})
 
 
 class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
@@ -129,19 +172,34 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         if status_filter:
             # Status stored as lowercase in DB (TextChoices value, not name)
             qs = qs.filter(status=status_filter)
+        if getattr(self, "action", None) == "list":
+            qs = qs.defer("print_html").annotate(
+                has_print_copy_flag=Case(
+                    When(Q(print_html__gt=""), then=Value(True)),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                )
+            )
+        qs = qs.prefetch_related(
+            Prefetch(
+                "items",
+                queryset=PharmacyInvoiceItem.objects.select_related("medicine", "medicine__unit", "batch"),
+            )
+        )
         return qs
 
     def perform_create(self, serializer):
         pharmacy = _get_pharmacy_branch(self.request)
         if pharmacy is None:
             raise serializers.ValidationError({"detail": ["Pharmacy branch context required."]})
+        channel = "b2b" if serializer.validated_data.get("party") else "b2c"
         raw = (serializer.validated_data.get("invoice_no") or "").strip()
         if raw and not PharmacyInvoice.objects.filter(invoice_no=raw).exists():
             invoice_no = raw
         else:
-            invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
+            invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True, channel=channel)
             while PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
-                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True, channel=channel)
         payment_method = (serializer.validated_data.get("payment_method") or "cash").lower()
         grand_total = serializer.validated_data.get("grand_total") or Decimal("0.00")
         paid_amount = serializer.validated_data.get("paid_amount")
@@ -160,9 +218,9 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 )
                 return
             except IntegrityError:
-                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True, channel=channel)
                 while PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
-                    invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
+                    invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True, channel=channel)
         # If all retries fail, bubble up the final DB integrity error.
         serializer.save(
             pharmacy=pharmacy,
@@ -322,11 +380,11 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 # Generate a collision-safe invoice number (max 10 retries then UUID suffix)
-                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
+                invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True, channel="b2c")
                 for _ in range(10):
                     if not PharmacyInvoice.objects.filter(invoice_no=invoice_no).exists():
                         break
-                    invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True)
+                    invoice_no = next_pharmacy_invoice_number(pharmacy.id, reserve=True, channel="b2c")
                 else:
                     # Absolute fallback — extremely unlikely to collide
                     invoice_no = f"DRFT-{str(_uuid.uuid4())[:8].upper()}"
@@ -402,6 +460,35 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Draft not found."}, status=status.HTTP_404_NOT_FOUND)
         invoice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["patch"], url_path="print-copy")
+    def save_print_copy(self, request, pk=None, *args, **kwargs):
+        """
+        PATCH /api/v1/pharmacy/invoices/{id}/print-copy/
+        Save or clear the pre-print edited HTML snapshot for a finalized invoice.
+        Body: { "print_html": "<!DOCTYPE html>..." } — empty string clears the copy.
+        """
+        invoice = self.get_object()
+        if invoice.status != PharmacyInvoice.Status.FINALIZED:
+            return Response(
+                {"detail": "Print copy can only be saved for finalized invoices."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        print_html = request.data.get("print_html", "")
+        if print_html is None:
+            print_html = ""
+        print_html = str(print_html)
+        if not print_html.strip():
+            invoice.print_html = ""
+            invoice.print_html_updated_at = None
+        else:
+            invoice.print_html = print_html
+            invoice.print_html_updated_at = timezone.now()
+        invoice.save(update_fields=["print_html", "print_html_updated_at", "updated_at"])
+        return success_response(
+            data=PharmacyInvoiceSerializer(invoice).data,
+            message="Print copy saved." if invoice.print_html else "Print copy cleared.",
+        )
 
     @action(detail=False, methods=["get"], url_path="pending-credits")
     def pending_credits(self, request, *args, **kwargs):
@@ -501,15 +588,21 @@ class PharmacyInvoiceItemViewSet(viewsets.ModelViewSet):
             raise serializers.ValidationError({"batch": ["This batch is expired and cannot be sold."]})
         if inv.status == PharmacyInvoice.Status.FINALIZED:
             available = get_batch_available_qty(batch)
-            if available < item.qty:
+            deduct_qty = item.qty + (item.free_qty or Decimal("0"))
+            if available < deduct_qty:
                 raise serializers.ValidationError(
-                    {"qty": [f"Insufficient stock for batch {batch.batch_no}. Available {available}, requested {item.qty}."]}
+                    {
+                        "qty": [
+                            f"Insufficient stock for batch {batch.batch_no}. "
+                            f"Available {available}, requested {deduct_qty} (sold + free)."
+                        ]
+                    }
                 )
             try:
                 deduct_stock_fifo(
                     request=self.request,
                     pharmacy=pharmacy,
-                    medicine_batch_pairs=[(batch, item.qty)],
+                    medicine_batch_pairs=[(batch, deduct_qty)],
                     reference_id=str(inv.id),
                 )
             except ValueError as exc:

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
+import { formatDateTime, formatTime, useTimeDisplayMode } from '../utils/dateTimeFormat'
 import { format } from 'date-fns'
 import api from '../api'
 import { Clock3, Stethoscope, UserRound } from 'lucide-react'
@@ -16,6 +17,7 @@ function getRoomMap() {
 }
 
 export default function TVDisplay() {
+  useTimeDisplayMode()
   const { roomCode } = useParams()
   const [roomMap, setRoomMap] = useState(getRoomMap())
   const tvGroups = getTvGroupsConfig(Object.values(roomMap))
@@ -110,7 +112,7 @@ export default function TVDisplay() {
       <header className="h-16 px-6 border-b border-slate-200 bg-white flex items-center justify-between shrink-0">
         <h1 className="text-3xl font-black tracking-tight">{roomTitle}</h1>
         <div className="text-right">
-          <p className="text-4xl font-black tabular-nums leading-none">{format(time, 'HH:mm')}</p>
+          <p className="text-4xl font-black tabular-nums leading-none">{formatTime(time)}</p>
           <p className="text-xs text-slate-500 font-semibold">{format(time, 'dd MMM yyyy')}</p>
         </div>
       </header>

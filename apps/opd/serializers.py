@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from apps.opd.models import OPDVisit
 from apps.opd.services import resolve_opd_doctor_name
+from apps.patients.age_utils import dob_to_age_parts, is_child_age
 
 
 class OPDVisitSerializer(serializers.ModelSerializer):
@@ -10,6 +11,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
     patient_phone = serializers.CharField(source="patient.phone", read_only=True, default="")
     patient_registered_at = serializers.DateTimeField(source="patient.created_at", read_only=True)
     patient_age = serializers.SerializerMethodField()
+    patient_age_unit = serializers.SerializerMethodField()
     patient_gender = serializers.CharField(source="patient.gender", read_only=True, default="")
     patient_address = serializers.SerializerMethodField()
     patient_city = serializers.SerializerMethodField()
@@ -17,6 +19,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
     patient_guardian_name = serializers.SerializerMethodField()
     patient_guardian_relationship = serializers.SerializerMethodField()
     patient_salutation = serializers.SerializerMethodField()
+    patient_opd_custom_fields = serializers.SerializerMethodField()
     token_number = serializers.IntegerField(source="queue_number", read_only=True)
     chief_complaint = serializers.CharField(source="visit_reason", read_only=True)
     room_code = serializers.SerializerMethodField()
@@ -38,6 +41,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "patient_phone",
             "patient_registered_at",
             "patient_age",
+            "patient_age_unit",
             "patient_gender",
             "patient_address",
             "patient_city",
@@ -45,12 +49,14 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "patient_guardian_name",
             "patient_guardian_relationship",
             "patient_salutation",
+            "patient_opd_custom_fields",
             "visit_date",
             "queue_number",
             "token_number",
             "doctor_user",
             "doctor_user_email",
             "doctor_name",
+            "department",
             "visit_reason",
             "chief_complaint",
             "room_code",
@@ -86,15 +92,12 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             return name or None
 
     def get_patient_age(self, obj):
-        from datetime import date as _date
-        dob = getattr(obj.patient, "dob", None)
-        if not dob:
-            return None
-        today = _date.today()
-        age = today.year - dob.year
-        if (today.month, today.day) < (dob.month, dob.day):
-            age -= 1
-        return age
+        value, _unit = dob_to_age_parts(getattr(obj.patient, "dob", None))
+        return value
+
+    def get_patient_age_unit(self, obj):
+        _value, unit = dob_to_age_parts(getattr(obj.patient, "dob", None))
+        return unit or "years"
 
     def get_patient_address(self, obj):
         try:
@@ -138,7 +141,8 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             return pref
         gender = (getattr(obj.patient, "gender", None) or "").strip().lower()
         age = self.get_patient_age(obj)
-        if age is not None and age < 18:
+        age_unit = self.get_patient_age_unit(obj)
+        if is_child_age(age, age_unit):
             if gender == "male":
                 return "Master"
             if gender == "female":
@@ -150,19 +154,17 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             return "Mrs"
         return ""
 
+    def get_patient_opd_custom_fields(self, obj):
+        raw = getattr(obj.patient, "opd_custom_fields", None)
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): "" if v is None else str(v) for k, v in raw.items() if str(k or "").strip()}
+
     def get_room_code(self, obj):
         # Backward-compatibility for old frontend payload/filters.
         return None
 
     def get_doctor_name(self, obj):
-        if obj.doctor_user is not None:
-            profiles = getattr(obj.doctor_user, '_active_doctor_profiles', None)
-            if profiles is not None:
-                hospital_id = getattr(obj, 'hospital_id', None)
-                for p in profiles:
-                    if str(p.hospital_id) == str(hospital_id):
-                        return p.name.strip()
-                return ""
         return resolve_opd_doctor_name(
             doctor_user=obj.doctor_user,
             hospital_id=getattr(obj, "hospital_id", None),
@@ -200,6 +202,7 @@ class OPDVisitCreateUpdateSerializer(serializers.ModelSerializer):
             "queue_number",
             "token_number",
             "doctor_user",
+            "department",
             "chief_complaint",
             "room_code",
             "visit_reason",

@@ -24,7 +24,13 @@ class Unit(TimeStampedModel, UUIDPrimaryKeyModel):
 class Medicine(TimeStampedModel, UUIDPrimaryKeyModel):
     pharmacy = models.ForeignKey("pharmacy.Pharmacy", on_delete=models.PROTECT, related_name="medicines")
     sku = models.CharField(max_length=80)
-    name = models.CharField(max_length=250)
+    name = models.CharField(max_length=250, help_text="Internal nickname for pharmacy staff.")
+    name_on_bill = models.CharField(
+        max_length=250,
+        blank=True,
+        default="",
+        help_text="Optional print name on customer invoice; falls back to nickname.",
+    )
     company_name = models.CharField(max_length=200, blank=True, default="")
     form = models.CharField(max_length=100, blank=True, default="")
     category = models.ForeignKey(

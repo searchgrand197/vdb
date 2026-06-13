@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import api from '../api'
 import toast from 'react-hot-toast'
 import {
@@ -15,6 +15,7 @@ import {
   Shield as ShieldIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '../stores/authStore'
+import { AccountRestrictedError } from '../utils/authErrors'
 
 function asMuiIcon(IconComponent) {
   return function IconBridge({ size, className, sx, ...rest }) {
@@ -206,9 +207,14 @@ export default function Login() {
     setBranchesLoading(true)
     api.get('/auth/pharmacies/')
       .then(({ data }) => {
-        const list = data?.data || []
+        let list = data?.data || []
+        const allowed = useAuthStore.getState().allowedPharmacyIds || []
+        if (allowed.length > 0) {
+          const allowedSet = new Set(allowed.map(String))
+          list = list.filter((b) => allowedSet.has(String(b.id)))
+        }
         setBranches(list)
-        setBranchId('')
+        setBranchId(list.length === 1 ? String(list[0].id) : '')
       })
       .catch(() => toast.error('Could not load pharmacy branches'))
       .finally(() => setBranchesLoading(false))
@@ -238,10 +244,21 @@ export default function Login() {
     } catch (err) {
       const backendErrors = err?.response?.data?.errors
       const backendDetail = backendErrors?.detail ?? err?.response?.data?.detail
+      const status = err?.response?.status
       const msg = Array.isArray(backendDetail)
         ? backendDetail[0]
         : (typeof backendDetail === 'string' && backendDetail.trim()) || 'Invalid email or password'
-      toast.error(msg)
+      if (status === 403) {
+        const allowedPharmacies = backendErrors?.allowed_pharmacy_ids
+        if (role === 'pharmacy' && Array.isArray(allowedPharmacies) && allowedPharmacies.length > 0) {
+          setBranchId('')
+          toast.error(msg || 'You are not allowed to use this pharmacy branch.')
+        } else {
+          toast.error(msg || new AccountRestrictedError().message)
+        }
+      } else {
+        toast.error(msg)
+      }
     } finally {
       setLoading(false)
     }
@@ -346,6 +363,9 @@ export default function Login() {
 
           {/* Footer */}
           <div className="lr-foot">
+            <p>
+              <Link to="/change-password">Change password</Link>
+            </p>
             <p>TV Display: <a href="/tv/room1">/tv/room1</a></p>
           </div>
 

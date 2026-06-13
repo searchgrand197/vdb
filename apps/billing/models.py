@@ -11,6 +11,11 @@ from apps.patients.models import Patient
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
 
 
+class CollectionAttribution(models.TextChoices):
+    DOCTOR = "doctor", "Doctor"
+    HOSPITAL_SELF = "hospital_self", "Self (Hospital)"
+
+
 class InvoiceNumberSequence(TimeStampedModel):
     """
     Invoice number sequence per hospital per year.
@@ -64,6 +69,20 @@ class BillingInvoice(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     cancelled_reason = models.CharField(max_length=500, blank=True, default="")
     cancelled_at = models.DateTimeField(null=True, blank=True)
 
+    attribution_type = models.CharField(
+        max_length=20,
+        choices=CollectionAttribution.choices,
+        default=CollectionAttribution.HOSPITAL_SELF,
+        db_index=True,
+    )
+    attributed_doctor_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attributed_invoices",
+    )
+
     class Meta:
         unique_together = [("hospital", "invoice_no")]
         indexes = [models.Index(fields=["hospital", "invoice_date"]), models.Index(fields=["hospital", "status"])]
@@ -77,8 +96,8 @@ class BillingInvoice(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         taxable = self.subtotal_amount - self.discount_amount
         if taxable < 0:
             taxable = Decimal("0.00")
-        self.tax_amount = (taxable * (self.tax_rate / Decimal("100.0"))).quantize(Decimal("0.01"))
-        self.total_amount = (taxable + self.tax_amount).quantize(Decimal("0.01"))
+        self.tax_amount = (taxable * (self.tax_rate / Decimal("100.0")))
+        self.total_amount = (taxable + self.tax_amount)
 
 
 class InvoiceItem(TimeStampedModel, UUIDPrimaryKeyModel):

@@ -1,5 +1,5 @@
-const CACHE_NAME = 'hms-v1'
-const API_CACHE = 'hms-api-v1'
+const CACHE_NAME = 'hms-app-v4'
+const API_CACHE = 'hms-api-v4'
 
 const PRECACHE_URLS = [
   '/',
@@ -14,7 +14,6 @@ const PRECACHE_URLS = [
 ]
 
 const API_CACHE_PATHS = [
-  '/api/templates',
   '/api/v1/pharmacy/dashboard/',
   '/api/v1/medicines/',
   '/api/v1/batches/',
@@ -29,12 +28,11 @@ self.addEventListener('install', (event) => {
 })
 
 self.addEventListener('activate', (event) => {
-  const currentCaches = [CACHE_NAME, API_CACHE]
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((k) => !currentCaches.includes(k))
+          .filter((k) => k !== CACHE_NAME && k !== API_CACHE)
           .map((k) => caches.delete(k))
       )
     )
@@ -59,12 +57,6 @@ self.addEventListener('fetch', (event) => {
 
   if (API_CACHE_PATHS.some((p) => url.pathname.startsWith(p))) {
     event.respondWith(networkFirstApi(request))
-    return
-  }
-
-  // OPD template background images are static — serve from cache, fetch once.
-  if (url.pathname.startsWith('/template/')) {
-    event.respondWith(cacheFirst(request))
     return
   }
 

@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from apps.pharmacy.models import Pharmacy
+from apps.roles_permissions.portal_registry import ALL_PORTAL_CODES
 from apps.staff.models import (
     Department,
     Designation,
@@ -47,16 +49,99 @@ class DepartmentBriefSerializer(serializers.ModelSerializer):
 
 class DesignationSerializer(serializers.ModelSerializer):
     hospital_id = serializers.UUIDField(read_only=True)
+    allowed_pharmacy_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = Designation
-        fields = ["id", "hospital_id", "code", "name", "is_active", "created_at", "updated_at"]
+        fields = [
+            "id",
+            "hospital_id",
+            "code",
+            "name",
+            "is_active",
+            "allowed_portals",
+            "allowed_pharmacy_ids",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_allowed_pharmacy_ids(self, obj) -> list[str]:
+        return [
+            str(pk)
+            for pk in obj.allowed_pharmacies.filter(is_active=True).values_list("id", flat=True)
+        ]
 
 
 class DesignationCreateUpdateSerializer(serializers.ModelSerializer):
+    allowed_portals = serializers.ListField(
+        child=serializers.CharField(max_length=32),
+        required=False,
+    )
+    allowed_pharmacies = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        write_only=True,
+        help_text="Pharmacy branch UUIDs when pharmacy portal is enabled. Empty = all branches.",
+    )
+
     class Meta:
         model = Designation
-        fields = ["code", "name", "is_active"]
+        fields = ["code", "name", "is_active", "allowed_portals", "allowed_pharmacies"]
+
+    def validate_allowed_portals(self, value):
+        if value is None:
+            return []
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for portal_code in value:
+            code = str(portal_code).strip().lower()
+            if not code or code in seen:
+                continue
+            if code not in ALL_PORTAL_CODES:
+                raise serializers.ValidationError(f"Unknown portal: {portal_code}")
+            seen.add(code)
+            cleaned.append(code)
+        return cleaned
+
+    def validate_allowed_pharmacies(self, value):
+        if value is None:
+            return []
+        seen: set[str] = set()
+        cleaned: list = []
+        for raw_id in value:
+            key = str(raw_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(raw_id)
+        if not cleaned:
+            return []
+        existing = set(
+            Pharmacy.objects.filter(id__in=cleaned, is_active=True).values_list("id", flat=True)
+        )
+        missing = [str(pk) for pk in cleaned if pk not in existing]
+        if missing:
+            raise serializers.ValidationError(f"Unknown or inactive pharmacy branch: {missing[0]}")
+        return cleaned
+
+    def _set_allowed_pharmacies(self, instance, pharmacy_ids):
+        if pharmacy_ids is None:
+            return
+        instance.allowed_pharmacies.set(pharmacy_ids)
+
+    def create(self, validated_data):
+        pharmacy_ids = validated_data.pop("allowed_pharmacies", None)
+        instance = super().create(validated_data)
+        if pharmacy_ids is not None:
+            self._set_allowed_pharmacies(instance, pharmacy_ids)
+        return instance
+
+    def update(self, instance, validated_data):
+        pharmacy_ids = validated_data.pop("allowed_pharmacies", None)
+        instance = super().update(instance, validated_data)
+        if pharmacy_ids is not None:
+            self._set_allowed_pharmacies(instance, pharmacy_ids)
+        return instance
 
 
 class ShiftSerializer(serializers.ModelSerializer):
@@ -78,6 +163,7 @@ class StaffProfileSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source="user.email", read_only=True)
     department_name = serializers.CharField(source="department.name", read_only=True)
     designation_name = serializers.CharField(source="designation.name", read_only=True)
+    allowed_pharmacy_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = StaffProfile
@@ -97,15 +183,25 @@ class StaffProfileSerializer(serializers.ModelSerializer):
             "address",
             "joining_date",
             "employment_status",
+            "allowed_pharmacy_ids",
             "is_deleted",
             "created_at",
             "updated_at",
         ]
 
+    def get_allowed_pharmacy_ids(self, obj) -> list[str]:
+        return [str(pk) for pk in obj.allowed_pharmacies.filter(is_active=True).values_list("id", flat=True)]
+
 
 class StaffProfileCreateUpdateSerializer(serializers.ModelSerializer):
     # Optional email used when auto-creating a user for this staff profile.
     email = serializers.EmailField(write_only=True, required=False)
+    allowed_pharmacies = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        write_only=True,
+        help_text="Pharmacy branch UUIDs this staff may access. Empty = all branches.",
+    )
 
     class Meta:
         model = StaffProfile
@@ -121,7 +217,50 @@ class StaffProfileCreateUpdateSerializer(serializers.ModelSerializer):
             "joining_date",
             "employment_status",
             "email",
+            "allowed_pharmacies",
         ]
+
+    def validate_allowed_pharmacies(self, value):
+        if value is None:
+            return []
+        seen: set[str] = set()
+        cleaned: list = []
+        for raw_id in value:
+            key = str(raw_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(raw_id)
+        if not cleaned:
+            return []
+        existing = set(
+            Pharmacy.objects.filter(id__in=cleaned, is_active=True).values_list("id", flat=True)
+        )
+        missing = [str(pk) for pk in cleaned if pk not in existing]
+        if missing:
+            raise serializers.ValidationError(f"Unknown or inactive pharmacy branch: {missing[0]}")
+        return cleaned
+
+    def _set_allowed_pharmacies(self, instance, pharmacy_ids):
+        if pharmacy_ids is None:
+            return
+        instance.allowed_pharmacies.set(pharmacy_ids)
+
+    def create(self, validated_data):
+        pharmacy_ids = validated_data.pop("allowed_pharmacies", None)
+        validated_data.pop("email", None)
+        instance = super().create(validated_data)
+        if pharmacy_ids is not None:
+            self._set_allowed_pharmacies(instance, pharmacy_ids)
+        return instance
+
+    def update(self, instance, validated_data):
+        pharmacy_ids = validated_data.pop("allowed_pharmacies", None)
+        validated_data.pop("email", None)
+        instance = super().update(instance, validated_data)
+        if pharmacy_ids is not None:
+            self._set_allowed_pharmacies(instance, pharmacy_ids)
+        return instance
 
 
 class EmergencyContactSerializer(serializers.ModelSerializer):

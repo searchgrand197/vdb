@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useEffect, useState, useRef } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Login from './pages/Login'
+import ChangePassword from './pages/ChangePassword'
 import api from './api'
 import { useAuthStore } from './stores/authStore'
 import { resolvePortalFromPath } from './themes'
@@ -11,6 +12,7 @@ import {
   HOSPITAL_BRANDING_CHANGED,
   syncHospitalBrandingFromApiRow,
 } from './utils/hospitalBranding'
+import { syncTimeDisplayModeFromRow } from './utils/dateTimeFormat'
 import { AppRoutes as AdminRoutes } from './adminPortal/routes/AppRoutes'
 import { ToastProvider } from './adminPortal/context/ToastContext'
 
@@ -40,6 +42,28 @@ function pharmacyPortalReady(role, pharmacyBranchId) {
 function PrivateRoute({ children }) {
   const isAuthenticated = useAuthStore((s) => Boolean(s.tokens.access))
   return isAuthenticated ? children : <Navigate to="/login" replace />
+}
+
+function PortalAccessRoute({ portalCode, children }) {
+  const isAuthenticated = useAuthStore((s) => Boolean(s.tokens.access))
+  const user = useAuthStore((s) => s.user)
+  const selectedRole = useAuthStore((s) => s.role)
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />
+  }
+
+  if (user?.is_superuser) {
+    return children
+  }
+
+  const allowedPortals = Array.isArray(user?.allowed_portals) ? user.allowed_portals : []
+  const portalToCheck = portalCode || selectedRole
+  if (portalToCheck && !allowedPortals.includes(portalToCheck)) {
+    return <Navigate to="/login" replace />
+  }
+
+  return children
 }
 
 function PharmacyRequiresBranch({ children }) {
@@ -111,7 +135,10 @@ function AppHeadManager() {
       try {
         const { data } = await api.get('/settings/reception-portal/')
         const row = data?.data ?? data
-        if (!cancelled && row && typeof row === 'object') syncHospitalBrandingFromApiRow(row)
+        if (!cancelled && row && typeof row === 'object') {
+          syncHospitalBrandingFromApiRow(row)
+          syncTimeDisplayModeFromRow(row)
+        }
       } catch {
         /* e.g. admin without hospital — keep cached / fallback branding */
       }
@@ -286,26 +313,27 @@ export default function App() {
         <PushNotificationBootstrap />
         <Routes>
           <Route path="/login" element={<LoginRoute />} />
-          <Route path="/staff" element={<PrivateRoute><StaffPortal /></PrivateRoute>} />
-          <Route path="/doctor" element={<PrivateRoute><DoctorPortal /></PrivateRoute>} />
-          <Route path="/receptionist" element={<PrivateRoute><ReceptionistPortal /></PrivateRoute>} />
-          <Route path="/lab" element={<PrivateRoute><LabPortal /></PrivateRoute>} />
+          <Route path="/change-password" element={<ChangePassword />} />
+          <Route path="/staff" element={<PortalAccessRoute portalCode="staff"><StaffPortal /></PortalAccessRoute>} />
+          <Route path="/doctor" element={<PortalAccessRoute portalCode="doctor"><DoctorPortal /></PortalAccessRoute>} />
+          <Route path="/receptionist" element={<PortalAccessRoute portalCode="receptionist"><ReceptionistPortal /></PortalAccessRoute>} />
+          <Route path="/lab" element={<PortalAccessRoute portalCode="lab"><LabPortal /></PortalAccessRoute>} />
           <Route
             path="/pharmacy"
             element={
-              <PrivateRoute>
+              <PortalAccessRoute portalCode="pharmacy">
                 <PharmacyRequiresBranch>
                   <PharmacyPortal />
                 </PharmacyRequiresBranch>
-              </PrivateRoute>
+              </PortalAccessRoute>
             }
           />
           <Route
             path="/admin/*"
             element={
-              <PrivateRoute>
+              <PortalAccessRoute portalCode="admin">
                 <AdminRoutes />
-              </PrivateRoute>
+              </PortalAccessRoute>
             }
           />
           <Route path="/tv/:roomCode" element={<TVDisplay />} />

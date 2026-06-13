@@ -5,7 +5,15 @@ from .models import (
     IPDAdmissionSequence,
     IPDAdmissionStatusHistory,
     IPDTransferHistory,
+    Scheme,
 )
+
+
+@admin.register(Scheme)
+class SchemeAdmin(admin.ModelAdmin):
+    list_display = ("name", "hospital", "is_active", "created_at")
+    list_filter = ("hospital", "is_active")
+    search_fields = ("name",)
 
 
 @admin.register(IPDAdmissionSequence)

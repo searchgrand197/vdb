@@ -4,7 +4,7 @@ from django.db import models
 from apps.shared.models import Hospital, SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel
 
 
-class Department(TimeStampedModel, UUIDPrimaryKeyModel):
+class Department(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="departments")
     code = models.CharField(max_length=50)
     name = models.CharField(max_length=200)
@@ -12,25 +12,41 @@ class Department(TimeStampedModel, UUIDPrimaryKeyModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        unique_together = [("hospital", "code")]
         indexes = [models.Index(fields=["hospital", "name"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["hospital", "code"],
+                condition=models.Q(is_deleted=False),
+                name="department_hospital_active_code_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name
 
 
-class Designation(TimeStampedModel, UUIDPrimaryKeyModel):
+class Designation(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
     hospital = models.ForeignKey(Hospital, on_delete=models.PROTECT, related_name="designations")
     code = models.CharField(max_length=50)
     name = models.CharField(max_length=200)
     is_active = models.BooleanField(default=True)
+    allowed_portals = models.JSONField(default=list, blank=True)
+    # When pharmacy portal is enabled: empty = all branches; non-empty = only listed branches.
+    allowed_pharmacies = models.ManyToManyField(
+        "pharmacy.Pharmacy",
+        blank=True,
+        related_name="designations_with_access",
+    )
 
     class Meta:
-        unique_together = [("hospital", "code")]
         indexes = [models.Index(fields=["hospital", "name"])]
-
-    def __str__(self) -> str:
-        return self.name
+        constraints = [
+            models.UniqueConstraint(
+                fields=["hospital", "code"],
+                condition=models.Q(is_deleted=False),
+                name="designation_hospital_active_code_uniq",
+            ),
+        ]
 
 
 class Shift(TimeStampedModel, UUIDPrimaryKeyModel):
@@ -78,6 +94,13 @@ class StaffProfile(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     employment_status = models.CharField(
         max_length=20, choices=EmploymentStatus.choices, default=EmploymentStatus.ACTIVE, db_index=True
+    )
+
+    # Empty = unrestricted (all active pharmacy branches). Non-empty = only listed branches.
+    allowed_pharmacies = models.ManyToManyField(
+        "pharmacy.Pharmacy",
+        blank=True,
+        related_name="allowed_staff",
     )
 
     class Meta:

@@ -150,30 +150,70 @@ class PharmacyPurchaseChallanLine(TimeStampedModel, UUIDPrimaryKeyModel):
 class PharmacyOutletSettings(TimeStampedModel, UUIDPrimaryKeyModel):
     """Editable pharmacy letterhead / GST details for invoices (one row per pharmacy)."""
 
+    class SaleBillQtyDisplay(models.TextChoices):
+        BASE_UNITS = "base_units", "Base units"
+        PACK_AND_LOOSE = "pack_and_loose", "Packs + loose"
+
     pharmacy = models.OneToOneField(Pharmacy, on_delete=models.CASCADE, related_name="pharmacy_outlet_settings")
     business_name = models.CharField(max_length=200, blank=True, default="")
-    address = models.TextField(blank=True, default="")
-    mobile = models.CharField(max_length=40, blank=True, default="")
-    gst_number = models.CharField(max_length=40, blank=True, default="")
-    dl_number = models.CharField(max_length=40, blank=True, default="")
-    email = models.CharField(max_length=120, blank=True, default="")
-    website = models.CharField(max_length=200, blank=True, default="")
-    invoice_prefix = models.CharField(max_length=20, blank=True, default="INV")
-    invoice_next_number = models.PositiveIntegerField(default=1)
-    default_gst_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
-    default_sale_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
     b2b_enabled = models.BooleanField(default=False, help_text="When enabled, sales are made to business parties instead of patients.")
-    low_stock_threshold = models.PositiveIntegerField(default=10, help_text="Medicines with total stock below this value are flagged as low stock.")
-    bank_name = models.CharField(max_length=120, blank=True, default="")
-    bank_branch = models.CharField(max_length=120, blank=True, default="")
-    bank_account_no = models.CharField(max_length=40, blank=True, default="")
-    bank_ifsc = models.CharField(max_length=20, blank=True, default="")
-    invoice_terms = models.TextField(
-        blank=True,
-        default="",
-        help_text="Terms & conditions printed on pharmacy invoices (one line per row in the editor).",
+
+    # --- B2C channel profile ---
+    b2c_address = models.TextField(blank=True, default="")
+    b2c_mobile = models.CharField(max_length=40, blank=True, default="")
+    b2c_gst_number = models.CharField(max_length=40, blank=True, default="")
+    b2c_dl_number = models.CharField(max_length=40, blank=True, default="")
+    b2c_email = models.CharField(max_length=120, blank=True, default="")
+    b2c_website = models.CharField(max_length=200, blank=True, default="")
+    b2c_invoice_prefix = models.CharField(max_length=20, blank=True, default="INV")
+    b2c_invoice_next_number = models.PositiveIntegerField(default=1)
+    b2c_default_gst_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
+    b2c_default_sale_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    b2c_default_sale_gst_enabled = models.BooleanField(
+        default=False,
+        help_text="Default GST on/off when opening B2C sales.",
     )
-    signature = models.ImageField(upload_to="pharmacy/signatures/", blank=True, null=True)
+    b2c_sale_bill_qty_display = models.CharField(
+        max_length=20,
+        choices=SaleBillQtyDisplay.choices,
+        default=SaleBillQtyDisplay.BASE_UNITS,
+    )
+    b2c_low_stock_threshold = models.PositiveIntegerField(
+        default=10,
+        help_text="B2C inventory low-stock alert threshold (base units).",
+    )
+    b2c_bank_name = models.CharField(max_length=120, blank=True, default="")
+    b2c_bank_branch = models.CharField(max_length=120, blank=True, default="")
+    b2c_bank_account_no = models.CharField(max_length=40, blank=True, default="")
+    b2c_bank_ifsc = models.CharField(max_length=20, blank=True, default="")
+    b2c_invoice_terms = models.TextField(blank=True, default="")
+    b2c_signature = models.ImageField(upload_to="pharmacy/signatures/b2c/", blank=True, null=True)
+
+    # --- B2B channel profile ---
+    b2b_address = models.TextField(blank=True, default="")
+    b2b_mobile = models.CharField(max_length=40, blank=True, default="")
+    b2b_gst_number = models.CharField(max_length=40, blank=True, default="")
+    b2b_dl_number = models.CharField(max_length=40, blank=True, default="")
+    b2b_email = models.CharField(max_length=120, blank=True, default="")
+    b2b_website = models.CharField(max_length=200, blank=True, default="")
+    b2b_invoice_prefix = models.CharField(max_length=20, blank=True, default="INV")
+    b2b_invoice_next_number = models.PositiveIntegerField(default=1)
+    b2b_default_gst_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
+    b2b_default_sale_gst_enabled = models.BooleanField(
+        default=False,
+        help_text="Default GST on/off when opening B2B sales.",
+    )
+    b2b_sale_bill_qty_display = models.CharField(
+        max_length=20,
+        choices=SaleBillQtyDisplay.choices,
+        default=SaleBillQtyDisplay.BASE_UNITS,
+    )
+    b2b_bank_name = models.CharField(max_length=120, blank=True, default="")
+    b2b_bank_branch = models.CharField(max_length=120, blank=True, default="")
+    b2b_bank_account_no = models.CharField(max_length=40, blank=True, default="")
+    b2b_bank_ifsc = models.CharField(max_length=20, blank=True, default="")
+    b2b_invoice_terms = models.TextField(blank=True, default="")
+    b2b_signature = models.ImageField(upload_to="pharmacy/signatures/b2b/", blank=True, null=True)
 
     def __str__(self) -> str:
         return f"Pharmacy settings ({self.pharmacy_id})"
@@ -209,7 +249,19 @@ class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
         related_name="pharmacy_invoices",
     )
     referred_by = models.ForeignKey(DoctorProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="pharmacy_referrals")
-    
+    billing_doctor_name = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Walk-in / out-of-hospital doctor name snapshot for invoice print.",
+    )
+    billing_hospital_name = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Walk-in / out-of-hospital hospital name snapshot for invoice print.",
+    )
+
     invoice_no = models.CharField(max_length=50, unique=True)
     date = models.DateField(default=timezone.localdate)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
@@ -225,6 +277,16 @@ class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     
     remarks = models.TextField(blank=True, default="")
+    print_html = models.TextField(
+        blank=True,
+        default="",
+        help_text="Snapshot of the invoice HTML after pre-print edits (if any).",
+    )
+    print_html_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the print snapshot was last saved.",
+    )
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_pharmacy_invoices")
 
     def __str__(self):
@@ -245,6 +307,12 @@ class PharmacyInvoiceItem(TimeStampedModel, UUIDPrimaryKeyModel):
     snapshot_expiry_date = models.DateField(null=True, blank=True)
     
     qty = models.DecimalField(max_digits=12, decimal_places=2)
+    free_qty = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0"),
+        help_text="Complimentary base units (not taxed); stock deducts qty + free_qty.",
+    )
     mrp = models.DecimalField(max_digits=12, decimal_places=2)
     rate = models.DecimalField(max_digits=12, decimal_places=2) # Sale rate
     
