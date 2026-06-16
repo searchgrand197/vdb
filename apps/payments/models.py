@@ -47,6 +47,7 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SUCCESS, db_index=True)
     paid_at = models.DateTimeField(default=timezone.now, db_index=True)
+    voided = models.BooleanField(default=False, db_index=True)
 
     collected_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -82,10 +83,25 @@ class PaymentTransaction(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel)
                 hospital_id=self.hospital_id,
                 year=year,
             )
-            seq_obj.last_seq += 1
-            seq_obj.save(update_fields=["last_seq", "updated_at"])
             hospital = getattr(self, "hospital", None) or Hospital.objects.only("id", "slug", "name").get(id=self.hospital_id)
-            return self._build_slip_number(hospital, year, seq_obj.last_seq)
+            for _ in range(50):
+                seq_obj.last_seq += 1
+                seq_obj.save(update_fields=["last_seq", "updated_at"])
+                candidate = self._build_slip_number(hospital, year, seq_obj.last_seq)
+                holder = (
+                    PaymentTransaction.objects.select_for_update()
+                    .filter(slip_number=candidate)
+                    .first()
+                )
+                if holder is None:
+                    return candidate
+                if holder.voided:
+                    tombstone = f"VOID-{holder.id}"[:80]
+                    if holder.slip_number != tombstone:
+                        holder.slip_number = tombstone
+                        holder.save(update_fields=["slip_number", "updated_at"])
+                    return candidate
+            raise ValueError("Unable to allocate a unique payment slip number.")
 
     def save(self, *args, **kwargs):
         if not self.slip_number:

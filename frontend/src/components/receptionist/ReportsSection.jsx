@@ -12,6 +12,11 @@ import {
   buildModeChartData,
   modeTotalsFromItems,
 } from './reportsChartUtils'
+import {
+  aggregatePaymentSlipsByCategory,
+  aggregatePaymentSlipsByItem,
+  buildQuickServiceCatalog,
+} from './reportSlipCategoryUtils'
 
 function extractApiRows(data) {
   if (Array.isArray(data?.results)) return data.results
@@ -55,6 +60,62 @@ function escapeHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+function renderPaymentSlipsByCategoryHtml(categories) {
+  if (!categories?.length) return ''
+  const categoryTotalItems = categories.reduce((sum, cat) => sum + (Number(cat.line_count) || 0), 0)
+  const categoryTotalAmount = categories.reduce((sum, cat) => sum + (Number(cat.total) || 0), 0)
+  return `
+    <h2 class="sec">Payment slips by category</h2>
+    <table class="tbl">
+      <thead>
+        <tr><th>Category</th><th class="c">Items</th><th class="r">Total</th></tr>
+      </thead>
+      <tbody>
+        ${categories.map((cat) => `
+          <tr>
+            <td>${escapeHtml(cat.category || 'Uncategorized')}</td>
+            <td class="c">${cat.line_count ?? 0}</td>
+            <td class="r">₹${fmtMoney(cat.total)}</td>
+          </tr>`).join('')}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>Total</strong></td>
+          <td class="c"><strong>${categoryTotalItems}</strong></td>
+          <td class="r"><strong>₹${fmtMoney(categoryTotalAmount)}</strong></td>
+        </tr>
+      </tfoot>
+    </table>`
+}
+
+function renderPaymentSlipsByItemsHtml(rows) {
+  if (!rows?.length) return ''
+  const totalQty = rows.reduce((sum, row) => sum + (Number(row.total_qty) || 0), 0)
+  const totalAmount = rows.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
+  return `
+    <h2 class="sec">Payment slips by item</h2>
+    <table class="tbl">
+      <thead>
+        <tr><th>Item</th><th class="c">Qty</th><th class="r">Total</th></tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `
+          <tr>
+            <td>${escapeHtml(row.item || '—')}</td>
+            <td class="c">${row.total_qty ?? 0}</td>
+            <td class="r">₹${fmtMoney(row.total)}</td>
+          </tr>`).join('')}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>Total</strong></td>
+          <td class="c"><strong>${totalQty}</strong></td>
+          <td class="r"><strong>₹${fmtMoney(totalAmount)}</strong></td>
+        </tr>
+      </tfoot>
+    </table>`
 }
 
 /** Print-only tweak: keep original table layout; prevent right border clipping at page edge. */
@@ -167,7 +228,9 @@ export default function ReportsSection() {
   const [toDate, setToDate] = useState(todayStr)
   const [doctorUser, setDoctorUser] = useState('')
   const [department, setDepartment] = useState('')
-  const [reportType, setReportType] = useState('all')
+  const [reportTypes, setReportTypes] = useState(['all'])
+  const [typeDropdownOpen, setTypeDropdownOpen] = useState(false)
+  const typeDropdownRef = React.useRef(null)
   const [collectedBy, setCollectedBy] = useState('')
   const [dataTab, setDataTab] = useState('collection')
   const [dataView, setDataView] = useState('table')
@@ -180,7 +243,9 @@ export default function ReportsSection() {
   const [staff, setStaff] = useState([])
   const [collectionSummary, setCollectionSummary] = useState(null)
   const [slipCategories, setSlipCategories] = useState([])
+  const [quickServices, setQuickServices] = useState([])
   const [slipCategory, setSlipCategory] = useState('')
+  const [slipPrintView, setSlipPrintView] = useState('category')
   const [printingDoctorRevenue, setPrintingDoctorRevenue] = useState(false)
   const [printPreview, setPrintPreview] = useState(null)
 
@@ -198,11 +263,19 @@ export default function ReportsSection() {
       setStaff(staffRows.filter((s) => s.user))
       const quickPayload = quickRes.data?.data || quickRes.data || {}
       const cats = Array.isArray(quickPayload.categories) ? quickPayload.categories : []
+      const services = Array.isArray(quickPayload.services) ? quickPayload.services : []
       setSlipCategories(cats.filter(Boolean))
+      setQuickServices(services)
     } catch {
       toast.error('Failed to load filter options')
     }
   }, [])
+
+  // Resolve effective type set: if 'all' is included (or nothing), treat as all
+  const effectiveTypes = useMemo(() => {
+    if (!reportTypes.length || reportTypes.includes('all')) return ['all']
+    return reportTypes
+  }, [reportTypes])
 
   const fetchReport = useCallback(async () => {
     if (!fromDate || !toDate) {
@@ -215,6 +288,12 @@ export default function ReportsSection() {
     }
     setLoading(true)
     try {
+      const isAll = effectiveTypes.includes('all')
+      const wantsOpd = isAll || effectiveTypes.includes('opd')
+      const wantsSlips = isAll || effectiveTypes.includes('payment_slips')
+      const wantsIpd = isAll || effectiveTypes.includes('ipd_advance')
+      const wantsRefunds = isAll || effectiveTypes.includes('refunds')
+
       const opdParams = new URLSearchParams({
         limit: '2000',
         ordering: '-visit_date',
@@ -233,12 +312,6 @@ export default function ReportsSection() {
       })
       if (collectedBy) payParams.set('collected_by', collectedBy)
       if (doctorUser) payParams.set('attributed_doctor_user', doctorUser)
-      if (reportType === 'opd') payParams.set('invoice__encounter_type', 'opd')
-      else if (reportType === 'ipd_advance') payParams.set('advance_only', 'true')
-      else if (reportType === 'refunds') payParams.set('refund_only', 'true')
-      else if (reportType === 'payment_slips') {
-        /* all successful slips in range */
-      }
 
       const summaryParams = new URLSearchParams({ date_from: fromDate, date_to: toDate })
       if (doctorUser) summaryParams.set('attributed_doctor_user', doctorUser)
@@ -251,20 +324,30 @@ export default function ReportsSection() {
       let opdRows = extractApiRows(opdRes.data).filter((v) => v.status !== 'cancelled')
       let payRows = extractApiRows(payRes.data)
 
-      if (reportType === 'opd') {
-        payRows = payRows.filter((p) => {
-          const enc = paymentEncounterLabel(p)
-          return enc === 'OPD' || String(p?.invoice_details?.encounter_type || '').toLowerCase() === 'opd'
-        })
-      } else if (reportType === 'ipd_advance') {
-        payRows = payRows.filter((p) => String(p?.invoice_no || '').startsWith('IPDADV-')
-          || String(p?.invoice_details?.invoice_no || '').startsWith('IPDADV-'))
-        opdRows = []
-      } else if (reportType === 'refunds') {
-        payRows = payRows.filter(isRefundPayment)
-        opdRows = []
-      } else if (reportType === 'payment_slips') {
-        opdRows = []
+      // Apply multi-type filter
+      if (!isAll) {
+        // OPD VISITS (from opd-visits API): only include when 'opd' is selected
+        if (!wantsOpd) {
+          opdRows = []
+        }
+
+        // PAYMENT ROWS: classify only by isIpdAdvance / isRefund
+        // Everything else is a regular payment slip (including OPD-encounter-type payments)
+        const filteredPay = []
+        for (const p of payRows) {
+          const isAdvance = isIpdAdvancePayment(p)
+          const isRefund = isRefundPayment(p)
+
+          if (isAdvance) {
+            if (wantsIpd) filteredPay.push(p)
+          } else if (isRefund) {
+            if (wantsRefunds) filteredPay.push(p)
+          } else {
+            // Regular payment slip — include if payment_slips is selected
+            if (wantsSlips) filteredPay.push(p)
+          }
+        }
+        payRows = filteredPay
       }
 
       setOpdVisits(opdRows)
@@ -276,7 +359,7 @@ export default function ReportsSection() {
     } finally {
       setLoading(false)
     }
-  }, [fromDate, toDate, doctorUser, department, reportType, collectedBy])
+  }, [fromDate, toDate, doctorUser, department, effectiveTypes, collectedBy])
 
   useEffect(() => {
     loadMeta()
@@ -290,6 +373,37 @@ export default function ReportsSection() {
     const t = setInterval(() => fetchReport(), 5 * 60 * 1000)
     return () => clearInterval(t)
   }, [fetchReport])
+
+  useEffect(() => {
+    if (!typeDropdownOpen) return
+    function handleClickOutside(e) {
+      if (typeDropdownRef.current && !typeDropdownRef.current.contains(e.target)) {
+        setTypeDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [typeDropdownOpen])
+
+  // Which tabs are visible based on the selected type filter
+  const visibleTabs = useMemo(() => {
+    const isAll = effectiveTypes.includes('all')
+    return [
+      { id: 'collection', label: 'By doctor' },
+      { id: 'opd', label: 'OPD', type: 'opd' },
+      { id: 'slips', label: 'Slips', type: 'payment_slips' },
+      { id: 'refunds', label: 'Refunds', type: 'refunds' },
+      { id: 'ipd', label: 'IPD adv.', type: 'ipd_advance' },
+    ].filter((t) => isAll || !t.type || effectiveTypes.includes(t.type))
+  }, [effectiveTypes])
+
+  // Auto-switch dataTab when the active tab is filtered out
+  useEffect(() => {
+    const ids = visibleTabs.map((t) => t.id)
+    if (!ids.includes(dataTab)) {
+      setDataTab(ids[0] || 'collection')
+    }
+  }, [visibleTabs, dataTab])
 
   const refundPayments = useMemo(
     () => payments.filter(isRefundPayment),
@@ -494,13 +608,10 @@ export default function ReportsSection() {
     const printedAt = formatWithPattern(new Date(), 'd MMMM yyyy · HH:mm')
     const periodLabel = `${format(new Date(`${fromDate}T12:00:00`), 'd MMM yyyy')} – ${format(new Date(`${toDate}T12:00:00`), 'd MMM yyyy')}`
 
-    const reportTypeLabels = {
-      all: 'All collections',
-      opd: 'OPD only',
-      ipd_advance: 'IPD advances only',
-      payment_slips: 'Payment slips only',
-      refunds: 'Refunds only',
-    }
+    const typeLabels = { all: 'All collections', opd: 'OPD slips', ipd_advance: 'IPD advances', payment_slips: 'Payment slips', refunds: 'Refunds' }
+    const scopeLabel = effectiveTypes.includes('all')
+      ? 'All collections'
+      : effectiveTypes.map((t) => typeLabels[t] || t).join(' + ')
     const doctorLabelText = doctorUser
       ? doctorLabel(doctors.find((d) => doctorUserId(d) === doctorUser) || {})
       : 'All doctors'
@@ -508,6 +619,16 @@ export default function ReportsSection() {
     const collectorText = collectedBy
       ? (staff.find((s) => String(s.user) === collectedBy)?.name || 'Selected staff')
       : 'All staff'
+    const categoryLabelText = slipCategory || 'All categories'
+    const slipDetailViewLabel = slipPrintView === 'items' ? 'By slip items' : 'By category'
+    const slipCatalog = buildQuickServiceCatalog(quickServices)
+    const slipsDetailHtml = slipPrintView === 'items'
+      ? renderPaymentSlipsByItemsHtml(
+          aggregatePaymentSlipsByItem(paymentSlipsOnly, slipCatalog, { categoryFilter: slipCategory }),
+        )
+      : renderPaymentSlipsByCategoryHtml(
+          aggregatePaymentSlipsByCategory(paymentSlipsOnly, slipCatalog, { categoryFilter: slipCategory }),
+        )
 
     const opdRowsHtml = opdVisits.length
       ? opdVisits.map((v, i) => `
@@ -567,7 +688,14 @@ export default function ReportsSection() {
         </tr>`).join('')
       : '<tr><td colspan="9" class="empty">No refunds in this period</td></tr>'
 
-    const tablesBodyHtml = `
+    const isAllPrint = effectiveTypes.includes('all')
+    const printWantsOpd = isAllPrint || effectiveTypes.includes('opd')
+    const printWantsSlips = isAllPrint || effectiveTypes.includes('payment_slips')
+    const printWantsRefunds = isAllPrint || effectiveTypes.includes('refunds')
+    const printWantsIpd = isAllPrint || effectiveTypes.includes('ipd_advance')
+
+    const tablesBodyHtml = [
+      printWantsOpd ? `
       <h2 class="sec">OPD Visits (${opdVisits.length})</h2>
       <table class="tbl opd-tbl">
         <thead>
@@ -578,8 +706,9 @@ export default function ReportsSection() {
         </thead>
         <tbody>${opdRowsHtml}</tbody>
         <tfoot><tr><td colspan="8" class="r">Total</td><td class="r">₹${fmtMoney(summary.opdRevenue)}</td></tr></tfoot>
-      </table>
+      </table>` : '',
 
+      printWantsSlips ? `
       <h2 class="sec">Payment Slips (${paymentSlipsOnly.length})</h2>
       <table class="tbl">
         <thead>
@@ -591,7 +720,9 @@ export default function ReportsSection() {
         <tbody>${allPayRowsHtml}</tbody>
         <tfoot><tr><td colspan="8" class="r">Total</td><td class="r">₹${fmtMoney(summary.slipTotalExAdv)}</td></tr></tfoot>
       </table>
+      ${slipsDetailHtml}` : '',
 
+      printWantsRefunds ? `
       <h2 class="sec">Refunds (${refundPayments.length})</h2>
       <table class="tbl">
         <thead>
@@ -602,8 +733,9 @@ export default function ReportsSection() {
         </thead>
         <tbody>${refundRowsHtml}</tbody>
         <tfoot><tr><td colspan="8" class="r">Total refunded</td><td class="r">₹${fmtMoney(summary.refundTotal)}</td></tr></tfoot>
-      </table>
+      </table>` : '',
 
+      printWantsIpd ? `
       <h2 class="sec">IPD Advance Receipts (${ipdAdvancePayments.length})</h2>
       <table class="tbl">
         <thead>
@@ -614,8 +746,9 @@ export default function ReportsSection() {
         </thead>
         <tbody>${ipdAdvRowsHtml}</tbody>
         <tfoot><tr><td colspan="6" class="r">Total</td><td class="r">₹${fmtMoney(summary.advanceTotal)}</td></tr></tfoot>
-      </table>
-    `
+      </table>` : '',
+    ].join('')
+
 
     const html = `<!DOCTYPE html><html><head>
       <meta charset="utf-8"/>
@@ -667,8 +800,9 @@ export default function ReportsSection() {
 
       <table class="info">
         <tr><td class="lbl">Period</td><td>${escapeHtml(periodLabel)}</td><td class="lbl">Printed</td><td>${escapeHtml(printedAt)}</td></tr>
-        <tr><td class="lbl">Scope</td><td>${escapeHtml(reportTypeLabels[reportType] || reportType)}</td><td class="lbl">Department</td><td>${escapeHtml(deptLabelText)}</td></tr>
+        <tr><td class="lbl">Scope</td><td>${escapeHtml(scopeLabel)}</td><td class="lbl">Department</td><td>${escapeHtml(deptLabelText)}</td></tr>
         <tr><td class="lbl">Doctor</td><td>${escapeHtml(doctorLabelText)}</td><td class="lbl">Collected by</td><td>${escapeHtml(collectorText)}</td></tr>
+        <tr><td class="lbl">Slip detail view</td><td>${escapeHtml(slipDetailViewLabel)}</td><td class="lbl">Slip category</td><td>${escapeHtml(categoryLabelText)}</td></tr>
         <tr><td class="lbl">OPD visits</td><td>${summary.opdCount} (₹${fmtMoney(summary.opdRevenue)})</td><td class="lbl">Payment slips</td><td>${summary.slipCountExAdv} (₹${fmtMoney(summary.slipTotalExAdv)})</td></tr>
         <tr><td class="lbl">IPD advances</td><td>${summary.advanceCount} (₹${fmtMoney(summary.advanceTotal)})</td><td class="lbl">Refunds</td><td>${summary.refundCount} (₹${fmtMoney(summary.refundTotal)})</td></tr>
         <tr><td class="lbl">Grand total</td><td colspan="3">₹${fmtMoney(summary.grandCollection)}</td></tr>
@@ -739,32 +873,7 @@ export default function ReportsSection() {
     if (!section) return ''
     const s = section.summary || {}
     const categories = section.payment_slips_by_category || []
-    const categoryTotalItems = categories.reduce((sum, cat) => sum + (Number(cat.line_count) || 0), 0)
-    const categoryTotalAmount = categories.reduce((sum, cat) => sum + (Number(cat.total) || 0), 0)
-    const categoryTableHtml = categories.length
-      ? `
-        <h2 class="sec">Payment slips by category</h2>
-        <table class="tbl">
-          <thead>
-            <tr><th>Category</th><th class="c">Items</th><th class="r">Total</th></tr>
-          </thead>
-          <tbody>
-            ${categories.map((cat) => `
-              <tr>
-                <td>${escapeHtml(cat.category || 'Uncategorized')}</td>
-                <td class="c">${cat.line_count ?? 0}</td>
-                <td class="r">₹${fmtMoney(cat.total)}</td>
-              </tr>`).join('')}
-          </tbody>
-          <tfoot>
-            <tr>
-              <td><strong>Total</strong></td>
-              <td class="c"><strong>${categoryTotalItems}</strong></td>
-              <td class="r"><strong>₹${fmtMoney(categoryTotalAmount)}</strong></td>
-            </tr>
-          </tfoot>
-        </table>`
-      : ''
+    const categoryTableHtml = renderPaymentSlipsByCategoryHtml(categories)
 
     let dailyTableHtml = ''
     if (showDailyBreakdown) {
@@ -993,22 +1102,74 @@ export default function ReportsSection() {
             <option key={dep.id} value={dep.name || dep.code || ''}>{dep.name || dep.code}</option>
           ))}
         </select>
-        <select
-          value={reportType}
-          onChange={(e) => {
-            const next = e.target.value
-            setReportType(next)
-            if (next === 'refunds') setDataTab('refunds')
-          }}
-          title="Report type"
-          className={`${filterInputCls} max-w-[110px]`}
-        >
-          <option value="all">All types</option>
-          <option value="opd">OPD</option>
-          <option value="ipd_advance">IPD adv.</option>
-          <option value="payment_slips">Slips only</option>
-          <option value="refunds">Refunds</option>
-        </select>
+        {/* Multi-select report type dropdown */}
+        <div className="relative" ref={typeDropdownRef}>
+          <button
+            type="button"
+            onClick={() => setTypeDropdownOpen((o) => !o)}
+            className={`${filterInputCls} max-w-[160px] flex items-center gap-1 cursor-pointer select-none`}
+            style={{ minWidth: 110 }}
+          >
+            <span className="flex-1 truncate text-left">
+              {effectiveTypes.includes('all')
+                ? 'All types'
+                : effectiveTypes.map((t) => ({
+                    opd: 'OPD',
+                    payment_slips: 'Slips',
+                    ipd_advance: 'IPD adv.',
+                    refunds: 'Refunds',
+                  }[t] || t)).join(', ')}
+            </span>
+            <svg className="w-3 h-3 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+          </button>
+          {typeDropdownOpen && (
+            <div
+              className="absolute z-50 left-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 min-w-[160px]"
+              onMouseLeave={() => setTypeDropdownOpen(false)}
+            >
+              {[
+                { id: 'all', label: 'All types' },
+                { id: 'opd', label: 'OPD slips' },
+                { id: 'payment_slips', label: 'Payment slips' },
+                { id: 'ipd_advance', label: 'IPD advance' },
+                { id: 'refunds', label: 'Refunds' },
+              ].map((opt) => {
+                const isAll = opt.id === 'all'
+                const checked = isAll
+                  ? effectiveTypes.includes('all')
+                  : !effectiveTypes.includes('all') && effectiveTypes.includes(opt.id)
+                return (
+                  <label
+                    key={opt.id}
+                    className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-indigo-50 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      className="rounded"
+                      onChange={() => {
+                        if (isAll) {
+                          setReportTypes(['all'])
+                        } else {
+                          setReportTypes((prev) => {
+                            const withoutAll = prev.filter((x) => x !== 'all')
+                            const next = withoutAll.includes(opt.id)
+                              ? withoutAll.filter((x) => x !== opt.id)
+                              : [...withoutAll, opt.id]
+                            if (!next.length) return ['all']
+                            if (next.includes('refunds') && !prev.includes('refunds')) setDataTab('refunds')
+                            return next
+                          })
+                        }
+                      }}
+                    />
+                    {opt.label}
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </div>
         <select value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)} title="Collected by" className={`${filterInputCls} max-w-[120px]`}>
           <option value="">All staff</option>
           {staff.map((s) => (
@@ -1020,6 +1181,10 @@ export default function ReportsSection() {
           {slipCategories.map((cat) => (
             <option key={cat} value={cat}>{cat}</option>
           ))}
+        </select>
+        <select value={slipPrintView} onChange={(e) => setSlipPrintView(e.target.value)} title="Slip print view" className={`${filterInputCls} max-w-[130px]`}>
+          <option value="category">By category</option>
+          <option value="items">By slip items</option>
         </select>
       </div>
 
@@ -1055,22 +1220,24 @@ export default function ReportsSection() {
       <div className="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden flex flex-col min-h-[420px]">
         <div className="flex flex-wrap items-stretch border-b border-gray-100 shrink-0">
           <div className="flex flex-1 min-w-0">
-            {[
-              { id: 'collection', label: 'By doctor', count: (collectionSummary?.doctors?.length || 0) + 1 },
-              { id: 'opd', label: 'OPD', count: opdVisits.length },
-              { id: 'slips', label: 'Slips', count: paymentSlipsOnly.length },
-              { id: 'refunds', label: 'Refunds', count: refundPayments.length },
-              { id: 'ipd', label: 'IPD adv.', count: ipdAdvancePayments.length },
-            ].map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setDataTab(t.id)}
-                className={`flex-1 py-2 text-xs font-semibold min-w-[72px] ${dataTab === t.id ? 'text-indigo-700 border-b-2 border-indigo-600 bg-indigo-50/40' : 'text-gray-500 hover:text-gray-700'}`}
-              >
-                {t.label} ({t.count})
-              </button>
-            ))}
+          {visibleTabs.map((t) => {
+              const count = t.id === 'collection'
+                ? (collectionSummary?.doctors?.length || 0) + 1
+                : t.id === 'opd' ? opdVisits.length
+                : t.id === 'slips' ? paymentSlipsOnly.length
+                : t.id === 'refunds' ? refundPayments.length
+                : ipdAdvancePayments.length
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setDataTab(t.id)}
+                  className={`flex-1 py-2 text-xs font-semibold min-w-[72px] ${dataTab === t.id ? 'text-indigo-700 border-b-2 border-indigo-600 bg-indigo-50/40' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  {t.label} ({count})
+                </button>
+              )
+            })}
           </div>
           <div className="flex items-center border-l border-gray-100 px-1.5 gap-0.5 shrink-0">
             <button

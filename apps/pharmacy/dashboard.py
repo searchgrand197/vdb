@@ -18,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.inventory.models import MedicineBatch, StockLedger
+from apps.pharmacy.margin_utils import resolve_invoice_item_unit_cost
 from apps.pharmacy.models import PharmacyInvoice, PharmacyPurchaseChallan
 from apps.shared.response import success_response
 
@@ -207,11 +208,7 @@ def _today_sales_block(pharmacy_id, date_from=None, date_to=None):
         for it in inv.items.all():
             qty = it.qty or ZERO
             rate = it.rate or ZERO
-            unit_cost = None
-            if it.batch_id and it.batch:
-                raw_cost = it.batch.unit_cost
-                if raw_cost is not None and raw_cost > ZERO:
-                    unit_cost = raw_cost
+            unit_cost = resolve_invoice_item_unit_cost(it)
             # Only count margin when a valid cost price has been recorded
             item_margin = (rate - unit_cost) * qty if unit_cost is not None else ZERO
             inv_margin += item_margin

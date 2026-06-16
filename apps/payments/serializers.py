@@ -49,6 +49,7 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             "attribution_type",
             "attributed_doctor_user",
             "attributed_doctor_name",
+            "voided",
             "created_at",
             "updated_at",
         ]

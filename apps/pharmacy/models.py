@@ -288,6 +288,16 @@ class PharmacyInvoice(TimeStampedModel, UUIDPrimaryKeyModel):
         help_text="When the print snapshot was last saved.",
     )
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_pharmacy_invoices")
+    cancel_reason = models.TextField(blank=True, default="")
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="cancelled_pharmacy_invoices",
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    voided = models.BooleanField(default=False, db_index=True)
 
     def __str__(self):
         name = self.party_name_snapshot or (self.patient.first_name if self.patient_id else "—")
@@ -305,7 +315,13 @@ class PharmacyInvoiceItem(TimeStampedModel, UUIDPrimaryKeyModel):
     )
     snapshot_batch_no = models.CharField(max_length=80, blank=True, default="")
     snapshot_expiry_date = models.DateField(null=True, blank=True)
-    
+    snapshot_unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Purchase cost per unit at sale time; kept when batch is deleted.",
+    )
+
     qty = models.DecimalField(max_digits=12, decimal_places=2)
     free_qty = models.DecimalField(
         max_digits=12,
@@ -325,8 +341,11 @@ class PharmacyInvoiceItem(TimeStampedModel, UUIDPrimaryKeyModel):
     def save(self, *args, **kwargs):
         b = self.batch
         if b is not None:
+            from apps.pharmacy.margin_utils import batch_unit_cost_for_snapshot
+
             self.snapshot_batch_no = b.batch_no
             self.snapshot_expiry_date = b.expiry_date
+            self.snapshot_unit_cost = batch_unit_cost_for_snapshot(b)
         super().save(*args, **kwargs)
 
     def __str__(self):

@@ -6,11 +6,14 @@ from django.db.models import BooleanField, Case, F, Prefetch, Q, Value, When
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, permissions, serializers, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.inventory.services.stock_service import deduct_stock_fifo, get_batch_available_qty
+from apps.auditlogs.services import create_audit_log
+from apps.inventory.services.stock_service import deduct_stock_fifo, get_batch_available_qty, restore_stock_for_invoice_cancel
+from apps.shared.cancel_service import apply_void_if_last, is_last_pharmacy_invoice, release_pharmacy_invoice_number, void_pharmacy_sequence
 
 from apps.pharmacy.invoice_number import next_pharmacy_invoice_number
 from apps.pharmacy.models import Pharmacy, PharmacyInvoice, PharmacyInvoiceItem, PharmacyOutletSettings, PharmacySupplier
@@ -161,7 +164,7 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         pharmacy = _get_pharmacy_branch(self.request)
         if pharmacy is None:
             return PharmacyInvoice.objects.none()
-        qs = super().get_queryset().filter(pharmacy=pharmacy)
+        qs = super().get_queryset().filter(pharmacy=pharmacy, voided=False)
         patient_id = self.request.query_params.get("patient")
         ipd_admission = self.request.query_params.get("ipd_admission")
         status_filter = (self.request.query_params.get("status") or "").strip().lower()
@@ -180,6 +183,7 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                     output_field=BooleanField(),
                 )
             )
+        qs = qs.select_related("patient", "party", "created_by", "cancelled_by", "referred_by")
         qs = qs.prefetch_related(
             Prefetch(
                 "items",
@@ -187,6 +191,15 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
             )
         )
         return qs
+
+    def perform_update(self, serializer):
+        invoice: PharmacyInvoice = serializer.instance
+        if invoice.status == PharmacyInvoice.Status.CANCELLED:
+            raise ValidationError({"detail": "Cancelled pharmacy receipts are view-only."})
+        requested_status = serializer.validated_data.get("status")
+        if requested_status == PharmacyInvoice.Status.CANCELLED:
+            raise ValidationError({"detail": "Use the cancel action to cancel a pharmacy receipt."})
+        serializer.save()
 
     def perform_create(self, serializer):
         pharmacy = _get_pharmacy_branch(self.request)
@@ -230,6 +243,68 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
             paid_amount=paid_amount,
         )
 
+    @action(detail=True, methods=["post"], url_path="cancel")
+    @transaction.atomic
+    def cancel(self, request, pk=None):
+        invoice = self.get_object()
+
+        if invoice.status == PharmacyInvoice.Status.CANCELLED:
+            raise ValidationError({"detail": "This pharmacy receipt is already cancelled."})
+        if invoice.status != PharmacyInvoice.Status.FINALIZED:
+            raise ValidationError({"detail": "Only finalized receipts can be cancelled."})
+
+        reason = str(request.data.get("cancel_reason") or request.data.get("reason") or "").strip()
+        if not reason:
+            raise ValidationError({"cancel_reason": ["Cancellation reason is required."]})
+
+        try:
+            restore_stock_for_invoice_cancel(
+                request=request,
+                pharmacy=invoice.pharmacy,
+                items=list(invoice.items.all()),
+                reference_id=str(invoice.id),
+            )
+        except ValueError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+
+        old_status = invoice.status
+        apply_void_if_last(
+            obj=invoice,
+            is_last_fn=is_last_pharmacy_invoice,
+            void_seq_fn=void_pharmacy_sequence,
+            release_number_fn=release_pharmacy_invoice_number,
+        )
+        invoice.status = PharmacyInvoice.Status.CANCELLED
+        invoice.cancel_reason = reason
+        invoice.cancelled_by = request.user
+        invoice.cancelled_at = timezone.now()
+        update_fields = ["status", "cancel_reason", "cancelled_by", "cancelled_at", "voided", "updated_at"]
+        if str(invoice.invoice_no or "").startswith("VOID-"):
+            update_fields.append("invoice_no")
+        invoice.save(update_fields=update_fields)
+
+        hospital = invoice.pharmacy.hospital
+        create_audit_log(
+            request=request,
+            hospital=hospital,
+            module="pharmacy",
+            action="cancel_pharmacy_invoice",
+            obj=invoice,
+            before={"status": old_status},
+            after={
+                "status": PharmacyInvoice.Status.CANCELLED,
+                "cancel_reason": reason,
+                "cancelled_by": str(request.user.id),
+                "cancelled_at": invoice.cancelled_at.isoformat() if invoice.cancelled_at else None,
+            },
+        )
+
+        invoice.refresh_from_db()
+        return success_response(
+            PharmacyInvoiceSerializer(invoice, context=self.get_serializer_context()).data,
+            message="Pharmacy receipt cancelled.",
+        )
+
     @action(detail=True, methods=["patch"], url_path="update-full")
     @transaction.atomic
     def update_full(self, request, pk=None):
@@ -238,6 +313,8 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         Update patient basic details, invoice settlement fields, and replace all items.
         """
         invoice = self.get_object()
+        if invoice.status == PharmacyInvoice.Status.CANCELLED:
+            return Response({"detail": "Cancelled pharmacy receipts are view-only."}, status=status.HTTP_400_BAD_REQUEST)
         patient = invoice.patient
         if patient is None:
             return Response({"detail": "Invoice has no patient linked."}, status=status.HTTP_400_BAD_REQUEST)

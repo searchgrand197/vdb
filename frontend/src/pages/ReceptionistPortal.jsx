@@ -1159,6 +1159,22 @@ function OPDSection({ rooms }) {
     [opdSettings.opd_field_config, opdSettings.opd_visible_fields],
   )
   const isOpdFieldVisible = (key) => opdFieldConfig[key]?.createForm !== false
+  const fetchNextOpdNo = useCallback(async () => {
+    if (!isOpdFieldVisible('opd_no')) {
+      setNextOpdNoPreview('')
+      return
+    }
+    try {
+      const { data } = await api.get('/opd-visits/next-opd-no/')
+      const payload = data?.data || data
+      setNextOpdNoPreview(payload?.opd_no || '')
+    } catch {
+      setNextOpdNoPreview('')
+    }
+  }, [opdFieldConfig])
+  useEffect(() => {
+    fetchNextOpdNo()
+  }, [fetchNextOpdNo])
   const phoneInputRef = useRef(null)
   const [visits, setVisits] = useState([])
   const [doctors, setDoctors] = useState([])
@@ -1198,8 +1214,10 @@ function OPDSection({ rooms }) {
     amount: '',
     payment_mode: 'cash',
     chief_complaint: '',
+    visit_datetime: toDateTimeInputValue(new Date()),
   })
   const [form, setForm] = useState(() => buildEmptyForm())
+  const [nextOpdNoPreview, setNextOpdNoPreview] = useState('')
 
   useEffect(() => {
     // When entering Create OPD section, focus phone input.
@@ -1860,10 +1878,12 @@ function OPDSection({ rooms }) {
       }
 
       // Create OPD visit
-      const visitDate = format(new Date(), 'yyyy-MM-dd')
+      const visitDate = form.visit_datetime?.slice(0, 10) || format(new Date(), 'yyyy-MM-dd')
+      const visitDatetimeIso = dateTimeInputToIso(form.visit_datetime)
       const { data } = await api.post('/opd-visits/', {
         patient: patientId,
         visit_date: visitDate,
+        ...(visitDatetimeIso ? { visit_datetime: visitDatetimeIso } : {}),
         chief_complaint: form.chief_complaint,
         doctor_user: form.doctor || null,
         department: form.department || '',
@@ -1899,9 +1919,13 @@ function OPDSection({ rooms }) {
         if (ptAddress.length > 35) ptAddress = ptAddress.substring(0, 32) + '...'
 
         const finalValues = { ...templateValues }
+        const chosenVisitDt = form.visit_datetime ? new Date(form.visit_datetime) : new Date()
+        const visitDateTimeStr = visitDate && !Number.isNaN(chosenVisitDt.getTime())
+          ? formatDateTime(chosenVisitDt, { paren: true })
+          : ''
         for (const f of layoutFields) {
-          const tokenDateTime = visitDate
-            ? `${displayToken} · ${formatDateTime(new Date(), { paren: true })}`
+          const tokenDateTime = visitDateTimeStr
+            ? `${displayToken} · ${visitDateTimeStr}`
             : displayToken
           const patientRegisteredAtRaw = payload?.patient_registered_at || matchedPatient?.created_at || ''
           const patientRegisteredAt = patientRegisteredAtRaw ? formatDateTime(patientRegisteredAtRaw, { paren: true }) : ''
@@ -1912,9 +1936,7 @@ function OPDSection({ rooms }) {
             guardianLine: printGuardianLine,
             tokenDateTime,
             registeredAt: patientRegisteredAt,
-            visitDateTime: visitDate
-              ? formatDateTime(new Date(), { paren: true })
-              : '',
+            visitDateTime: visitDateTimeStr,
             uhid: printUhid || '',
             phone: (printPhone || form.phone.replace(/\D/g, '') || '').trim(),
             doctorName: selectedDoc?.name || '',
@@ -1966,6 +1988,7 @@ function OPDSection({ rooms }) {
       }
 
       setForm(buildEmptyForm())
+      fetchNextOpdNo()
       opdAmountManuallyEditedRef.current = false
       setTemplateValues({})
       setMatchedPatient(null)
@@ -2271,6 +2294,31 @@ function OPDSection({ rooms }) {
               readOnly
               placeholder="Assigned after match"
               className={`${inpFilled} bg-gray-50/80`}
+            />
+          </div>
+          )}
+
+          {isOpdFieldVisible('opd_no') && (
+          <div className="col-span-12 sm:col-span-6 lg:col-span-3 min-w-0">
+            <label className={lblFilled}>{opdFieldConfig.opd_no?.label || 'OPD No'}</label>
+            <input
+              value={nextOpdNoPreview}
+              readOnly
+              placeholder="Loading…"
+              className={`${inpFilled} bg-gray-50/80 font-mono`}
+            />
+            <p className="text-[10px] text-gray-400 mt-0.5">Auto-assigned on save</p>
+          </div>
+          )}
+
+          {isOpdFieldVisible('visit_date') && (
+          <div className="col-span-12 sm:col-span-6 lg:col-span-3 min-w-0">
+            <label className={lblFilled}>{opdFieldConfig.visit_date?.label ? `${opdFieldConfig.visit_date.label} & time` : 'Visit date & time'}</label>
+            <input
+              type="datetime-local"
+              value={form.visit_datetime || ''}
+              onChange={e => setForm(f => ({ ...f, visit_datetime: e.target.value }))}
+              className={inpFilled}
             />
           </div>
           )}
@@ -3944,10 +3992,20 @@ function IPDSection({ mode, initialAdmissionDraft }) {
   }
 
   // Active admissions list
+  const [admDateFrom, setAdmDateFrom] = useState('')
+  const [admDateTo, setAdmDateTo] = useState('')
+
   const filtered = admissions.filter(a => {
     if (a.status !== 'admitted') return false;
     const q = search.toLowerCase()
-    return !q || (a.patient_name || '').toLowerCase().includes(q) || (a.bed_code || '').toLowerCase().includes(q) || (a.ward_name || '').toLowerCase().includes(q)
+    const matchSearch = !q || (a.patient_name || '').toLowerCase().includes(q) || (a.bed_code || '').toLowerCase().includes(q) || (a.ward_name || '').toLowerCase().includes(q)
+    if (!matchSearch) return false
+    if (admDateFrom || admDateTo) {
+      const admDate = a.admission_date || (a.created_at ? a.created_at.slice(0, 10) : '')
+      if (admDateFrom && admDate < admDateFrom) return false
+      if (admDateTo && admDate > admDateTo) return false
+    }
+    return true
   })
 
   // Pagination calculations
@@ -3971,12 +4029,42 @@ function IPDSection({ mode, initialAdmissionDraft }) {
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col min-h-[calc(100vh-320px)]">
-        <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-3">
-          <Search size={16} className="text-gray-400" />
+        <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2 flex-wrap">
+          <Search size={16} className="text-gray-400 shrink-0" />
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search patient, bed, ward…"
-            className="flex-1 text-sm outline-none" />
-          <button onClick={() => { fetchAdmissions(); fetchSummaries() }} className="text-gray-400 hover:text-blue-600"><RefreshCw size={14} /></button>
-          <span className="text-xs text-gray-400">{filtered.length} patients</span>
+            className="flex-1 min-w-[120px] text-sm outline-none" />
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">From</label>
+            <input
+              type="date"
+              value={admDateFrom}
+              max={admDateTo || undefined}
+              onChange={e => setAdmDateFrom(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition-all cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">To</label>
+            <input
+              type="date"
+              value={admDateTo}
+              min={admDateFrom || undefined}
+              onChange={e => setAdmDateTo(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 transition-all cursor-pointer"
+            />
+          </div>
+          {(admDateFrom || admDateTo) && (
+            <button
+              onClick={() => { setAdmDateFrom(''); setAdmDateTo('') }}
+              className="text-[11px] font-bold text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg transition-colors border border-red-100 shrink-0"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <button onClick={() => { fetchAdmissions(); fetchSummaries() }} className="text-gray-400 hover:text-blue-600 shrink-0"><RefreshCw size={14} /></button>
+          <span className="text-xs text-gray-400 shrink-0">{filtered.length} patients</span>
         </div>
         {loading ? (
           <div className="text-center py-10 text-gray-400 text-sm">Loading…</div>
@@ -6641,6 +6729,8 @@ function PatientListSection() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [ptDateFrom, setPtDateFrom] = useState('')
+  const [ptDateTo, setPtDateTo] = useState('')
   const [selected, setSelected] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [editPatientId, setEditPatientId] = useState(null)
@@ -6663,6 +6753,8 @@ function PatientListSection() {
     }
   }, [search])
 
+  useEffect(() => { setPage(0); fetchPatients(0, search) }, [ptDateFrom, ptDateTo])
+
   useEffect(() => {
     // When `search` changes, we reset `page` to 0 and schedule a debounced fetch.
     // Prevent the `page` effect from firing the immediate second fetch for offset=0.
@@ -6675,6 +6767,8 @@ function PatientListSection() {
     try {
       const params = new URLSearchParams({ limit: PAGE_SIZE, offset: pg * PAGE_SIZE })
       if (q.trim()) params.set('search', q.trim())
+      if (ptDateFrom) params.set('registered_from', ptDateFrom)
+      if (ptDateTo) params.set('registered_to', ptDateTo)
       const { data } = await api.get(`/patients/?${params}`)
       setPatients(data?.data || data?.results || data || [])
       setTotal(data?.count ?? data?.total ?? (data?.data?.length ?? 0))
@@ -6756,14 +6850,44 @@ function PatientListSection() {
       {/* Table card */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         {/* Search bar */}
-        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-3 bg-gray-50/60">
+        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2 bg-gray-50/60 flex-wrap">
           <Search size={15} className="text-gray-400 shrink-0" strokeWidth={2} />
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Search by name, UHID, phone…"
-            className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400"
+            className="flex-1 min-w-[120px] text-sm outline-none bg-transparent placeholder:text-gray-400"
           />
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">From</label>
+            <input
+              type="date"
+              value={ptDateFrom}
+              max={ptDateTo || undefined}
+              onChange={e => setPtDateFrom(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">To</label>
+            <input
+              type="date"
+              value={ptDateTo}
+              min={ptDateFrom || undefined}
+              onChange={e => setPtDateTo(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          {(ptDateFrom || ptDateTo) && (
+            <button
+              onClick={() => { setPtDateFrom(''); setPtDateTo('') }}
+              className="text-[11px] font-bold text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg transition-colors border border-red-100 shrink-0"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
           {loading && <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0" />}
           <button onClick={() => fetchPatients(page, search)} className="text-gray-400 hover:text-emerald-600 shrink-0">
             <RefreshCw size={14} strokeWidth={2} />
@@ -7453,6 +7577,8 @@ function DischargeSection() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [discDateFrom, setDiscDateFrom] = useState('')
+  const [discDateTo, setDiscDateTo] = useState('')
   const PAGE_SIZE = 10
   const [editSummaryAdmission, setEditSummaryAdmission] = useState(null)
   const [loadingEditAdmission, setLoadingEditAdmission] = useState(false)
@@ -7534,7 +7660,14 @@ function DischargeSection() {
 
   const filteredHistory = records.filter(r => {
     const q = search.toLowerCase()
-    return !q || (r.patient_name || '').toLowerCase().includes(q) || (r.patient_uhid || '').toLowerCase().includes(q)
+    const matchSearch = !q || (r.patient_name || '').toLowerCase().includes(q) || (r.patient_uhid || '').toLowerCase().includes(q)
+    if (!matchSearch) return false
+    if (discDateFrom || discDateTo) {
+      const recDate = r.discharge_date || r.admission_date || (r.created_at ? r.created_at.slice(0, 10) : '')
+      if (discDateFrom && recDate < discDateFrom) return false
+      if (discDateTo && recDate > discDateTo) return false
+    }
+    return true
   }).sort(compareDischargeSummariesNewestFirst)
 
   const total = filteredHistory.length
@@ -7577,11 +7710,41 @@ function DischargeSection() {
       </div>
 
       <section className="bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col min-h-[calc(100vh-320px)]">
-        <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-3 bg-gray-50/50">
-          <Search size={16} className="text-gray-400" />
+        <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2 bg-gray-50/50 flex-wrap">
+          <Search size={16} className="text-gray-400 shrink-0" />
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search discharge history..."
-            className="flex-1 text-sm outline-none bg-transparent" />
-          <button onClick={fetchDischarged} className="text-gray-400 hover:text-emerald-600"><RefreshCw size={14} /></button>
+            className="flex-1 min-w-[120px] text-sm outline-none bg-transparent" />
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">From</label>
+            <input
+              type="date"
+              value={discDateFrom}
+              max={discDateTo || undefined}
+              onChange={e => setDiscDateFrom(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">To</label>
+            <input
+              type="date"
+              value={discDateTo}
+              min={discDateFrom || undefined}
+              onChange={e => setDiscDateTo(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          {(discDateFrom || discDateTo) && (
+            <button
+              onClick={() => { setDiscDateFrom(''); setDiscDateTo('') }}
+              className="text-[11px] font-bold text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg transition-colors border border-red-100 shrink-0"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <button onClick={fetchDischarged} className="text-gray-400 hover:text-emerald-600 shrink-0"><RefreshCw size={14} /></button>
         </div>
         {loading ? (
           <div className="text-center py-10 text-gray-400 text-sm italic">Loading history...</div>
@@ -9213,6 +9376,9 @@ function OpdSlipsSection({ onMoveToIpd }) {
     return () => clearInterval(refresh)
   }, [loadOpdLayout])
 
+  const [opdDateFrom, setOpdDateFrom] = useState('')
+  const [opdDateTo, setOpdDateTo] = useState('')
+
   useEffect(() => {
     setPage(0)
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -9220,6 +9386,7 @@ function OpdSlipsSection({ onMoveToIpd }) {
     return () => clearTimeout(debounceRef.current)
   }, [search])
 
+  useEffect(() => { setPage(0); fetchVisits(0, search) }, [opdDateFrom, opdDateTo])
   useEffect(() => { fetchVisits(page, search) }, [page])
 
   async function fetchVisits(pg = 0, q = '') {
@@ -9227,6 +9394,8 @@ function OpdSlipsSection({ onMoveToIpd }) {
     try {
       const params = new URLSearchParams({ limit: PAGE_SIZE, offset: pg * PAGE_SIZE, ordering: '-created_at' })
       if (q.trim()) params.set('search', q.trim())
+      if (opdDateFrom) params.set('visit_date__gte', opdDateFrom)
+      if (opdDateTo) params.set('visit_date__lte', opdDateTo)
       const { data } = await api.get(`/opd-visits/?${params}`)
       setVisits(data?.data || data?.results || data || [])
       setTotal(data?.count ?? data?.total ?? (data?.data?.length ?? 0))
@@ -9404,16 +9573,18 @@ function OpdSlipsSection({ onMoveToIpd }) {
     }
     setCancelling(true)
     try {
-      await api.post(`/opd-visits/${cancelVisit.id}/cancel/`, { cancel_reason: reason })
+      const res = await api.post(`/opd-visits/${cancelVisit.id}/cancel/`, { cancel_reason: reason })
       toast.success('OPD slip cancelled')
+      const updated = res?.data?.data ?? res?.data?.entity ?? res?.data
+      const cancelledId = cancelVisit.id
       setCancelVisit(null)
       setCancelReason('')
-      if (viewVisit?.id === cancelVisit.id) {
-        setViewVisit((prev) => ({
-          ...prev,
-          status: 'cancelled',
-          cancel_reason: reason,
-        }))
+      if (viewVisit?.id === cancelledId) {
+        if (updated?.voided) {
+          setViewVisit(null)
+        } else {
+          setViewVisit((prev) => ({ ...prev, status: 'cancelled', cancel_reason: reason }))
+        }
       }
       fetchVisits(page, search)
     } catch (err) {
@@ -9438,9 +9609,39 @@ function OpdSlipsSection({ onMoveToIpd }) {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden relative flex flex-col min-h-[calc(100vh-320px)]">
-        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-3 bg-gray-50/60">
+        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2 bg-gray-50/60 flex-wrap">
           <Search size={15} className="text-gray-400 shrink-0" strokeWidth={2} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by patient name, mobile, UHID…" className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, mobile, UHID…" className="flex-1 min-w-[120px] text-sm outline-none bg-transparent placeholder:text-gray-400" />
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">From</label>
+            <input
+              type="date"
+              value={opdDateFrom}
+              max={opdDateTo || undefined}
+              onChange={e => setOpdDateFrom(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">To</label>
+            <input
+              type="date"
+              value={opdDateTo}
+              min={opdDateFrom || undefined}
+              onChange={e => setOpdDateTo(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          {(opdDateFrom || opdDateTo) && (
+            <button
+              onClick={() => { setOpdDateFrom(''); setOpdDateTo('') }}
+              className="text-[11px] font-bold text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg transition-colors border border-red-100 shrink-0"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
           {loading && <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0" />}
           <button onClick={() => fetchVisits(page, search)} className="text-gray-400 hover:text-emerald-600 shrink-0"><RefreshCw size={14} strokeWidth={2} /></button>
           <span className="text-xs text-gray-400 shrink-0">{total} slips</span>
@@ -10034,6 +10235,8 @@ function PaymentSlipsListSection() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
   const [editingPayment, setEditingPayment] = useState(null)
   const [viewPayment, setViewPayment] = useState(null)
   const [cancelPayment, setCancelPayment] = useState(null)
@@ -10061,6 +10264,7 @@ function PaymentSlipsListSection() {
     return () => clearTimeout(debounceRef.current)
   }, [search])
 
+  useEffect(() => { setPage(0); fetchPayments(0, search) }, [dateFrom, dateTo])
   useEffect(() => { fetchPayments(page, search) }, [page])
 
   async function fetchPayments(pg = 0, q = '') {
@@ -10069,6 +10273,8 @@ function PaymentSlipsListSection() {
       const params = new URLSearchParams({ limit: PAGE_SIZE, offset: pg * PAGE_SIZE, ordering: '-paid_at' })
       const query = q.trim()
       if (query) params.set('search', query)
+      if (dateFrom) params.set('paid_at__date__gte', dateFrom)
+      if (dateTo) params.set('paid_at__date__lte', dateTo)
       const { data } = await api.get(`/payments/?${params}`)
       const rows = Array.isArray(data?.results)
         ? data.results
@@ -10146,16 +10352,24 @@ function PaymentSlipsListSection() {
     if (!reason) { toast.error('Please enter cancellation reason'); return }
     setCancellingPayment(true)
     try {
-      await api.patch(`/payments/${cancelPayment.id}/`, {
+      const res = await api.patch(`/payments/${cancelPayment.id}/`, {
         status: 'cancelled',
         transaction_reference: cancelPayment.transaction_reference
           ? cancelPayment.transaction_reference
           : `Cancelled: ${reason}`,
       })
       toast.success('Payment slip cancelled')
+      const updated = res?.data?.data ?? res?.data?.entity ?? res?.data
+      const cancelledId = cancelPayment.id
       setCancelPayment(null)
       setCancelPaymentReason('')
-      if (viewPayment?.id === cancelPayment.id) setViewPayment(v => ({ ...v, status: 'cancelled' }))
+      if (viewPayment?.id === cancelledId) {
+        if (updated?.voided) {
+          setViewPayment(null)
+        } else {
+          setViewPayment(v => ({ ...v, status: 'cancelled' }))
+        }
+      }
       fetchPayments(page, search)
     } catch (err) {
       toast.error(err?.response?.data?.detail || 'Failed to cancel payment slip')
@@ -10269,9 +10483,39 @@ function PaymentSlipsListSection() {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden relative flex flex-col min-h-[calc(100vh-320px)]">
-        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-3 bg-gray-50/60">
+        <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2 bg-gray-50/60 flex-wrap">
           <Search size={15} className="text-gray-400 shrink-0" strokeWidth={2} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by patient name, mobile, or UHID…" className="flex-1 text-sm outline-none bg-transparent placeholder:text-gray-400" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, mobile, UHID…" className="flex-1 min-w-[120px] text-sm outline-none bg-transparent placeholder:text-gray-400" />
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">From</label>
+            <input
+              type="date"
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={e => setDateFrom(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="text-[11px] text-gray-400 font-semibold uppercase tracking-wide shrink-0">To</label>
+            <input
+              type="date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={e => setDateTo(e.target.value)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-all cursor-pointer"
+            />
+          </div>
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setDateFrom(''); setDateTo('') }}
+              className="text-[11px] font-bold text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-2 py-1 rounded-lg transition-colors border border-red-100 shrink-0"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <span className="w-px h-4 bg-gray-200 shrink-0" />
           {loading && <span className="w-3.5 h-3.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0" />}
           <button onClick={() => fetchPayments(page, search)} className="text-gray-400 hover:text-emerald-600 shrink-0"><RefreshCw size={14} strokeWidth={2} /></button>
           <span className="text-xs text-gray-400 shrink-0">{total} slips</span>

@@ -170,18 +170,32 @@ async function printDraftPrescription(draft) {
 }
 
 // ── Completed Invoice Card ────────────────────────────────────────────────────
-function CompletedCard({ invoice, onViewOriginal, onViewPrinted }) {
-  const patientName = invoice.patient_details?.first_name
-    ? `${invoice.patient_details.first_name} ${invoice.patient_details.last_name || ''}`.trim()
-    : 'Patient'
+function CompletedCard({
+  invoice,
+  onView,
+  onViewPrint,
+  onViewPrinted,
+  onCancel,
+}) {
+  const isCancelled = invoice.status === 'cancelled'
+  const isFinalized = invoice.status === 'finalized'
+  const isB2B = Boolean(invoice?.party || invoice?.party_details)
+  const party = invoice?.party_details || (typeof invoice?.party === 'object' ? invoice.party : null)
+  const patientName = isB2B
+    ? (party?.name || invoice?.party_name || invoice?.party_name_snapshot || 'Party')
+    : invoice.patient_details?.first_name
+      ? `${invoice.patient_details.first_name} ${invoice.patient_details.last_name || ''}`.trim()
+      : 'Patient'
   const itemCount = Array.isArray(invoice.items) ? invoice.items.length : (invoice.items_count || '—')
   const grandTotal = Number(invoice.grand_total || 0).toFixed(2)
   const hasPrintCopy = !!(invoice.has_print_copy || (invoice.print_html && String(invoice.print_html).trim()))
+  const actionCount = 1 + (isCancelled ? 0 : 1) + (!isCancelled && hasPrintCopy ? 1 : 0) + (isFinalized ? 1 : 0)
 
   return (
-    <div className="bg-white border border-emerald-200 rounded-xl p-3 flex flex-col gap-2.5 relative overflow-hidden hover:shadow-md transition-all">
-      {/* Green left accent */}
-      <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500 rounded-l-xl" />
+    <div className={`bg-white border rounded-xl p-3 flex flex-col gap-2.5 relative overflow-hidden hover:shadow-md transition-all ${
+      isCancelled ? 'border-red-200 bg-red-50/40' : 'border-emerald-200'
+    }`}>
+      <div className={`absolute top-0 left-0 w-1 h-full rounded-l-xl ${isCancelled ? 'bg-red-500' : 'bg-emerald-500'}`} />
 
       {/* Top row */}
       <div className="flex justify-between items-start pl-2">
@@ -190,9 +204,15 @@ function CompletedCard({ invoice, onViewOriginal, onViewPrinted }) {
           <p className="text-[10px] text-slate-400 mt-0.5">{dateLabel(invoice.created_at)}</p>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="flex items-center gap-0.5 bg-emerald-100 text-emerald-700 text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase">
-            <CheckCircle2 size={9} />DONE
-          </span>
+          {isCancelled ? (
+            <span className="flex items-center gap-0.5 bg-red-100 text-red-700 text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase">
+              Cancelled
+            </span>
+          ) : (
+            <span className="flex items-center gap-0.5 bg-emerald-100 text-emerald-700 text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase">
+              <CheckCircle2 size={9} />DONE
+            </span>
+          )}
         </div>
       </div>
 
@@ -211,23 +231,49 @@ function CompletedCard({ invoice, onViewOriginal, onViewPrinted }) {
         <span className="text-[13px] font-bold text-emerald-700 tabular-nums">₹{grandTotal}</span>
       </div>
 
-      <div className={`ml-2 mt-auto grid gap-1.5 w-full ${hasPrintCopy ? 'grid-cols-2' : 'grid-cols-1'}`}>
+      {isCancelled && (
+        <p className="pl-2 text-[10px] font-bold text-red-700">Cancelled (view only)</p>
+      )}
+
+      <div
+        className={`ml-2 mt-auto grid gap-1.5 w-full ${
+          actionCount >= 3 ? 'grid-cols-2' : actionCount === 2 ? 'grid-cols-2' : 'grid-cols-1'
+        }`}
+      >
         <button
-          onClick={() => onViewOriginal(invoice)}
-          className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+          onClick={() => onView?.(invoice)}
+          className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
         >
-          <Receipt size={11} />
-          Original
+          <Eye size={11} />
+          View
         </button>
-        {hasPrintCopy ? (
+        {!isCancelled && (
           <button
-            onClick={() => onViewPrinted(invoice)}
+            onClick={() => onViewPrint?.(invoice)}
+            className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+          >
+            <Receipt size={11} />
+            Print
+          </button>
+        )}
+        {!isCancelled && hasPrintCopy ? (
+          <button
+            onClick={() => onViewPrinted?.(invoice)}
             className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-violet-600 text-white hover:bg-violet-700 transition-colors"
           >
             <Printer size={11} />
             Printed
           </button>
         ) : null}
+        {isFinalized && (
+          <button
+            onClick={() => onCancel?.(invoice)}
+            className="flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold bg-red-600 text-white hover:bg-red-700 transition-colors"
+          >
+            <X size={11} />
+            Cancel
+          </button>
+        )}
       </div>
     </div>
   )
@@ -324,7 +370,9 @@ function SectionHeader({ icon: Icon, title, count, countColor = 'bg-slate-100 te
 export default function DraftsView({
   onLoadDraft,
   completedInvoices = [],
-  onViewInvoiceOriginal,
+  onViewInvoice,
+  onCancelInvoice,
+  onViewInvoicePrint,
   onViewInvoicePrinted,
 }) {
   const [drafts, setDrafts] = useState([])
@@ -380,7 +428,7 @@ export default function DraftsView({
 
   // Recent completed: today + yesterday, sorted newest first
   const recentCompleted = completedInvoices
-    .filter(inv => inv.status === 'finalized' || inv.status === 'completed')
+    .filter(inv => inv.status === 'finalized' || inv.status === 'completed' || inv.status === 'cancelled')
     .slice(0, 20)
 
   const hasDrafts = drafts.length > 0
@@ -485,8 +533,10 @@ export default function DraftsView({
                   <CompletedCard
                     key={inv.id}
                     invoice={inv}
-                    onViewOriginal={onViewInvoiceOriginal}
+                    onView={onViewInvoice}
+                    onViewPrint={onViewInvoicePrint}
                     onViewPrinted={onViewInvoicePrinted}
+                    onCancel={onCancelInvoice}
                   />
                 ))}
               </div>

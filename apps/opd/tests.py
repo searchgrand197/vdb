@@ -1,8 +1,11 @@
+from datetime import datetime
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.opd.models import OPDVisit, OPDVisitStatusHistory
+from apps.opd.models import OPDVisit, OPDVisitSequence, OPDVisitStatusHistory
 from apps.patients.models import Patient
 from apps.shared.models import Hospital
 
@@ -152,3 +155,87 @@ class OPDVisitSearchTests(TestCase):
         reason_ids = {str(row.get("id")) for row in reason_rows}
         self.assertNotIn(str(self.primary_visit.id), diagnosis_ids)
         self.assertNotIn(str(self.primary_visit.id), reason_ids)
+
+
+class OPDCreateDatetimeTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.hospital = Hospital.objects.create(name="OPD DT Hospital", slug="opd-dt-hospital")
+        self.user = User.objects.create_user(
+            email="opd-dt@test.com",
+            password="x",
+            hospital=self.hospital,
+            is_active=True,
+        )
+        self.patient = Patient.objects.create(
+            hospital=self.hospital,
+            uhid="UHID-DT-01",
+            first_name="Date",
+            last_name="Test",
+            gender="male",
+            phone="9876503333",
+            status="active",
+        )
+        self.client.force_authenticate(self.user)
+
+    def test_next_opd_no_preview_does_not_increment_sequence(self):
+        year = timezone.now().year
+        OPDVisitSequence.objects.create(hospital=self.hospital, year=year, last_seq=3)
+
+        response = self.client.get("/api/v1/opd-visits/next-opd-no/")
+        self.assertEqual(response.status_code, 200)
+        payload = response.data.get("data") or response.data
+        self.assertTrue(payload.get("opd_no"))
+
+        seq = OPDVisitSequence.objects.get(hospital=self.hospital, year=year)
+        self.assertEqual(seq.last_seq, 3)
+
+    def test_create_with_visit_datetime_sets_created_at(self):
+        dt = timezone.make_aware(datetime(2026, 5, 15, 14, 30, 0))
+        response = self.client.post(
+            "/api/v1/opd-visits/",
+            {
+                "patient": str(self.patient.id),
+                "visit_date": "2026-05-15",
+                "visit_datetime": dt.isoformat(),
+                "status": "waiting",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.data.get("data") or response.data
+        visit = OPDVisit.objects.get(pk=payload["id"])
+        self.assertEqual(str(visit.visit_date), "2026-05-15")
+        self.assertEqual(visit.created_at.replace(microsecond=0), dt.replace(microsecond=0))
+
+    def test_create_without_visit_datetime_keeps_default_created_at(self):
+        before = timezone.now()
+        response = self.client.post(
+            "/api/v1/opd-visits/",
+            {
+                "patient": str(self.patient.id),
+                "visit_date": "2026-05-16",
+                "status": "waiting",
+            },
+            format="json",
+        )
+        after = timezone.now()
+        self.assertEqual(response.status_code, 201)
+        payload = response.data.get("data") or response.data
+        visit = OPDVisit.objects.get(pk=payload["id"])
+        self.assertGreaterEqual(visit.created_at, before)
+        self.assertLessEqual(visit.created_at, after)
+
+    def test_visit_datetime_date_mismatch_rejected(self):
+        dt = timezone.make_aware(datetime(2026, 5, 15, 10, 0, 0))
+        response = self.client.post(
+            "/api/v1/opd-visits/",
+            {
+                "patient": str(self.patient.id),
+                "visit_date": "2026-05-16",
+                "visit_datetime": dt.isoformat(),
+                "status": "waiting",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)

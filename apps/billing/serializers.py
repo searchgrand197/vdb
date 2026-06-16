@@ -57,6 +57,7 @@ class BillingInvoiceSerializer(serializers.ModelSerializer):
             "attributed_doctor_name",
             "cancelled_reason",
             "cancelled_at",
+            "voided",
             "items",
             "created_at",
             "updated_at",

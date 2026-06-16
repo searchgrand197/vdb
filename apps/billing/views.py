@@ -22,6 +22,12 @@ from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
 from apps.settings_management.models import ReceptionPortalSettings
 from apps.settings_management.document_number_service import render_document_number
+from apps.shared.cancel_service import (
+    apply_void_if_last,
+    is_last_billing_invoice,
+    release_billing_invoice_number,
+    void_billing_invoice_sequence,
+)
 from apps.shared.response import success_response
 
 
@@ -42,7 +48,7 @@ def _generate_invoice_no(hospital, year: int) -> str:
 
 
 class BillingInvoiceViewSet(viewsets.ModelViewSet):
-    queryset = BillingInvoice.objects.all().select_related(
+    queryset = BillingInvoice.objects.filter(voided=False).select_related(
         "patient", "hospital", "attributed_doctor_user", "opd_visit", "ipd_admission"
     )
     filter_backends = (SearchFilter,)
@@ -278,11 +284,20 @@ class BillingInvoiceViewSet(viewsets.ModelViewSet):
             p.status = PaymentTransaction.Status.CANCELLED
             p.transaction_reference = cancel_ref
             p.save(update_fields=["status", "transaction_reference"])
+        apply_void_if_last(
+            obj=invoice,
+            is_last_fn=is_last_billing_invoice,
+            void_seq_fn=void_billing_invoice_sequence,
+            release_number_fn=release_billing_invoice_number,
+        )
         invoice.status = BillingInvoice.Status.CANCELLED
         invoice.cancelled_reason = reason
         invoice.cancelled_at = timezone.now()
         invoice.amount_paid = Decimal("0.00")
-        invoice.save(update_fields=["status", "cancelled_reason", "cancelled_at", "amount_paid"])
+        update_fields = ["status", "cancelled_reason", "cancelled_at", "amount_paid", "voided"]
+        if str(invoice.invoice_no or "").startswith("VOID-"):
+            update_fields.append("invoice_no")
+        invoice.save(update_fields=update_fields)
         create_audit_log(
             request=request,
             hospital=invoice.hospital,

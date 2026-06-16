@@ -68,6 +68,7 @@ class BillingInvoice(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
 
     cancelled_reason = models.CharField(max_length=500, blank=True, default="")
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    voided = models.BooleanField(default=False, db_index=True)
 
     attribution_type = models.CharField(
         max_length=20,

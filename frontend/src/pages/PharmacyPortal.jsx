@@ -39,6 +39,8 @@ import PharmacyDashboard from '../pharmacy/PharmacyDashboard'
 import PharmacyCategoriesView from '../pharmacy/PharmacyCategoriesView'
 import PartiesView from '../pharmacy/PartiesView'
 import DraftsView from '../pharmacy/DraftsView'
+import PharmacyInvoiceViewModal from '../pharmacy/PharmacyInvoiceViewModal'
+import PharmacyInvoiceCancelModal from '../pharmacy/PharmacyInvoiceCancelModal'
 import { parseApiError } from '../pharmacy/pharmacyCalculations'
 import { normalizeDiscountPercentInput } from '../pharmacy/billingUtils'
 import {
@@ -127,6 +129,9 @@ export default function PharmacyPortal() {
   const [invoices, setInvoices] = useState([])
   const [loading, setLoading] = useState(true)
   const [printingInvoice, setPrintingInvoice] = useState(null)
+  const [viewInvoiceId, setViewInvoiceId] = useState(null)
+  const [cancelInvoice, setCancelInvoice] = useState(null)
+  const [registerRefreshToken, setRegisterRefreshToken] = useState(0)
   const [showAddMedicine, setShowAddMedicine] = useState(false)
   const [showAddPatient, setShowAddPatient] = useState(false)
   const [addPatientSeedName, setAddPatientSeedName] = useState('')
@@ -367,7 +372,9 @@ export default function PharmacyPortal() {
                       setView('billing')
                     }}
                     completedInvoices={invoices}
-                    onViewInvoiceOriginal={(inv) => openInvoicePreview(inv, 'original')}
+                    onViewInvoice={(inv) => setViewInvoiceId(inv.id)}
+                    onCancelInvoice={setCancelInvoice}
+                    onViewInvoicePrint={(inv) => openInvoicePreview(inv, 'original')}
                     onViewInvoicePrinted={(inv) => openInvoicePreview(inv, 'printed')}
                   />
                 )}
@@ -442,7 +449,10 @@ export default function PharmacyPortal() {
                 {view === 'history' && (
                   <HistoryView
                     invoices={invoices}
-                    onViewInvoiceOriginal={(inv) => openInvoicePreview(inv, 'original')}
+                    registerRefreshToken={registerRefreshToken}
+                    onViewInvoice={(inv) => setViewInvoiceId(inv.id)}
+                    onCancelInvoice={setCancelInvoice}
+                    onViewInvoicePrint={(inv) => openInvoicePreview(inv, 'original')}
                     onViewInvoicePrinted={(inv) => openInvoicePreview(inv, 'printed')}
                   />
                 )}
@@ -491,6 +501,25 @@ export default function PharmacyPortal() {
           onClose={() => setPrintingInvoice(null)}
         />
       )}
+      {viewInvoiceId && (
+        <PharmacyInvoiceViewModal
+          invoiceId={viewInvoiceId}
+          onClose={() => setViewInvoiceId(null)}
+        />
+      )}
+      <PharmacyInvoiceCancelModal
+        invoice={cancelInvoice}
+        onClose={() => setCancelInvoice(null)}
+        onSuccess={(updated) => {
+          if (updated?.voided) {
+            setInvoices((prev) => prev.filter((inv) => inv.id !== updated.id))
+          } else if (updated?.id) {
+            setInvoices((prev) => prev.map((inv) => inv.id === updated.id ? { ...inv, status: 'cancelled' } : inv))
+          }
+          fetchInitialData()
+          setRegisterRefreshToken((t) => t + 1)
+        }}
+      />
       {showAddMedicine && (
         <AddMedicineModal
           onClose={() => setShowAddMedicine(false)}
@@ -1709,7 +1738,14 @@ function InventoryAdjustStockModal({ batch, medicine, medicineCategoryRows = [],
   )
 }
 
-function HistoryView({ invoices: _invoices, onViewInvoiceOriginal, onViewInvoicePrinted }) {
+function HistoryView({
+  invoices: _invoices,
+  registerRefreshToken = 0,
+  onViewInvoice,
+  onCancelInvoice,
+  onViewInvoicePrint,
+  onViewInvoicePrinted,
+}) {
   const PAGE_SIZE = 15
   const [subView, setSubView] = useState('register')
   const [rows, setRows] = useState([])
@@ -1741,7 +1777,7 @@ function HistoryView({ invoices: _invoices, onViewInvoiceOriginal, onViewInvoice
 
   useEffect(() => {
     if (subView === 'register') fetchRows()
-  }, [fetchRows, subView])
+  }, [fetchRows, subView, registerRefreshToken])
 
   const fetchPendingRows = useCallback(async () => {
     setPendingLoading(true)
@@ -1833,6 +1869,8 @@ function HistoryView({ invoices: _invoices, onViewInvoiceOriginal, onViewInvoice
                 const totalAmt = Number(inv.grand_total || 0)
                 const paidAmt = Number(inv.paid_amount || 0)
                 const dueAmt = Math.max(0, Number(inv.due_amount ?? totalAmt - paidAmt))
+                const isCancelled = inv.status === 'cancelled'
+                const isFinalized = inv.status === 'finalized'
                 const isB2B = Boolean(inv?.party)
                 const party = inv?.party_details || (typeof inv?.party === 'object' ? inv.party : null)
                 const customerName = isB2B
@@ -1843,8 +1881,13 @@ function HistoryView({ invoices: _invoices, onViewInvoiceOriginal, onViewInvoice
                 if (party?.gst_number) partyBits.push(`GSTIN: ${party.gst_number}`)
                 if (party?.address) partyBits.push(`Address: ${party.address}`)
                 return (
-                  <tr key={inv.id} className="hover:bg-indigo-50/30">
-                    <td className="px-3 py-2 text-blue-700 font-mono text-[10px]">#{inv.invoice_no}</td>
+                  <tr key={inv.id} className={isCancelled ? 'bg-red-50/70' : 'hover:bg-indigo-50/30'}>
+                    <td className="px-3 py-2">
+                      <div className="text-blue-700 font-mono text-[10px]">#{inv.invoice_no}</div>
+                      {isCancelled && (
+                        <span className="text-[9px] font-bold text-red-700">Cancelled (view only)</span>
+                      )}
+                    </td>
                     <td className="px-3 py-2">
                       <div className="font-medium">{customerName}</div>
                       {isB2B ? (
@@ -1863,30 +1906,50 @@ function HistoryView({ invoices: _invoices, onViewInvoiceOriginal, onViewInvoice
                     <td className="px-3 py-2 text-right font-semibold text-amber-700">₹{dueAmt.toFixed(2)}</td>
                     <td className="px-3 py-2 text-right font-semibold">₹{totalAmt.toFixed(2)}</td>
                     <td className="px-3 py-2">
-                      <div className="flex justify-end gap-1">
+                      <div className="flex justify-end flex-wrap gap-1">
                         <button
                           type="button"
-                          onClick={() => onViewInvoiceOriginal(inv)}
-                          className="px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700 text-[10px] font-semibold"
+                          onClick={() => onViewInvoice?.(inv)}
+                          className="px-2 py-1 rounded-md border border-indigo-200 bg-indigo-50 text-indigo-700 text-[10px] font-semibold"
                         >
-                          Original
+                          View
                         </button>
-                        {inv.has_print_copy ? (
+                        {!isCancelled && (
                           <button
                             type="button"
-                            onClick={() => onViewInvoicePrinted(inv)}
+                            onClick={() => onViewInvoicePrint?.(inv)}
+                            className="px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700 text-[10px] font-semibold"
+                          >
+                            Print
+                          </button>
+                        )}
+                        {!isCancelled && inv.has_print_copy ? (
+                          <button
+                            type="button"
+                            onClick={() => onViewInvoicePrinted?.(inv)}
                             className="px-2 py-1 rounded-md border border-violet-200 bg-violet-50 text-violet-700 text-[10px] font-semibold"
                           >
                             Printed
                           </button>
                         ) : null}
-                        <button
-                          type="button"
-                          onClick={() => setEditInv(inv)}
-                          className="px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700 text-[10px] font-semibold"
-                        >
-                          Edit
-                        </button>
+                        {!isCancelled && (
+                          <button
+                            type="button"
+                            onClick={() => setEditInv(inv)}
+                            className="px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700 text-[10px] font-semibold"
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {isFinalized && (
+                          <button
+                            type="button"
+                            onClick={() => onCancelInvoice?.(inv)}
+                            className="px-2 py-1 rounded-md border border-red-200 bg-red-50 text-red-700 text-[10px] font-semibold"
+                          >
+                            Cancel
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

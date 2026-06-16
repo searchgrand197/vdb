@@ -251,22 +251,93 @@ export function formatBillQtyForOutletLines({
   return formatBillQtyStripsModeLines(sold, free, packSize, baseSuffix, packLabel)
 }
 
+function invoiceItemMedicine(it) {
+  if (it?.medicine && typeof it.medicine === 'object') return it.medicine
+  return it?.medicine_print || null
+}
+
+/** Pack size for bill qty (strip size) — mirrors PharmacyInvoicePrint stripSizeFromItem. */
+export function packSizeFromInvoiceItem(it) {
+  const forced = Number(it?.strip_size_for_print)
+  if (Number.isFinite(forced) && forced > 0) return forced
+  const fromField = Number(it?.pack_size)
+  if (Number.isFinite(fromField) && fromField > 0) return fromField
+  const med = invoiceItemMedicine(it)
+  const convStrip =
+    Number(med?.unit_conversions?.strip) ||
+    Number(med?.unit_conversions?.STRIP) ||
+    Number(it?.unit_conversions?.strip) ||
+    Number(it?.unit_conversions?.STRIP)
+  if (Number.isFinite(convStrip) && convStrip > 0) return convStrip
+  const packInfo = String(med?.pack_info || it?.pack_info || it?.pack || '')
+  const m = packInfo.match(/x\s*(\d+(?:\.\d+)?)/i)
+  if (m) {
+    const n = Number(m[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return 1
+}
+
+function invoiceItemBaseQtyParts(it) {
+  const packSize = packSizeFromInvoiceItem(it)
+  if (it?.packs_display != null || it?.loose_display != null) {
+    const ps = Math.max(1, packSize)
+    const parsed = computeBaseQtyFromPacksLoose(it.packs_display, it.loose_display, ps)
+    return { sold: parsed.qty, free: parsed.freeQty, packSize: ps }
+  }
+  return {
+    sold: Number(it?.qty) || 0,
+    free: Number(it?.free_qty) || 0,
+    packSize: Math.max(1, packSize),
+  }
+}
+
 /** Footer total for units column: sum sold base + sum free base. */
 export function formatInvoiceTotalQtyBase(items) {
   const list = Array.isArray(items) ? items : []
   let sold = 0
   let free = 0
   for (const it of list) {
-    if (it?.packs_display != null || it?.loose_display != null) {
-      const ps = Math.max(1, Number(it?.pack_size) || 1)
-      const parsed = computeBaseQtyFromPacksLoose(it.packs_display, it.loose_display, ps)
-      sold += parsed.qty
-      free += parsed.freeQty
-    } else {
-      sold += Number(it?.qty) || 0
-      free += Number(it?.free_qty) || 0
+    const parts = invoiceItemBaseQtyParts(it)
+    sold += parts.sold
+    free += parts.free
+  }
+  return formatBillQtyBaseUnits(sold, free)
+}
+
+/**
+ * Footer total qty — respects outlet sale_bill_qty_display.
+ * pack_and_loose uses str/tab when all contributing lines share one pack_size > 1.
+ */
+export function formatInvoiceTotalQtyForOutlet(items, mode = 'base_units') {
+  const list = Array.isArray(items) ? items : []
+  let sold = 0
+  let free = 0
+  const packSizes = new Set()
+  let firstItemWithQty = null
+
+  for (const it of list) {
+    const parts = invoiceItemBaseQtyParts(it)
+    if (parts.sold <= 0 && parts.free <= 0) continue
+    sold += parts.sold
+    free += parts.free
+    packSizes.add(parts.packSize)
+    if (!firstItemWithQty) firstItemWithQty = it
+  }
+
+  if (mode !== 'pack_and_loose') {
+    return formatBillQtyBaseUnits(sold, free)
+  }
+
+  if (packSizes.size === 1) {
+    const packSize = [...packSizes][0]
+    if (packSize > 1) {
+      const med = invoiceItemMedicine(firstItemWithQty) || firstItemWithQty
+      const baseSuffix = qtySuffixFromMedicine(med)
+      return formatBillQtyStripsMode(sold, free, packSize, baseSuffix, 'strip')
     }
   }
+
   return formatBillQtyBaseUnits(sold, free)
 }
 

@@ -51,7 +51,7 @@ def next_pharmacy_invoice_number(
         prefix = (getattr(settings_obj, prefix_attr, None) or "INV").strip() or "INV"
         legacy_prefix_upper = prefix.upper()
         max_seq = max(int(getattr(settings_obj, next_attr, 1) or 1) - 1, 0)
-        qs = PharmacyInvoice.objects.filter(pharmacy_id=pharmacy_id).values_list("invoice_no", flat=True)
+        qs = PharmacyInvoice.objects.filter(pharmacy_id=pharmacy_id, voided=False).values_list("invoice_no", flat=True)
         for inv_no in qs:
             seq = _invoice_seq_from_number(inv_no, prefix, legacy_prefix_upper)
             if seq is not None:

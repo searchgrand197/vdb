@@ -18,6 +18,12 @@ from rest_framework.response import Response
 from apps.auditlogs.services import create_audit_log
 from apps.billing.models import BillingInvoice
 from apps.billing.collection_attribution import apply_attribution_to_payment
+from apps.shared.cancel_service import (
+    apply_void_if_last,
+    is_last_payment_slip,
+    release_payment_slip_number,
+    void_payment_slip_sequence,
+)
 from apps.opd.models import OPDVisit
 from apps.payments.models import CashHandover, PaymentQuickCategory, PaymentQuickService, PaymentTransaction
 from apps.settings_management.models import ReceptionPortalSettings
@@ -81,7 +87,7 @@ _PAYMENT_SEARCH_LOOKUPS = (
 
 
 class PaymentTransactionViewSet(viewsets.ModelViewSet):
-    queryset = PaymentTransaction.objects.all().select_related(
+    queryset = PaymentTransaction.objects.filter(voided=False).select_related(
         "invoice",
         "invoice__patient",
         "invoice__patient__guardian",
@@ -222,7 +228,23 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        is_cancelling = (
+            effective_status == PaymentTransaction.Status.CANCELLED
+            and old_status != PaymentTransaction.Status.CANCELLED
+        )
+        voided_last = False
+        if is_cancelling:
+            voided_last = apply_void_if_last(
+                obj=instance,
+                is_last_fn=is_last_payment_slip,
+                void_seq_fn=void_payment_slip_sequence,
+                release_number_fn=release_payment_slip_number,
+            )
         payment = serializer.save()
+        if is_cancelling and voided_last:
+            payment.voided = True
+            payment.slip_number = instance.slip_number
+            payment.save(update_fields=["voided", "slip_number", "updated_at"])
 
         invoice = payment.invoice
         total_paid = _invoice_amount_paid_success(invoice)

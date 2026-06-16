@@ -9,8 +9,10 @@ class PatientFilterSet(django_filters.FilterSet):
     gender = django_filters.CharFilter(field_name="gender")
     status = django_filters.CharFilter(field_name="status")
     blood_group = django_filters.CharFilter(field_name="blood_group", lookup_expr="iexact")
+    registered_from = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+    registered_to = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
 
     class Meta:
         model = Patient
-        fields = ["gender", "status", "blood_group", "dob_from", "dob_to"]
+        fields = ["gender", "status", "blood_group", "dob_from", "dob_to", "registered_from", "registered_to"]
 

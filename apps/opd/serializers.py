@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.opd.models import OPDVisit
@@ -78,6 +79,7 @@ class OPDVisitSerializer(serializers.ModelSerializer):
             "cancelled_by",
             "cancelled_by_name",
             "cancelled_at",
+            "voided",
             "created_at",
             "updated_at",
         ]
@@ -193,12 +195,14 @@ class OPDVisitCreateUpdateSerializer(serializers.ModelSerializer):
     chief_complaint = serializers.CharField(write_only=True, required=False, allow_blank=True)
     token_number = serializers.IntegerField(write_only=True, required=False)
     room_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    visit_datetime = serializers.DateTimeField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = OPDVisit
         fields = [
             "patient",
             "visit_date",
+            "visit_datetime",
             "queue_number",
             "token_number",
             "doctor_user",
@@ -233,6 +237,22 @@ class OPDVisitCreateUpdateSerializer(serializers.ModelSerializer):
 
         # room_code is accepted for compatibility; currently not persisted.
         attrs.pop("room_code", None)
+
+        visit_dt = attrs.pop("visit_datetime", None)
+        if visit_dt is not None:
+            visit_date = attrs.get("visit_date")
+            if visit_date is None and self.instance is not None:
+                visit_date = self.instance.visit_date
+            local_date = timezone.localtime(visit_dt).date()
+            if visit_date is not None and visit_date != local_date:
+                raise serializers.ValidationError(
+                    {"visit_datetime": ["Visit date must match the date portion of visit datetime."]}
+                )
+            if visit_date is None:
+                attrs["visit_date"] = local_date
+            self._visit_datetime = visit_dt
+        else:
+            self._visit_datetime = None
 
         # Map frontend status alias.
         if attrs.get("status") == "in_consultation":

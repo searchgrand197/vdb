@@ -9,6 +9,7 @@ import {
   formatBillQtyStripsMode,
   formatBillQtyStripsModeLines,
   formatInvoiceTotalQtyBase,
+  formatInvoiceTotalQtyForOutlet,
   medicineBillAlias,
   medicineBillName,
   medicineNickName,
@@ -50,6 +51,29 @@ describe('formatInvoiceTotalQtyBase', () => {
       { packs_display: '3', loose_display: '0+2', pack_size: 5, qty: 15, free_qty: 2 },
     ]
     expect(formatInvoiceTotalQtyBase(items)).toBe('31+5')
+  })
+})
+
+describe('formatInvoiceTotalQtyForOutlet', () => {
+  const mixedPackItems = [
+    { packs_display: '4', loose_display: '0+3', pack_size: 4, qty: 16, free_qty: 3 },
+    { packs_display: '3', loose_display: '0+2', pack_size: 5, qty: 15, free_qty: 2 },
+  ]
+
+  it('uses base units when mode is base_units', () => {
+    expect(formatInvoiceTotalQtyForOutlet(mixedPackItems, 'base_units')).toBe('31+5')
+  })
+
+  it('uses str/tab when pack_and_loose and all lines share pack_size', () => {
+    const items = [
+      { qty: 80, free_qty: 10, pack_size: 10 },
+      { qty: 33, free_qty: 14, pack_size: 10 },
+    ]
+    expect(formatInvoiceTotalQtyForOutlet(items, 'pack_and_loose')).toBe('11 str-3 tab+2 str-4 tab')
+  })
+
+  it('falls back to base units when pack sizes differ', () => {
+    expect(formatInvoiceTotalQtyForOutlet(mixedPackItems, 'pack_and_loose')).toBe('31+5')
   })
 })
 

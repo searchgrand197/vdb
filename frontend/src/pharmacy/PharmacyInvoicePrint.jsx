@@ -5,7 +5,7 @@ import api from '../api'
 import toast from 'react-hot-toast'
 import {
   formatBillQtyForOutlet,
-  formatInvoiceTotalQtyBase,
+  formatInvoiceTotalQtyForOutlet,
   medicineBillName,
   qtySuffixFromMedicine,
 } from './billingUtils'
@@ -354,8 +354,8 @@ function retailPatientHeaderReact(inv) {
   )
 }
 
-function formatInvoiceTotalQty(items) {
-  return formatInvoiceTotalQtyBase(items)
+function formatInvoiceTotalQty(items, displayMode = 'base_units') {
+  return formatInvoiceTotalQtyForOutlet(items, displayMode)
 }
 
 function formatMoney(n) {
@@ -843,7 +843,7 @@ function buildInvoiceHtml({ invoice, outlet }) {
     })
     .join('')
 
-  const totalQtyLine = formatInvoiceTotalQty(items)
+  const totalQtyLine = formatInvoiceTotalQty(items, qtyDisplayMode)
   const fillerRowCount = Math.max(0, 8 - items.length)
   const emptyRows =
     fillerRowCount > 0
@@ -1165,7 +1165,7 @@ const InvoicePreviewDocument = React.memo(
     .filter(Boolean)
 
   const tableCols = showGst ? 13 : 11
-  const totalQtyLine = formatInvoiceTotalQty(items)
+  const totalQtyLine = formatInvoiceTotalQty(items, qtyDisplayMode)
   const fillerRowCount = Math.max(0, 8 - items.length)
   const taxSummaryLine = showGst
     ? `Taxable ${formatMoney(subtotal)} · CGST ${formatMoney(cgst)} · SGST ${formatMoney(sgst)} · GST ${formatMoney(tax)}`

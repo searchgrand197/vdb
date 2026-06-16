@@ -80,6 +80,7 @@ class OPDVisit(SoftDeleteModel, TimeStampedModel, UUIDPrimaryKeyModel):
         related_name="opd_visits_cancelled",
     )
     cancelled_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    voided = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         indexes = [

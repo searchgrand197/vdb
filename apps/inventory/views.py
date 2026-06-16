@@ -429,12 +429,16 @@ class MedicineBatchViewSet(PharmacyScopedMixin, viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         from apps.pharmacy.models import PharmacyInvoiceItem, PharmacyPurchaseChallanLine
 
+        from apps.pharmacy.margin_utils import batch_unit_cost_for_snapshot
+
         instance = self.get_object()
         bn = instance.batch_no
         exp = instance.expiry_date
+        unit_cost = batch_unit_cost_for_snapshot(instance)
         PharmacyInvoiceItem.objects.filter(batch_id=instance.id).update(
             snapshot_batch_no=bn,
             snapshot_expiry_date=exp,
+            snapshot_unit_cost=unit_cost,
             batch_id=None,
         )
         PharmacyPurchaseChallanLine.objects.filter(batch_id=instance.id).update(

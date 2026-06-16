@@ -9,18 +9,21 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
-from apps.opd.models import OPDVisit, OPDVisitStatusHistory
+from apps.opd.models import OPDVisit, OPDVisitSequence, OPDVisitStatusHistory
+from apps.settings_management.document_number_service import render_document_number
+from apps.shared.models import Hospital
 from apps.opd.serializers import OPDVisitCreateUpdateSerializer, OPDVisitSerializer
 from apps.opd.services import resolve_opd_doctor_name
 from apps.patients.models import Patient
 from apps.roles_permissions.permissions import HasRequiredPermission
 from apps.auditlogs.services import create_audit_log
 from apps.settings_management.models import ReceptionPortalSettings
+from apps.shared.cancel_service import apply_void_if_last, is_last_opd_visit, release_opd_number, void_opd_sequence
 from apps.shared.response import success_response
 
 
 class OPDVisitViewSet(viewsets.ModelViewSet):
-    queryset = OPDVisit.objects.all()
+    queryset = OPDVisit.objects.filter(voided=False)
     filter_backends = (DjangoFilterBackend, SearchFilter, OrderingFilter)
     filterset_fields = {
         "visit_date": ["exact", "gte", "lte"],
@@ -48,6 +51,7 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
         "partial_update": "opd.update_opd_visit",
         "cancel": "opd.update_opd_visit",
         "destroy": "opd.delete_opd_visit",
+        "next_opd_no": "opd.view_opd_visit",
     }
 
     def get_serializer_class(self):
@@ -98,6 +102,10 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
             created_by=self.request.user,
             **({"amount": slot_fee} if slot_fee is not None else {}),
         )
+        visit_datetime = getattr(serializer, "_visit_datetime", None)
+        if visit_datetime is not None:
+            OPDVisit.objects.filter(pk=visit.pk).update(created_at=visit_datetime)
+            visit.refresh_from_db()
         create_audit_log(
             request=self.request,
             hospital=visit.hospital,
@@ -151,6 +159,24 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
                 after={"status": new_status},
             )
 
+    @action(detail=False, methods=["get"], url_path="next-opd-no")
+    def next_opd_no(self, request):
+        user = request.user
+        if not user.hospital_id:
+            raise ValidationError({"hospital": ["User is not linked to a hospital."]})
+        hospital = Hospital.objects.filter(pk=user.hospital_id).first()
+        if hospital is None:
+            raise ValidationError({"hospital": ["Hospital not found."]})
+        year = timezone.now().year
+        last_seq = (
+            OPDVisitSequence.objects.filter(hospital_id=hospital.id, year=year)
+            .values_list("last_seq", flat=True)
+            .first()
+            or 0
+        )
+        opd_no = render_document_number(hospital, "opd", year, last_seq + 1)
+        return success_response({"opd_no": opd_no})
+
     @action(detail=True, methods=["post"], url_path="cancel")
     @transaction.atomic
     def cancel(self, request, *args, **kwargs):
@@ -164,11 +190,20 @@ class OPDVisitViewSet(viewsets.ModelViewSet):
             raise ValidationError({"cancel_reason": ["Cancellation reason is required."]})
 
         old_status = visit.status
+        apply_void_if_last(
+            obj=visit,
+            is_last_fn=is_last_opd_visit,
+            void_seq_fn=void_opd_sequence,
+            release_number_fn=release_opd_number,
+        )
         visit.status = OPDVisit.Status.CANCELLED
         visit.cancel_reason = reason
         visit.cancelled_by = request.user
         visit.cancelled_at = timezone.now()
-        visit.save(update_fields=["status", "cancel_reason", "cancelled_by", "cancelled_at", "updated_at"])
+        update_fields = ["status", "cancel_reason", "cancelled_by", "cancelled_at", "voided", "updated_at"]
+        if str(visit.opd_no or "").startswith("VOID-"):
+            update_fields.append("opd_no")
+        visit.save(update_fields=update_fields)
 
         OPDVisitStatusHistory.objects.create(
             visit=visit,

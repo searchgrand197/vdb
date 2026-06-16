@@ -161,6 +161,7 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
     has_print_copy = serializers.SerializerMethodField()
     party_name = serializers.CharField(source="party.name", read_only=True, default="")
     party_details = serializers.SerializerMethodField()
+    cancelled_by_name = serializers.SerializerMethodField()
 
     def validate(self, attrs: dict) -> dict:
         # Require either patient or party (but not both absent)
@@ -218,6 +219,15 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "address": party.address or "",
         }
 
+    def get_cancelled_by_name(self, obj):
+        user = getattr(obj, "cancelled_by", None)
+        if not user:
+            return ""
+        fn = (getattr(user, "first_name", "") or "").strip()
+        ln = (getattr(user, "last_name", "") or "").strip()
+        name = f"{fn} {ln}".strip()
+        return name or getattr(user, "email", "") or ""
+
     class Meta:
         model = PharmacyInvoice
         fields = (
@@ -251,8 +261,22 @@ class PharmacyInvoiceSerializer(serializers.ModelSerializer):
             "print_html",
             "print_html_updated_at",
             "created_at",
+            "cancel_reason",
+            "cancelled_by",
+            "cancelled_by_name",
+            "cancelled_at",
+            "voided",
         )
-        read_only_fields = ("has_print_copy", "print_html", "print_html_updated_at")
+        read_only_fields = (
+            "has_print_copy",
+            "print_html",
+            "print_html_updated_at",
+            "cancel_reason",
+            "cancelled_by",
+            "cancelled_by_name",
+            "cancelled_at",
+            "voided",
+        )
         extra_kwargs = {
             # Generated in PharmacyInvoiceViewSet.perform_create if omitted.
             "invoice_no": {"required": False, "allow_blank": True},

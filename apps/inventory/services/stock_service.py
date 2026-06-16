@@ -9,7 +9,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.inventory.models import MedicineBatch, StockLedger
-from apps.pharmacy.models import Pharmacy
+from apps.pharmacy.models import Pharmacy, PharmacyInvoiceItem
 
 
 @dataclass(frozen=True)
@@ -107,4 +107,59 @@ def deduct_stock_for_medicine_fifo(*, request, pharmacy: Pharmacy, medicine_id, 
         deduct_stock_fifo(request=request, pharmacy=pharmacy, medicine_batch_pairs=deductions, reference_id="")
 
     return [BatchDeduction(batch_id=str(b.id), qty=q) for b, q in deductions]
+
+
+def _resolve_item_batch_for_restore(*, pharmacy: Pharmacy, item: PharmacyInvoiceItem) -> MedicineBatch | None:
+    batch = item.batch
+    if batch is not None:
+        return batch
+    snapshot_no = (item.snapshot_batch_no or "").strip()
+    if not snapshot_no:
+        return None
+    return (
+        MedicineBatch.objects.filter(
+            pharmacy_id=pharmacy.id,
+            medicine_id=item.medicine_id,
+            batch_no=snapshot_no,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def restore_stock_for_invoice_cancel(
+    *,
+    request,
+    pharmacy: Pharmacy,
+    items,
+    reference_id: str = "",
+) -> None:
+    """Return dispensed stock when a finalized pharmacy invoice is cancelled."""
+    user = getattr(request, "user", None)
+    created_by = user if getattr(user, "is_authenticated", False) else None
+    if created_by is None:
+        raise ValueError("Authentication required for stock restoration.")
+
+    ref = reference_id or ""
+    for item in items:
+        restore_qty = Decimal(item.qty or 0) + Decimal(item.free_qty or 0)
+        if restore_qty <= 0:
+            continue
+        batch = _resolve_item_batch_for_restore(pharmacy=pharmacy, item=item)
+        if batch is None:
+            med_name = getattr(item.medicine, "name", None) or str(item.medicine_id)
+            batch_hint = (item.snapshot_batch_no or "").strip() or "—"
+            raise ValueError(
+                f"Cannot restore stock for {med_name} (batch {batch_hint}): batch not found."
+            )
+        StockLedger.objects.create(
+            pharmacy_id=pharmacy.id,
+            medicine_id=batch.medicine_id,
+            batch_id=batch.id,
+            qty_change=restore_qty,
+            reason=StockLedger.Reason.RETURN_IN,
+            reference_type="pharmacy_cancel",
+            reference_id=ref,
+            created_by=created_by,
+        )
 
