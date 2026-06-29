@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import api from '../api'
 import toast from 'react-hot-toast'
 import { format } from 'date-fns'
@@ -9,7 +10,7 @@ import {
 import {
   TrendingUp, TrendingDown, Package, Users, Wallet,
   IndianRupee, RefreshCw, Calendar, ToggleLeft, ToggleRight,
-  AlertCircle, Search,
+  AlertCircle, Search, Printer,
 } from 'lucide-react'
 
 const CHART_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444']
@@ -129,6 +130,43 @@ const SummaryCard = React.memo(function SummaryCard({ icon: Icon, iconBg, title,
   )
 })
 
+function PrintPreviewModal({ title, html, onClose }) {
+  const iframeRef = useRef(null)
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  function triggerPrint() {
+    const w = iframeRef.current?.contentWindow
+    if (!w) return
+    w.focus(); w.print()
+  }
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1500] bg-slate-900/60 backdrop-blur-sm p-3 sm:p-5 flex items-center justify-center"
+      role="dialog" aria-modal="true"
+    >
+      <div className="w-full max-w-[1200px] max-h-[94vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+        <div className="shrink-0 px-4 py-3 border-b border-gray-200 bg-white flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-bold text-gray-900 truncate min-w-0">{title}</h3>
+          <div className="flex items-center gap-2 shrink-0">
+            <button type="button" onClick={triggerPrint}
+              className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-emerald-700">Print</button>
+            <button type="button" onClick={onClose}
+              className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-200">Close</button>
+          </div>
+        </div>
+        <div className="flex-1 min-h-0 overflow-hidden bg-gray-100 p-2 sm:p-3">
+          <iframe ref={iframeRef} title={title} srcDoc={html}
+            className="w-full h-full min-h-[70vh] border-0 bg-white rounded-lg shadow-inner" />
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 const todayDefault = () => format(new Date(), 'yyyy-MM-dd')
 
 const PharmacyDashboard = React.memo(function PharmacyDashboard() {
@@ -148,6 +186,9 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
   const [salesView, setSalesView] = useState('patients')
   const [refreshing, setRefreshing] = useState(false)
   const [medSearch, setMedSearch] = useState('')
+  const [printPreview, setPrintPreview] = useState(null)
+  const [printScope, setPrintScope] = useState('all')
+  const [pharmProfile, setPharmProfile] = useState({})
 
   const intervalDraftDirty = draftDateFrom !== appliedDateFrom || draftDateTo !== appliedDateTo
   const todayDraftDirty = draftTodayFrom !== appliedTodayFrom || draftTodayTo !== appliedTodayTo
@@ -177,6 +218,21 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
   }, [gstEnabled, appliedDateFrom, appliedDateTo, appliedTodayFrom, appliedTodayTo])
 
   useEffect(() => { fetchDashboard() }, [fetchDashboard])
+
+  useEffect(() => {
+    api.get('/pharmacy/settings/').then(res => {
+      const d = res.data?.data || res.data || {}
+      const b2c = d.b2c || {}
+      setPharmProfile({
+        name: d.business_name || '',
+        address: b2c.address || '',
+        phone: b2c.mobile || '',
+        email: b2c.email || '',
+        gst: b2c.gst_number || '',
+        dl: b2c.dl_number || '',
+      })
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => { setSalesView('patients'); setMedSearch('') }, [appliedTodayFrom, appliedTodayTo])
 
@@ -343,9 +399,9 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
         <>
           {/* Date-range sale split + margin */}
           <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
               <h3 className="text-[11px] font-bold text-slate-700">Sales Breakdown</h3>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <Calendar size={12} className="text-slate-400" />
                 <input
                   type="date"
@@ -367,6 +423,184 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
                   className="px-2 py-0.5 rounded-lg border border-blue-200 bg-blue-50 text-[10px] font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Go
+                </button>
+                <select
+                  value={printScope}
+                  onChange={e => setPrintScope(e.target.value)}
+                  className="border border-slate-200 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-700 bg-white"
+                >
+                  <option value="all">All Data</option>
+                  <option value="invoices">Invoices Only</option>
+                  <option value="medicines">Medicines Only</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const periodLabel = appliedTodayFrom === appliedTodayTo
+                      ? appliedTodayFrom
+                      : `${appliedTodayFrom} to ${appliedTodayTo}`
+                    const printedAt = new Date().toLocaleString('en-IN')
+                    const fmt2 = (v) => `₹${(Number(v) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                    const details = todaySales.details || []
+                    const meds = todaySales.medicine_details || []
+                    const totRev = meds.reduce((s, m) => s + (m.total_revenue || 0), 0)
+                    const totMar = meds.reduce((s, m) => s + (m.total_margin || 0), 0)
+                    const totQty = meds.reduce((s, m) => s + (m.total_qty || 0), 0)
+
+                    const pharmName = pharmProfile.name || 'Pharmacy'
+                    const pharmAddr = pharmProfile.address || ''
+                    const pharmPhone = pharmProfile.phone || ''
+                    const pharmEmail = pharmProfile.email || ''
+                    const pharmGst = pharmProfile.gst || ''
+                    const pharmDl = pharmProfile.dl || ''
+
+                    const wantInvoices = printScope === 'all' || printScope === 'invoices'
+                    const wantMeds = printScope === 'all' || printScope === 'medicines'
+
+                    const billRowsHtml = details.length
+                      ? details.map((r, i) => `
+                        <tr>
+                          <td class="c">${i + 1}</td>
+                          <td>${r.invoice_no || '—'}</td>
+                          <td>${r.patient_name || '—'}</td>
+                          <td class="c">${(r.payment_method || 'other').toUpperCase()}</td>
+                          <td class="r">${fmt2(r.grand_total)}</td>
+                          <td class="r em">${fmt2(r.margin)}</td>
+                          <td class="r">${fmt2(r.paid_amount)}</td>
+                          <td class="r am">${fmt2(r.due_amount)}</td>
+                        </tr>`).join('')
+                      : '<tr><td colspan="8" class="empty">No bills in this period</td></tr>'
+
+                    const medRowsHtml = meds.length
+                      ? meds.map((m, i) => {
+                          const up = m.total_qty > 0 ? m.total_revenue / m.total_qty : 0
+                          const low = (m.left_stock ?? 0) <= 10
+                          return `
+                          <tr>
+                            <td class="c">${i + 1}</td>
+                            <td>${m.name || '—'}</td>
+                            <td class="r">${Number(m.total_qty).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                            <td class="r${low ? ' low' : ''}">${Number(m.left_stock ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}${low ? ' ⚠' : ''}</td>
+                            <td class="r">${fmt2(up)}</td>
+                            <td class="r">${fmt2(m.total_revenue)}</td>
+                            <td class="r em">${fmt2(m.total_margin)}</td>
+                          </tr>`
+                        }).join('')
+                      : '<tr><td colspan="7" class="empty">No medicine sales in this period</td></tr>'
+
+                    const summaryRows = [
+                      ['Cash', todaySales.cash, todaySales.cash_margin],
+                      ['UPI', todaySales.upi, todaySales.upi_margin],
+                      ['Other', todaySales.other, todaySales.other_margin],
+                      ['Credit', todaySales.credit, todaySales.credit_margin],
+                      ['Total', todaySales.total, todaySales.total_margin],
+                    ].map(([label, amt, mar]) =>
+                      `<tr><td class="lbl">${label}</td><td>${fmt2(amt)}</td><td class="em">${fmt2(mar)}</td></tr>`
+                    ).join('')
+
+                    const invoiceSection = wantInvoices ? `
+                      <h2 class="sec">Bill Details (${details.length})</h2>
+                      <table class="tbl">
+                        <thead><tr>
+                          <th class="c">#</th><th>Invoice</th><th>Patient</th><th class="c">Method</th>
+                          <th class="r">Total</th><th class="r">Margin</th><th class="r">Paid</th><th class="r">Due</th>
+                        </tr></thead>
+                        <tbody>${billRowsHtml}</tbody>
+                        <tfoot><tr>
+                          <td colspan="4" class="r">Total</td>
+                          <td class="r">${fmt2(todaySales.total)}</td>
+                          <td class="r em">${fmt2(todaySales.total_margin)}</td>
+                          <td class="r">${fmt2(details.reduce((s, r) => s + (r.paid_amount || 0), 0))}</td>
+                          <td class="r am">${fmt2(details.reduce((s, r) => s + (r.due_amount || 0), 0))}</td>
+                        </tr></tfoot>
+                      </table>` : ''
+
+                    const medicineSection = wantMeds ? `
+                      <h2 class="sec">Medicine Sales (${meds.length})</h2>
+                      <table class="tbl">
+                        <thead><tr>
+                          <th class="c">#</th><th>Medicine</th><th class="r">Units Sold</th>
+                          <th class="r">Left Stock</th><th class="r">Unit Price</th>
+                          <th class="r">Revenue</th><th class="r">Margin</th>
+                        </tr></thead>
+                        <tbody>${medRowsHtml}</tbody>
+                        <tfoot><tr>
+                          <td colspan="2"><strong>Total</strong></td>
+                          <td class="r">${Number(totQty).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                          <td></td><td></td>
+                          <td class="r">${fmt2(totRev)}</td>
+                          <td class="r em">${fmt2(totMar)}</td>
+                        </tr></tfoot>
+                      </table>` : ''
+
+                    const scopeLabel = printScope === 'invoices' ? 'Invoices' : printScope === 'medicines' ? 'Medicines' : 'All Data'
+
+                    const html = `<!DOCTYPE html><html><head>
+                      <meta charset="utf-8"/>
+                      <title>Sales Report (${scopeLabel}) — ${pharmName}</title>
+                      <style>
+                        @page { size: A4 portrait; margin: 14mm 12mm 12mm 12mm; @top-right { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 9px; color: #000; } }
+                        * { box-sizing: border-box; margin: 0; padding: 0; }
+                        body { font-family: Arial, Helvetica, sans-serif; font-size: 10px; color: #000; line-height: 1.35; }
+                        .hdr { text-align: center; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1.5px solid #000; }
+                        .hdr h1 { font-size: 15px; font-weight: bold; margin-bottom: 2px; }
+                        .hdr p { font-size: 9px; margin-top: 1px; }
+                        .info { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 9px; }
+                        .info td { border: 1px solid #000; padding: 4px 6px; }
+                        .info .lbl { width: 28%; font-weight: bold; background: #f5f5f5; }
+                        h2.sec { font-size: 11px; font-weight: bold; margin: 14px 0 6px; }
+                        table.tbl { width: 100%; border-collapse: collapse; font-size: 9px; margin-bottom: 16px; }
+                        table.tbl thead { display: table-header-group; }
+                        table.tbl th, table.tbl td { border: 1px solid #000; padding: 4px 5px; text-align: left; }
+                        table.tbl th { font-weight: bold; }
+                        table.tbl thead th { background-color: #d1d5db !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                        table.tbl th.r, table.tbl td.r { text-align: right; }
+                        table.tbl th.c, table.tbl td.c { text-align: center; }
+                        table.tbl tfoot td { font-weight: bold; }
+                        table.tbl td.empty { text-align: center; font-style: italic; padding: 10px; }
+                        table.sum { border-collapse: collapse; font-size: 9px; margin-bottom: 14px; }
+                        table.sum th, table.sum td { border: 1px solid #000; padding: 4px 8px; }
+                        table.sum th { font-weight: bold; background: #f5f5f5; }
+                        .em { color: #065f46; }
+                        .am { color: #92400e; }
+                        .low { color: #991b1b; }
+                        .foot { margin-top: 12px; font-size: 8px; color: #444; text-align: center; }
+                      </style>
+                    </head><body>
+                      <div class="hdr">
+                        <h1>${pharmName}</h1>
+                        ${pharmAddr ? `<p>${pharmAddr}</p>` : ''}
+                        ${pharmPhone || pharmEmail ? `<p>${pharmPhone ? `Tel: ${pharmPhone}` : ''}${pharmPhone && pharmEmail ? ' · ' : ''}${pharmEmail || ''}</p>` : ''}
+                        ${pharmGst || pharmDl ? `<p>${pharmGst ? `GST: ${pharmGst}` : ''}${pharmGst && pharmDl ? ' · ' : ''}${pharmDl ? `DL: ${pharmDl}` : ''}</p>` : ''}
+                        <p style="margin-top:6px;font-weight:bold">Pharmacy Sales Report — ${scopeLabel}</p>
+                      </div>
+
+                      <table class="info">
+                        <tr><td class="lbl">Period</td><td>${periodLabel}</td><td class="lbl">Printed</td><td>${printedAt}</td></tr>
+                        <tr><td class="lbl">Scope</td><td>${scopeLabel}</td><td class="lbl">Total invoices</td><td>${details.length}</td></tr>
+                        <tr><td class="lbl">Total Sales</td><td>${fmt2(todaySales.total)}</td><td class="lbl">Total Margin</td><td>${fmt2(todaySales.total_margin)}</td></tr>
+                        <tr>
+                          <td class="lbl">By Mode</td>
+                          <td colspan="3">Cash ${fmt2(todaySales.cash)} · UPI ${fmt2(todaySales.upi)} · Other ${fmt2(todaySales.other)} · Credit ${fmt2(todaySales.credit)}</td>
+                        </tr>
+                      </table>
+
+                      <h2 class="sec">Payment Summary</h2>
+                      <table class="sum">
+                        <thead><tr><th>Method</th><th>Amount</th><th>Margin</th></tr></thead>
+                        <tbody>${summaryRows}</tbody>
+                      </table>
+
+                      ${invoiceSection}
+                      ${medicineSection}
+
+                      <p class="foot">Printed ${printedAt} · ${pharmName}</p>
+                    </body></html>`
+                    setPrintPreview({ title: `Sales Report (${scopeLabel}) — ${periodLabel}`, html })
+                  }}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-indigo-200 bg-indigo-50 text-[10px] font-bold text-indigo-800 hover:bg-indigo-100"
+                >
+                  <Printer size={11} /> Print
                 </button>
               </div>
             </div>
@@ -532,6 +766,13 @@ const PharmacyDashboard = React.memo(function PharmacyDashboard() {
             )}
           </div>
         </>
+      )}
+      {printPreview && (
+        <PrintPreviewModal
+          title={printPreview.title}
+          html={printPreview.html}
+          onClose={() => setPrintPreview(null)}
+        />
       )}
 
       {dashboardTab === 'overview' ? (

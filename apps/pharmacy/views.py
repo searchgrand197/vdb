@@ -12,7 +12,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.auditlogs.services import create_audit_log
-from apps.inventory.services.stock_service import deduct_stock_fifo, get_batch_available_qty, restore_stock_for_invoice_cancel
+from apps.inventory.services.stock_service import (
+    deduct_stock_fifo,
+    get_batch_available_qty,
+    reconcile_stock_for_invoice_edit,
+    restore_stock_for_invoice_cancel,
+)
 from apps.shared.cancel_service import apply_void_if_last, is_last_pharmacy_invoice, release_pharmacy_invoice_number, void_pharmacy_sequence
 
 from apps.pharmacy.invoice_number import next_pharmacy_invoice_number
@@ -356,6 +361,19 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
             addr_obj.state = state_name
             addr_obj.save(update_fields=["line1", "city", "state", "updated_at"])
 
+        old_items = list(invoice.items.select_related("batch", "medicine").all())
+        if invoice.status == PharmacyInvoice.Status.FINALIZED:
+            try:
+                reconcile_stock_for_invoice_edit(
+                    request=request,
+                    pharmacy=invoice.pharmacy,
+                    old_items=old_items,
+                    new_rows=items_payload,
+                    reference_id=str(invoice.id),
+                )
+            except ValueError as exc:
+                raise ValidationError({"detail": str(exc)}) from exc
+
         # Replace all items
         invoice.items.all().delete()
         subtotal = Decimal("0.00")
@@ -365,6 +383,7 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
             medicine_id = row.get("medicine")
             batch_id = row.get("batch")
             qty = Decimal(str(row.get("qty", 0) or 0))
+            free_qty = Decimal(str(row.get("free_qty", 0) or 0))
             rate = Decimal(str(row.get("rate", 0) or 0))
             mrp = Decimal(str(row.get("mrp", 0) or 0))
             cgst_rate = Decimal(str(row.get("cgst_rate", 0) or 0))
@@ -380,6 +399,7 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 medicine_id=medicine_id,
                 batch_id=batch_id,
                 qty=qty,
+                free_qty=free_qty,
                 mrp=mrp,
                 rate=rate,
                 cgst_rate=cgst_rate,
@@ -413,6 +433,8 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
         invoice.sgst = total_sgst.quantize(Decimal("0.01"))
         invoice.grand_total = grand_total
         invoice.remarks = str(invoice_payload.get("remarks", invoice.remarks or ""))
+        invoice.print_html = ""
+        invoice.print_html_updated_at = None
         invoice.save(
             update_fields=[
                 "payment_method",
@@ -423,6 +445,8 @@ class PharmacyInvoiceViewSet(viewsets.ModelViewSet):
                 "sgst",
                 "grand_total",
                 "remarks",
+                "print_html",
+                "print_html_updated_at",
                 "updated_at",
             ]
         )

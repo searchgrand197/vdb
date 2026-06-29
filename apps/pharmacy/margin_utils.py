@@ -51,12 +51,20 @@ def _item_batch_no(item) -> str:
 def resolve_invoice_item_unit_cost(item):
     """
     Return per-unit purchase cost for margin, or None if unknown.
-    Falls back to purchase challan / sibling invoice lines when batch is gone.
+    Falls back to purchase challan / sibling invoice lines when:
+      - batch is gone (batch_id=None), OR
+      - batch exists but unit_cost is 0 (batch added without purchase rate).
     """
     if item.batch_id and item.batch:
         cost = item.batch.unit_cost
         if cost is not None and cost > ZERO:
             return cost
+        # batch exists but unit_cost=0 — try to recover from challan using batch_no
+        batch_no_from_batch = (item.batch.batch_no or "").strip()
+        if item.medicine_id and batch_no_from_batch:
+            challan_cost = _challan_unit_cost(item.medicine_id, batch_no_from_batch)
+            if challan_cost is not None:
+                return challan_cost
 
     snap = getattr(item, "snapshot_unit_cost", None)
     if snap is not None and snap > ZERO:

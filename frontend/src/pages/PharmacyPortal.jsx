@@ -2088,12 +2088,13 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
           medicine: String(it.medicine || ''),
           batch: String(it.batch || ''),
           qty: String(it.qty ?? '1'),
+          free_qty: String(it.free_qty ?? '0'),
           mrp: String(it.mrp ?? '0'),
           rate: String(it.rate ?? '0'),
           cgst_rate: String(it.cgst_rate ?? '0'),
           sgst_rate: String(it.sgst_rate ?? '0'),
         }))
-      : [{ medicine: '', batch: '', qty: '1', mrp: '0', rate: '0', cgst_rate: '0', sgst_rate: '0' }],
+      : [{ medicine: '', batch: '', qty: '1', free_qty: '0', mrp: '0', rate: '0', cgst_rate: '0', sgst_rate: '0' }],
   )
   const [saving, setSaving] = useState(false)
 
@@ -2150,11 +2151,15 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
   }
 
   function addItem() {
-    setItems((prev) => [...prev, { medicine: '', batch: '', qty: '1', mrp: '0', rate: '0', cgst_rate: '0', sgst_rate: '0' }])
+    setItems((prev) => [...prev, { medicine: '', batch: '', qty: '1', free_qty: '0', mrp: '0', rate: '0', cgst_rate: '0', sgst_rate: '0' }])
   }
 
   function removeItem(index) {
-    setItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== index)))
+    if (items.length <= 1) {
+      toast.error('At least one medicine is required. Cancel the receipt to remove the entire bill.')
+      return
+    }
+    setItems((prev) => prev.filter((_, i) => i !== index))
   }
 
   function handleMedicineChange(index, medicineId) {
@@ -2199,6 +2204,7 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
         medicine: row.medicine,
         batch: row.batch,
         qty: Number(row.qty || 0),
+        free_qty: Number(row.free_qty || 0),
         mrp: Number(row.mrp || 0),
         rate: Number(row.rate || 0),
         cgst_rate: Number(row.cgst_rate || 0),
@@ -2239,7 +2245,7 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
         },
         items: validItems,
       })
-      toast.success('Invoice updated')
+      toast.success('Invoice updated and inventory adjusted')
       onSaved?.()
     } catch (err) {
       toast.error(parseApiError(err, 'Failed to update invoice'))
@@ -2321,6 +2327,7 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
                   {items.map((row, idx) => {
                     const medBatches = batches.filter((b) => String(b.medicine) === String(row.medicine))
                     const line = (Number(row.qty || 0) * Number(row.rate || 0)) * (1 + (Number(row.cgst_rate || 0) + Number(row.sgst_rate || 0)) / 100)
+                    const deleteBlocked = items.length <= 1
                     return (
                       <tr key={idx}>
                         <td className="px-2 py-1 min-w-[190px]">
@@ -2342,7 +2349,18 @@ function EditSaleInvoiceModal({ invoice, onClose, onSaved }) {
                         <td className="px-2 py-1"><input type="number" min="0" step="0.01" value={row.sgst_rate} onChange={(e) => updateItem(idx, { sgst_rate: e.target.value })} className="w-16 rounded border border-slate-200 px-2 py-1 text-right" /></td>
                         <td className="px-2 py-1 text-right font-semibold">₹{Number.isFinite(line) ? line.toFixed(2) : '0.00'}</td>
                         <td className="px-2 py-1 text-right">
-                          <button type="button" onClick={() => removeItem(idx)} className="px-2 py-1 rounded border border-rose-200 bg-rose-50 text-rose-700 text-[10px] font-semibold">Del</button>
+                          <button
+                            type="button"
+                            onClick={() => removeItem(idx)}
+                            aria-disabled={deleteBlocked}
+                            className={`px-2 py-1 rounded border text-[10px] font-semibold ${
+                              deleteBlocked
+                                ? 'border-rose-100 bg-rose-50/60 text-rose-400 cursor-not-allowed opacity-60'
+                                : 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
+                            }`}
+                          >
+                            Del
+                          </button>
                         </td>
                       </tr>
                     )
